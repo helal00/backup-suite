@@ -36,7 +36,15 @@ Start with:
 - `config/rclone.conf`
 - `config/mysql-profiles/*.cnf`
 
-### 3. Install
+### 3. Make the scripts executable
+
+If the executable bits were not preserved when the project was downloaded or extracted:
+
+```bash
+chmod 755 setup.sh bin/*.sh
+```
+
+### 4. Install
 
 System-wide install:
 
@@ -50,7 +58,7 @@ User-mode install:
 ./setup.sh
 ```
 
-### 4. Start a job and watch it
+### 5. Start a job and watch it
 
 ```bash
 sudo systemctl start file-backup.service
