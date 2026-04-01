@@ -84,6 +84,37 @@ sudo /home/user/tools/backup-suite/setup.sh --refresh-config
 sudo /home/user/tools/backup-suite/setup.sh --refresh-units
 ```
 
+## Setup Script Flags
+
+Common `setup.sh` flags:
+
+- `--dry-run`
+	- preview what the setup script would do without writing changes
+
+- `--refresh-scripts`
+	- replace installed runtime scripts from the current source tree
+
+- `--refresh-config`
+	- refresh deployed config files or config symlinks from the source tree
+
+- `--refresh-units`
+	- regenerate and overwrite installed systemd service and timer units
+
+- `--yes`
+	- skip interactive confirmation prompts for overwrite operations that would otherwise ask first
+
+Example combined refresh command:
+
+```bash
+sudo /home/user/tools/backup-suite/setup.sh --refresh-scripts --refresh-units --yes
+```
+
+This means:
+
+- refresh installed scripts
+- refresh installed systemd units
+- do not stop for overwrite confirmation prompts
+
 Overwrite behavior:
 
 - existing installed files are kept by default
