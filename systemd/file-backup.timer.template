@@ -1,0 +1,10 @@
+[Unit]
+Description=Backup Suite file backup timer
+
+[Timer]
+OnCalendar=__FILE_BACKUP_ONCALENDAR__
+Persistent=true
+Unit=file-backup.service
+
+[Install]
+WantedBy=timers.target

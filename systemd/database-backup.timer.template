@@ -1,0 +1,10 @@
+[Unit]
+Description=Backup Suite database backup timer
+
+[Timer]
+OnCalendar=__DB_BACKUP_ONCALENDAR__
+Persistent=true
+Unit=database-backup.service
+
+[Install]
+WantedBy=timers.target

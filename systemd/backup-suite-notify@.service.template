@@ -1,0 +1,14 @@
+[Unit]
+Description=Backup Suite failure notification for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+__USER_GROUP_DIRECTIVES__
+Environment=BACKUP_SUITE_CONFIG_DIR=__CONFIG_DIR__
+ExecStart=__INSTALL_DIR__/bin/notify-failure.sh %i
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=backup-notify

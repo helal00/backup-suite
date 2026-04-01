@@ -1,0 +1,7 @@
+# Example MySQL client profile.
+# Replace user and password with credentials valid for your own environment.
+[client]
+host=127.0.0.1
+port=3306
+user=CHANGE_ME
+password=CHANGE_ME

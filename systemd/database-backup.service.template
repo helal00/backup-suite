@@ -1,0 +1,18 @@
+[Unit]
+Description=Backup Suite database backup
+After=network-online.target
+Wants=network-online.target
+OnFailure=backup-suite-notify@%n.service
+
+[Service]
+Type=forking
+__USER_GROUP_DIRECTIVES__
+Environment=BACKUP_SUITE_CONFIG_DIR=__CONFIG_DIR__
+RuntimeDirectory=backup-suite
+PIDFile=%t/backup-suite/database-backup.pid
+ExecStart=__INSTALL_DIR__/bin/systemd-fork-run.sh %t/backup-suite/database-backup.pid /usr/bin/flock -n __LOCK_FILE__ __INSTALL_DIR__/bin/database-backup.sh
+SuccessExitStatus=SIGTERM
+TimeoutStartSec=infinity
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=backup-db

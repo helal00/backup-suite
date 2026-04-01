@@ -1,0 +1,10 @@
+[Unit]
+Description=Backup Suite database size monitor timer
+
+[Timer]
+OnCalendar=__DB_MONITOR_ONCALENDAR__
+Persistent=true
+Unit=database-size-check.service
+
+[Install]
+WantedBy=timers.target

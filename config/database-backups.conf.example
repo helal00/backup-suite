@@ -1,0 +1,4 @@
+# enabled|site_label|database_name|mysql_profile
+# Example entries only. Replace database names and profile names for your environment.
+1|app-main|db_app_main|default
+0|shop-prod|db_shop_prod|shop

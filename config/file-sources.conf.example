@@ -1,0 +1,9 @@
+# enabled|label|source_path|destination_mode|destination_value|sync_stop_file
+# destination_mode values:
+#   same-name   -> remote uses basename(source_path)
+#   fixed       -> remote uses destination_value exactly
+#   default-root -> remote uses FILE_DEFAULT_DESTINATION_ROOT/destination_value
+# Example entries only. Replace these paths with directories from your own server.
+
+1|workspace|/srv/projects|fixed|projects/workspace|.nosync
+0|site-webroot|/var/www/example.com|fixed|sites/example.com|.nosync

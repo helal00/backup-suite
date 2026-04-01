@@ -1,0 +1,5 @@
+# Example remote definition.
+# Replace this with your own authorized rclone remote configuration.
+[gdrive]
+type = drive
+scope = drive

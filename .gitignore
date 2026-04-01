@@ -1,0 +1,11 @@
+# Runtime config copied from examples
+config/*.conf
+!config/*.conf.example
+
+# Runtime MySQL profiles
+config/mysql-profiles/*.cnf
+!config/mysql-profiles/*.cnf.example
+
+# Common local clutter
+.DS_Store
+Thumbs.db
