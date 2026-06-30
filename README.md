@@ -66,6 +66,14 @@ systemctl status file-backup.service --no-pager
 journalctl -t backup-file -f
 ```
 
+If Google Drive backup logs show `invalid_grant` or token-revoked errors, reconnect the rclone config used by Backup Suite, not a different user/default rclone config. In system mode that is usually:
+
+```bash
+sudo rclone --config /etc/backup-suite/rclone.conf config reconnect gdrive:
+```
+
+See [docs/GOOGLE_DRIVE.md](docs/GOOGLE_DRIVE.md) and [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 ## What It Does
 
 ### File backup

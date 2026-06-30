@@ -153,9 +153,28 @@ File:
 
 - `config/rclone.conf`
 
+In system mode, the runtime config path is normally:
+
+- `/etc/backup-suite/rclone.conf`
+
 In user mode, the equivalent runtime symlink is under `~/.config/backup-suite/rclone.conf`.
 
 This runtime file is a symlink back to the canonical `rclone.conf` in the suite source tree.
+
+Backup Suite always invokes rclone with:
+
+```bash
+--config "$RCLONE_CONFIG_PATH"
+```
+
+So operational tests and reconnects must use that same config path. For a system-mode Google Drive remote named `gdrive`, use:
+
+```bash
+sudo rclone --config /etc/backup-suite/rclone.conf lsd "gdrive,root_folder_id=YOUR_FOLDER_ID:"
+sudo rclone --config /etc/backup-suite/rclone.conf config reconnect gdrive:
+```
+
+Plain `sudo rclone ...` may use `/root/.config/rclone/rclone.conf` instead and can give a false pass while the service still fails.
 
 The suite is backend-agnostic. `RCLONE_REMOTE_ROOT` can point to any valid `rclone` remote path, for example:
 

@@ -57,6 +57,40 @@ For a manual run with live terminal output:
 
 By default, manual runs log to the journal. `--verbose` mirrors output to the terminal and shows aggregate `rclone` progress stats such as transferred amount, percent, speed, and ETA without the noisier per-file output. The manual stats refresh interval is 10 seconds.
 
+## Rclone Auth / Token Failures
+
+If logs show Google Drive OAuth errors such as:
+
+```text
+oauth2: "invalid_grant" "Token has been expired or revoked."
+```
+
+reconnect the exact rclone config file used by Backup Suite. In system mode the service normally uses:
+
+```text
+/etc/backup-suite/rclone.conf
+```
+
+Confirm from the active config:
+
+```bash
+sudo grep -E 'INSTALL_MODE|RCLONE_CONFIG_PATH|RCLONE_REMOTE_ROOT' /etc/backup-suite/global.conf
+```
+
+Test the same config path that the service uses:
+
+```bash
+sudo rclone --config /etc/backup-suite/rclone.conf lsd "gdrive,root_folder_id=YOUR_FOLDER_ID:"
+```
+
+Reconnect it if needed:
+
+```bash
+sudo rclone --config /etc/backup-suite/rclone.conf config reconnect gdrive:
+```
+
+Do not rely on plain `sudo rclone lsd ...` or plain `sudo rclone config reconnect gdrive:` unless `RCLONE_CONFIG_PATH` really points to root's default rclone config. The Backup Suite scripts run rclone with `--config "$RCLONE_CONFIG_PATH"`, so reconnecting the wrong config leaves the timer/service broken.
+
 ## File Backup Behavior
 
 The file backup uses one-way `rclone sync`.
