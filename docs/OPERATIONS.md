@@ -109,14 +109,18 @@ If a configured source path exists but the runtime user cannot read or traverse 
 
 The file backup can also pause itself when configured processes are active.
 
-Manual file-backup runs are serialized by an explicit state lock. The systemd unit also uses a nonblocking lock, returns overlap status without starting a second worker, and has a bounded runtime.
+Manual file-backup runs are serialized by an explicit state lock. The systemd unit also holds a nonblocking lock under the persistent state directory, returns overlap status without starting a second worker, and has a bounded runtime. It runs in the foreground as `Type=exec`, so `file-backup.sh`, every rclone process, and their descendants remain in the `file-backup.service` cgroup while `RuntimeMaxSec` remains effective.
 
 The file-backup service is limited independently of the rest of the host:
 
 - `CPUQuota=50%`, `CPUWeight=10`, `Nice=15`
 - `IOWeight=10`, `IOSchedulingClass=idle`
 - `MemoryHigh=512M`, `MemoryMax=1G`, `TasksMax=64`
-- `RuntimeMaxSec=6h` by default
+- `CPUAccounting=true`, `MemoryAccounting=true`, `IOAccounting=true`
+- `RuntimeMaxSec=6h`, `TimeoutStopSec=2min`, `KillMode=control-group`
+- `Restart=no`; the `OnFailure` notification unit also has `Restart=no`
+
+The timer uses `Persistent=true` and a 15-minute randomized delay. A missed scheduled run is recovered after boot, but concurrent and immediate failure-triggered runs are prevented by systemd state plus the persistent locks.
 
 Default rclone file-backup concurrency is `transfers=2`, `checkers=4`, and `buffer-size=16M`.
 
@@ -166,7 +170,7 @@ The recommended production path is the repository runner:
 sudo ./production-file-backup-migrate.sh
 ```
 
-The runner performs preflight tests, saves protected config/unit backups, deploys without overwriting credentials, narrows the Crypto Wallet runtime policy, configures child-project isolation and bounded resource settings, runs the report and confirmed migration in resource-limited transient units, restores the smallest eligible migrated project, verifies every restored link record, and enables the timer only on complete success. Type `APPLY LINK MIGRATION` when prompted after reviewing the generated reports. `--check` performs non-mutating source checks, while `--yes` skips the interactive phrase and should be used only after reports are already understood.
+The runner performs preflight tests, saves protected config/unit backups, deploys without overwriting credentials, narrows the Crypto Wallet runtime policy, configures child-project isolation and bounded resource settings, and runs the report and confirmed migration through the actual `file-backup.service` cgroup. It records `systemd-cgls` snapshots plus observed peak CPU, memory, I/O rates, and task count. After restore validation it deliberately runs one isolated failed sync and requires proof of exactly one notification, no surviving rclone descendants, zero service restarts, and no immediate relaunch. The timer remains disabled unless every gate passes. Type `APPLY LINK MIGRATION` when prompted after reviewing the generated reports. `--check` performs non-mutating source checks, while `--yes` skips the interactive phrase and should be used only after reports are already understood.
 
 To restore links, include `--links` on the remote-to-local operation:
 
@@ -275,6 +279,15 @@ systemctl status file-backup.service --no-pager
 systemctl status database-backup.service --no-pager
 systemctl status database-size-check.service --no-pager
 ```
+
+Inspect live cgroup containment and accounted totals:
+
+```bash
+systemd-cgls --unit file-backup.service --no-pager
+systemctl show file-backup.service -p CPUUsageNSec -p MemoryPeak -p IOReadBytes -p IOWriteBytes -p TasksCurrent -p NRestarts
+```
+
+The production migration runner retains its sampled containment/resource report under `/var/lib/backup-suite/validation/`.
 
 Journal output:
 

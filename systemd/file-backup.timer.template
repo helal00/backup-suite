@@ -4,6 +4,7 @@ Description=Backup Suite file backup timer
 [Timer]
 OnCalendar=__FILE_BACKUP_ONCALENDAR__
 Persistent=true
+RandomizedDelaySec=__FILE_BACKUP_RANDOMIZED_DELAY_SEC__
 Unit=file-backup.service
 
 [Install]

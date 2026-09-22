@@ -24,6 +24,9 @@ RESTORE_DIR=""
 RUN_ID=$(date -u '+%Y%m%dT%H%M%SZ')
 RUN_STARTED_MARKER=""
 BACKUP_DIR=""
+CONTROL_ENV_FILE="/run/backup-suite/file-backup.env"
+VALIDATION_DIR=""
+RESOURCE_REPORT=""
 
 usage() {
     cat <<'EOF'
@@ -55,6 +58,7 @@ on_exit() {
     local status=$?
 
     if [ "$CHECK_ONLY" -eq 0 ] && [ "$MIGRATION_SUCCEEDED" -ne 1 ]; then
+        rm -f "$CONTROL_ENV_FILE"
         systemctl disable --now "$TIMER_UNIT" >/dev/null 2>&1 || true
         systemctl stop "$SERVICE_UNIT" >/dev/null 2>&1 || true
         log "FAIL-SAFE: $TIMER_UNIT is disabled and $SERVICE_UNIT is stopped."
@@ -96,11 +100,13 @@ done
 required_source_files=(
     "$SOURCE_DIR/bin/common.sh"
     "$SOURCE_DIR/bin/file-backup.sh"
+    "$SOURCE_DIR/bin/file-backup-service.sh"
     "$SOURCE_DIR/bin/database-backup.sh"
     "$SOURCE_DIR/bin/database-size-check.sh"
     "$SOURCE_DIR/bin/notify-failure.sh"
     "$SOURCE_DIR/bin/systemd-fork-run.sh"
     "$SOURCE_DIR/systemd/file-backup.service.template"
+    "$SOURCE_DIR/systemd/file-backup.timer.template"
     "$SOURCE_DIR/examples/project-policies/crypto-wallets-api.backup-excludes"
     "$SOURCE_DIR/examples/project-policies/crypto-wallets-api.backup-volatile"
     "$SOURCE_DIR/tests/run.sh"
@@ -110,7 +116,7 @@ for source_file in "${required_source_files[@]}"; do
     [ -f "$source_file" ] || die "Required source file is missing: $source_file"
 done
 
-for command_name in awk chmod cp cut find flock git grep head install mktemp readlink rclone sed sha256sum sort stat systemctl systemd-analyze systemd-run tail tee wc; do
+for command_name in awk chmod cp cut find flock git grep head install mktemp readlink rclone sed sha256sum sort stat systemctl systemd-analyze systemd-cgls tail tee wc; do
     require_command "$command_name"
 done
 
@@ -152,6 +158,7 @@ log "Running the repository integration suite before deployment."
 
 BACKUP_DIR="$STATE_DIR/migration-backups/$RUN_ID"
 install -d -m 700 "$BACKUP_DIR"
+install -d -m 755 "$STATE_DIR/locks"
 cp -a "$(readlink -f "$GLOBAL_CONFIG")" "$BACKUP_DIR/global.conf"
 cp -a "$(readlink -f "$FILE_SOURCES_CONFIG")" "$BACKUP_DIR/file-sources.conf"
 if [ -f "$FILE_BACKUP_UNIT" ]; then
@@ -247,6 +254,7 @@ set_shell_config_value "$GLOBAL_CONFIG" FILE_RCLONE_BUFFER_SIZE 16M
 set_shell_config_value "$GLOBAL_CONFIG" FILE_STABILITY_INTERVAL_SECONDS 10
 set_shell_config_value "$GLOBAL_CONFIG" FILE_CHANGED_DETAIL_LIMIT 20
 set_shell_config_value "$GLOBAL_CONFIG" FILE_BACKUP_RUNTIME_MAX_SEC 6h
+set_shell_config_value "$GLOBAL_CONFIG" FILE_BACKUP_RANDOMIZED_DELAY_SEC 15m
 set_shell_config_value "$GLOBAL_CONFIG" BACKUP_SUITE_LOG_MAX_BYTES 10485760
 set_shell_config_value "$GLOBAL_CONFIG" BACKUP_SUITE_LOG_KEEP_FILES 10
 set_shell_config_value "$GLOBAL_CONFIG" NOTIFY_DURABLE_LOG_LINES 120
@@ -304,7 +312,7 @@ sed \
     -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
     -e "s|__CONFIG_DIR__|$CONFIG_DIR|g" \
     -e 's|__USER_GROUP_DIRECTIVES__||g' \
-    -e 's|__LOCK_FILE__|/run/backup-suite/file-backup.lock|g' \
+    -e "s|__LOCK_FILE__|$STATE_DIR/locks/file-backup.service.lock|g" \
     -e 's|__FILE_BACKUP_RUNTIME_MAX_SEC__|6h|g' \
     "$SOURCE_DIR/systemd/file-backup.service.template" > "$rendered_unit"
 if grep -Eq '__[A-Z0-9_]+__' "$rendered_unit"; then
@@ -313,37 +321,141 @@ fi
 install -m 644 -o 0 -g 0 "$rendered_unit" "$FILE_BACKUP_UNIT"
 rm -f "$rendered_unit"
 systemd-analyze verify "$FILE_BACKUP_UNIT"
+
+rendered_timer=$(mktemp)
+configured_file_schedule=$(bash -c '. "$1"; printf "%s" "${FILE_BACKUP_ONCALENDAR:-*:0/30}"' _ "$(readlink -f "$GLOBAL_CONFIG")")
+configured_randomized_delay=$(bash -c '. "$1"; printf "%s" "${FILE_BACKUP_RANDOMIZED_DELAY_SEC:-15m}"' _ "$(readlink -f "$GLOBAL_CONFIG")")
+sed \
+    -e "s|__FILE_BACKUP_ONCALENDAR__|$configured_file_schedule|g" \
+    -e "s|__FILE_BACKUP_RANDOMIZED_DELAY_SEC__|$configured_randomized_delay|g" \
+    "$SOURCE_DIR/systemd/file-backup.timer.template" > "$rendered_timer"
+install -m 644 -o 0 -g 0 "$rendered_timer" "$UNIT_DIR/file-backup.timer"
+rm -f "$rendered_timer"
+systemd-analyze verify "$UNIT_DIR/file-backup.timer"
 systemctl daemon-reload
 
-run_resource_limited_backup() {
-    local unit_name="$1"
-    local migration_argument="$2"
+assert_service_property() {
+    local property_name="$1"
+    local expected_value="$2"
+    local actual_value
 
-    systemd-run \
-        --quiet \
-        --unit="$unit_name" \
-        --wait \
-        --collect \
-        --setenv=BACKUP_SUITE_CONFIG_DIR="$CONFIG_DIR" \
-        --property=CPUQuota=50% \
-        --property=CPUWeight=10 \
-        --property=IOWeight=10 \
-        --property=Nice=15 \
-        --property=IOSchedulingClass=idle \
-        --property=MemoryHigh=512M \
-        --property=MemoryMax=1G \
-        --property=TasksMax=64 \
-        --property=RuntimeMaxSec=6h \
-        --property=StandardOutput=journal \
-        --property=StandardError=journal \
-        "$INSTALL_DIR/bin/file-backup.sh" --journal-only "$migration_argument"
+    actual_value=$(systemctl show "$SERVICE_UNIT" -p "$property_name" --value)
+    [ "$actual_value" = "$expected_value" ] || die "$SERVICE_UNIT property $property_name is '$actual_value'; expected '$expected_value'"
+}
+
+assert_service_property Type exec
+assert_service_property Restart no
+assert_service_property KillMode control-group
+assert_service_property CPUAccounting yes
+assert_service_property MemoryAccounting yes
+assert_service_property IOAccounting yes
+assert_service_property CPUWeight 10
+assert_service_property IOWeight 10
+assert_service_property MemoryHigh 536870912
+assert_service_property MemoryMax 1073741824
+assert_service_property TasksMax 64
+assert_service_property RuntimeMaxUSec 6h
+assert_service_property TimeoutStopUSec 2min
+[ "$(systemctl show "$SERVICE_UNIT" -p ExecStart --value)" = *"$INSTALL_DIR/bin/file-backup-service.sh"* ] || die "$SERVICE_UNIT does not use the foreground cgroup-preserving launcher"
+log "The live systemd manager accepted the file-backup cgroup, accounting, timeout, and no-restart properties."
+
+write_service_environment() {
+    local mode="$1"
+    local config_dir="${2:-$CONFIG_DIR}"
+    local temp_environment
+
+    install -d -m 755 /run/backup-suite
+    temp_environment=$(mktemp /run/backup-suite/file-backup.env.XXXXXX)
+    printf 'BACKUP_SUITE_FILE_BACKUP_MODE=%s\nBACKUP_SUITE_CONFIG_DIR=%s\n' "$mode" "$config_dir" > "$temp_environment"
+    chmod 600 "$temp_environment"
+    mv -f "$temp_environment" "$CONTROL_ENV_FILE"
+}
+
+run_file_backup_service() {
+    local label="$1"
+    local mode="$2"
+    local config_dir="${3:-$CONFIG_DIR}"
+    local expected_result="${4:-success}"
+    local active_state
+    local tasks_current
+    local tasks_peak=0
+    local cpu_current=0
+    local cpu_previous=0
+    local cpu_peak_percent=0
+    local io_read_current=0
+    local io_read_previous=0
+    local io_read_peak_bps=0
+    local io_write_current=0
+    local io_write_previous=0
+    local io_write_peak_bps=0
+    local memory_peak
+    local io_read_total
+    local io_write_total
+    local result
+
+    write_service_environment "$mode" "$config_dir"
+    systemctl reset-failed "$SERVICE_UNIT" >/dev/null 2>&1 || true
+    printf '\n[%s] started_at=%s\n' "$label" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$RESOURCE_REPORT"
+    systemctl start --no-block "$SERVICE_UNIT"
+
+    while true; do
+        active_state=$(systemctl show "$SERVICE_UNIT" -p ActiveState --value)
+        tasks_current=$(systemctl show "$SERVICE_UNIT" -p TasksCurrent --value)
+        if [[ "$tasks_current" =~ ^[0-9]+$ ]] && [ "$tasks_current" -gt "$tasks_peak" ]; then
+            tasks_peak="$tasks_current"
+        fi
+        cpu_current=$(systemctl show "$SERVICE_UNIT" -p CPUUsageNSec --value)
+        io_read_current=$(systemctl show "$SERVICE_UNIT" -p IOReadBytes --value)
+        io_write_current=$(systemctl show "$SERVICE_UNIT" -p IOWriteBytes --value)
+        if [[ "$cpu_current" =~ ^[0-9]+$ ]] && [ "$cpu_previous" -gt 0 ] && [ $(( (cpu_current - cpu_previous) / 10000000 )) -gt "$cpu_peak_percent" ]; then
+            cpu_peak_percent=$(( (cpu_current - cpu_previous) / 10000000 ))
+        fi
+        if [[ "$io_read_current" =~ ^[0-9]+$ ]] && [ "$io_read_previous" -gt 0 ] && [ $((io_read_current - io_read_previous)) -gt "$io_read_peak_bps" ]; then
+            io_read_peak_bps=$((io_read_current - io_read_previous))
+        fi
+        if [[ "$io_write_current" =~ ^[0-9]+$ ]] && [ "$io_write_previous" -gt 0 ] && [ $((io_write_current - io_write_previous)) -gt "$io_write_peak_bps" ]; then
+            io_write_peak_bps=$((io_write_current - io_write_previous))
+        fi
+        [[ "$cpu_current" =~ ^[0-9]+$ ]] && cpu_previous="$cpu_current"
+        [[ "$io_read_current" =~ ^[0-9]+$ ]] && io_read_previous="$io_read_current"
+        [[ "$io_write_current" =~ ^[0-9]+$ ]] && io_write_previous="$io_write_current"
+        if [ "$active_state" = "activating" ] || [ "$active_state" = "active" ]; then
+            systemd-cgls --unit "$SERVICE_UNIT" --no-pager >> "$RESOURCE_REPORT" 2>&1 || true
+            sleep 1
+            continue
+        fi
+        break
+    done
+
+    rm -f "$CONTROL_ENV_FILE"
+    systemctl show "$SERVICE_UNIT" \
+        -p Result -p ExecMainStatus -p CPUUsageNSec -p MemoryPeak \
+        -p IOReadBytes -p IOWriteBytes -p TasksCurrent -p NRestarts \
+        -p ControlGroup >> "$RESOURCE_REPORT"
+    printf 'TasksPeakObserved=%s\n' "$tasks_peak" >> "$RESOURCE_REPORT"
+    printf 'CPUPeakPercentObserved=%s\nIOReadPeakBytesPerSecObserved=%s\nIOWritePeakBytesPerSecObserved=%s\n' \
+        "$cpu_peak_percent" "$io_read_peak_bps" "$io_write_peak_bps" >> "$RESOURCE_REPORT"
+    result=$(systemctl show "$SERVICE_UNIT" -p Result --value)
+    memory_peak=$(systemctl show "$SERVICE_UNIT" -p MemoryPeak --value)
+    io_read_total=$(systemctl show "$SERVICE_UNIT" -p IOReadBytes --value)
+    io_write_total=$(systemctl show "$SERVICE_UNIT" -p IOWriteBytes --value)
+    log "Resource result [$label]: result=$result cpu_peak=${cpu_peak_percent}% memory_peak=${memory_peak}B io_read_peak=${io_read_peak_bps}B/s io_write_peak=${io_write_peak_bps}B/s io_read_total=${io_read_total}B io_write_total=${io_write_total}B tasks_peak=$tasks_peak; details=$RESOURCE_REPORT"
+
+    if [ "$expected_result" = "success" ]; then
+        [ "$result" = "success" ]
+    else
+        [ "$result" != "success" ]
+    fi
 }
 
 install -d -m 700 "$STATE_DIR/migration-reports"
+install -d -m 700 "$STATE_DIR/validation"
+RESOURCE_REPORT="$STATE_DIR/validation/${RUN_ID}-resource-report.txt"
+: > "$RESOURCE_REPORT"
+chmod 600 "$RESOURCE_REPORT"
 RUN_STARTED_MARKER=$(mktemp "$STATE_DIR/.migration-report-start.XXXXXX")
 log "Running the no-change production link-migration report under resource limits."
-report_unit="backup-suite-link-report-${RUN_ID,,}"
-run_resource_limited_backup "$report_unit" --link-migration-report
+run_file_backup_service "link-migration-report" link-migration-report
 
 mapfile -t report_files < <(find "$STATE_DIR/migration-reports" -maxdepth 1 -type f -name '*.txt' -newer "$RUN_STARTED_MARKER" -print | sort)
 [ ${#report_files[@]} -gt 0 ] || die "Migration report run produced no new report files"
@@ -372,8 +484,7 @@ if [ "$AUTO_CONFIRM" -ne 1 ]; then
 fi
 
 log "Applying the confirmed migration under resource limits."
-confirm_unit="backup-suite-link-confirm-${RUN_ID,,}"
-run_resource_limited_backup "$confirm_unit" --confirm-link-migration
+run_file_backup_service "confirm-link-migration" confirm-link-migration
 
 select_restore_report() {
     local report_file
@@ -445,6 +556,120 @@ case "$RESTORE_DIR" in
         ;;
 esac
 
+validate_failed_sync_isolation() {
+    local validation_config
+    local validation_state
+    local notification_marker
+    local notification_unit="backup-suite-notify@file-backup.service.service"
+    local notification_wait=0
+    local notification_count
+    local first_invocation
+    local second_invocation
+    local active_state
+    local child_pid
+
+    VALIDATION_DIR=$(mktemp -d "$STATE_DIR/validation/${RUN_ID}-failed-sync.XXXXXX")
+    chmod 700 "$VALIDATION_DIR"
+    validation_config="$VALIDATION_DIR/config"
+    validation_state="$VALIDATION_DIR/state"
+    install -d -m 700 "$validation_config" "$validation_state" "$VALIDATION_DIR/source" "$VALIDATION_DIR/fake-state"
+    printf 'validation payload\n' > "$VALIDATION_DIR/source/stable.txt"
+    : > "$validation_config/rclone.conf"
+    : > "$validation_config/database-backups.conf"
+
+    cp -a "$(readlink -f "$GLOBAL_CONFIG")" "$validation_config/global.conf"
+    cat >> "$validation_config/global.conf" <<EOF
+SYSTEM_CONFIG_DIR="$validation_config"
+SYSTEM_STATE_DIR="$validation_state"
+SYSTEM_RCLONE_CONFIG_PATH="$validation_config/rclone.conf"
+SYSTEM_RCLONE_BIN="$VALIDATION_DIR/fake-rclone.sh"
+SYSTEM_FILE_SOURCE_CONFIG_PATH="$validation_config/file-sources.conf"
+SYSTEM_DATABASE_BACKUP_CONFIG_PATH="$validation_config/database-backups.conf"
+SYSTEM_MYSQL_PROFILE_DIR="$validation_config"
+RCLONE_REMOTE_ROOT="validation:"
+INCLUDE_HOSTNAME_IN_REMOTE="0"
+FILE_PROCESS_CHECK_ENABLED="0"
+FILE_STABILITY_INTERVAL_SECONDS="0"
+FILE_RCLONE_EXTRA_FLAGS=""
+EOF
+    printf '1|failed-sync-validation|%s|fixed|validation|.nosync|single\n' "$VALIDATION_DIR/source" > "$validation_config/file-sources.conf"
+
+    cat > "$VALIDATION_DIR/fake-rclone.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+state_dir="$(cd -- "$(dirname -- "$0")" && pwd)/fake-state"
+command_name="${1:-}"
+shift || true
+printf '%s\n' "$(< /proc/self/cgroup)" >> "$state_dir/rclone-cgroups.log"
+case "$command_name" in
+    lsf)
+        if printf '%s\n' "$*" | grep -q -- '--format pst'; then
+            printf 'stable.txt|19|2026-01-01T00:00:00Z\n'
+        elif [[ "${1:-}" == /* ]]; then
+            printf 'stable.txt\n'
+        fi
+        ;;
+    sync)
+        bash -c 'exec -a rclone-validation-child sleep 300' &
+        child_pid=$!
+        printf '%s\n' "$child_pid" >> "$state_dir/child-pids"
+        printf '%s\n' "$(< "/proc/$child_pid/cgroup")" >> "$state_dir/child-cgroups.log"
+        echo 'intentional failed-sync validation' >&2
+        exit 23
+        ;;
+    delete)
+        ;;
+    *)
+        echo "unexpected validation rclone command: $command_name" >&2
+        exit 64
+        ;;
+esac
+EOF
+    chmod 700 "$VALIDATION_DIR/fake-rclone.sh"
+    notification_marker=$(mktemp "$STATE_DIR/validation/.notification-start.XXXXXX")
+    log "Running one intentional failed sync inside $SERVICE_UNIT; the configured OnFailure path should send exactly one notification."
+    run_file_backup_service "intentional-failed-sync" normal "$validation_config" failure
+
+    while [ "$notification_wait" -lt 120 ]; do
+        active_state=$(systemctl show "$notification_unit" -p ActiveState --value 2>/dev/null || true)
+        notification_count=$(find "$STATE_DIR/failures" -maxdepth 1 -type f -name '*file-backup.service.log' -newer "$notification_marker" -print 2>/dev/null | wc -l)
+        if [ "$notification_count" -ge 1 ] && [ "$active_state" != "activating" ] && [ "$active_state" != "active" ]; then
+            break
+        fi
+        sleep 1
+        notification_wait=$((notification_wait + 1))
+    done
+
+    notification_count=$(find "$STATE_DIR/failures" -maxdepth 1 -type f -name '*file-backup.service.log' -newer "$notification_marker" -print 2>/dev/null | wc -l)
+    [ "$notification_count" -eq 1 ] || die "Expected exactly one failed-sync notification record; found $notification_count"
+    [ "$(systemctl show "$notification_unit" -p Result --value)" = "success" ] || die "The single failed-sync notification did not complete successfully"
+    grep -Fq '/file-backup.service' "$VALIDATION_DIR/fake-state/rclone-cgroups.log" || die "Validation rclone did not run in the file-backup.service cgroup"
+    grep -Fq '/file-backup.service' "$VALIDATION_DIR/fake-state/child-cgroups.log" || die "Validation rclone child escaped the file-backup.service cgroup"
+
+    while IFS= read -r child_pid; do
+        if kill -0 "$child_pid" 2>/dev/null; then
+            die "Failed-sync validation left rclone child PID $child_pid running"
+        fi
+    done < "$VALIDATION_DIR/fake-state/child-pids"
+
+    [ "$(systemctl show "$SERVICE_UNIT" -p NRestarts --value)" = "0" ] || die "$SERVICE_UNIT restarted after the failed sync"
+    first_invocation=$(systemctl show "$SERVICE_UNIT" -p InvocationID --value)
+    sleep 5
+    second_invocation=$(systemctl show "$SERVICE_UNIT" -p InvocationID --value)
+    active_state=$(systemctl show "$SERVICE_UNIT" -p ActiveState --value)
+    [ "$first_invocation" = "$second_invocation" ] || die "A new backup invocation started immediately after the failed sync"
+    [ "$active_state" != "active" ] && [ "$active_state" != "activating" ] || die "$SERVICE_UNIT relaunched after the failed sync"
+
+    printf '\n[failed-sync-proof]\nnotification_records=%s\nnotification_result=success\nrclone_children_remaining=0\nservice_restarts=0\nimmediate_relaunch=0\n' \
+        "$notification_count" >> "$RESOURCE_REPORT"
+    rm -f "$notification_marker"
+    rm -rf "$VALIDATION_DIR/config" "$VALIDATION_DIR/source"
+    log "Failed-sync proof passed: one notification, no remaining rclone children, no restart, and no immediate relaunch."
+}
+
+validate_failed_sync_isolation
+systemctl reset-failed "$SERVICE_UNIT"
+
 rm -f "$RUN_STARTED_MARKER"
 RUN_STARTED_MARKER=""
 
@@ -457,3 +682,4 @@ MIGRATION_SUCCEEDED=1
 log "SUCCESS: production file backup migration completed and $TIMER_UNIT is enabled."
 log "Durable run logs: $STATE_DIR/logs"
 log "Retained failure records: $STATE_DIR/failures"
+log "Cgroup and peak resource report: $RESOURCE_REPORT"

@@ -268,20 +268,36 @@ test_overlap_prevention() {
 test_resource_unit_and_link_flags() {
     local test_root
     local rendered_unit
+    local rendered_timer
     test_root=$(mktemp -d)
     rendered_unit="$test_root/file-backup.service"
+    rendered_timer="$test_root/file-backup.timer"
     sed \
-        -e 's|__INSTALL_DIR__|/opt/backup-suite|g' \
+        -e "s|__INSTALL_DIR__|$ROOT_DIR|g" \
         -e 's|__CONFIG_DIR__|/etc/backup-suite|g' \
         -e 's|__USER_GROUP_DIRECTIVES__||g' \
-        -e 's|__LOCK_FILE__|/run/backup-suite/file-backup.lock|g' \
+        -e 's|__LOCK_FILE__|/var/lib/backup-suite/locks/file-backup.service.lock|g' \
         -e 's|__FILE_BACKUP_RUNTIME_MAX_SEC__|6h|g' \
         "$ROOT_DIR/systemd/file-backup.service.template" > "$rendered_unit"
 
-    for directive in 'CPUQuota=50%' 'CPUWeight=10' 'IOWeight=10' 'Nice=15' 'IOSchedulingClass=idle' 'MemoryHigh=512M' 'MemoryMax=1G' 'TasksMax=64' 'RuntimeMaxSec=6h' 'flock -n -E 75'; do
+    for directive in 'Type=exec' 'file-backup-service.sh' 'CPUAccounting=true' 'MemoryAccounting=true' 'IOAccounting=true' 'CPUQuota=50%' 'CPUWeight=10' 'IOWeight=10' 'Nice=15' 'IOSchedulingClass=idle' 'MemoryHigh=512M' 'MemoryMax=1G' 'TasksMax=64' 'RuntimeMaxSec=6h' 'TimeoutStopSec=2min' 'KillMode=control-group' 'Restart=no'; do
         assert_contains "$rendered_unit" "$directive"
     done
-    systemd-analyze verify "$rendered_unit" >/dev/null
+    assert_not_contains "$rendered_unit" 'Type=forking'
+    assert_not_contains "$rendered_unit" 'Type=oneshot'
+    assert_not_contains "$rendered_unit" 'systemd-fork-run.sh'
+    assert_contains "$ROOT_DIR/systemd/file-backup.timer.template" 'Persistent=true'
+    assert_contains "$ROOT_DIR/systemd/file-backup.timer.template" 'RandomizedDelaySec=__FILE_BACKUP_RANDOMIZED_DELAY_SEC__'
+    assert_contains "$ROOT_DIR/systemd/backup-suite-notify@.service.template" 'Restart=no'
+    assert_contains "$ROOT_DIR/bin/file-backup-service.sh" 'exec /usr/bin/flock'
+    assert_contains "$rendered_unit" '/var/lib/backup-suite/locks/file-backup.service.lock'
+    [ "$(grep -c '^OnFailure=backup-suite-notify@%n.service$' "$rendered_unit")" -eq 1 ] || fail_test 'file backup must have exactly one OnFailure notification target'
+    assert_not_contains "$ROOT_DIR/systemd/backup-suite-notify@.service.template" 'file-backup.service'
+    sed \
+        -e 's|__FILE_BACKUP_ONCALENDAR__|*:0/30|g' \
+        -e 's|__FILE_BACKUP_RANDOMIZED_DELAY_SEC__|15m|g' \
+        "$ROOT_DIR/systemd/file-backup.timer.template" > "$rendered_timer"
+    systemd-analyze verify "$rendered_unit" "$rendered_timer" >/dev/null
     if grep -Eq 'CPUQuota|MemoryMax|IOWeight' "$ROOT_DIR/systemd/database-backup.service.template" "$ROOT_DIR/systemd/database-size-check.service.template"; then
         fail_test 'file-backup resource controls leaked into unrelated service templates'
     fi
@@ -311,6 +327,7 @@ test_production_migration_runner_guards() {
     local report_line
     local confirm_line
     local restore_line
+    local validation_line
     local enable_line
 
     assert_contains "$runner" 'systemctl disable --now "$TIMER_UNIT"'
@@ -318,15 +335,29 @@ test_production_migration_runner_guards() {
     assert_contains "$runner" 'APPLY LINK MIGRATION'
     assert_contains "$runner" 'BACKUP_SUITE_RESTORE_MAX_BYTES'
     assert_contains "$runner" 'systemctl enable --now "$TIMER_UNIT"'
+    assert_contains "$runner" 'run_file_backup_service "link-migration-report" link-migration-report'
+    assert_contains "$runner" 'run_file_backup_service "confirm-link-migration" confirm-link-migration'
+    assert_contains "$runner" 'systemd-cgls --unit "$SERVICE_UNIT"'
+    assert_contains "$runner" 'validate_failed_sync_isolation'
+    assert_contains "$runner" 'assert_service_property CPUAccounting yes'
+    assert_contains "$runner" 'assert_service_property KillMode control-group'
+    assert_contains "$runner" 'assert_service_property Restart no'
+    assert_contains "$runner" 'Expected exactly one failed-sync notification record'
+    assert_contains "$runner" 'rclone_children_remaining=0'
+    assert_contains "$runner" 'service_restarts=0'
+    assert_contains "$runner" 'immediate_relaunch=0'
+    assert_not_contains "$runner" 'systemd-run'
 
-    report_line=$(grep -n 'run_resource_limited_backup "$report_unit" --link-migration-report' "$runner" | cut -d: -f1)
-    confirm_line=$(grep -n 'run_resource_limited_backup "$confirm_unit" --confirm-link-migration' "$runner" | cut -d: -f1)
+    report_line=$(grep -n 'run_file_backup_service "link-migration-report" link-migration-report' "$runner" | cut -d: -f1)
+    confirm_line=$(grep -n 'run_file_backup_service "confirm-link-migration" confirm-link-migration' "$runner" | cut -d: -f1)
     restore_line=$(grep -n 'Remote restore verification passed' "$runner" | cut -d: -f1)
+    validation_line=$(grep -n '^validate_failed_sync_isolation$' "$runner" | tail -1 | cut -d: -f1)
     enable_line=$(grep -n 'systemctl enable --now "$TIMER_UNIT"' "$runner" | tail -1 | cut -d: -f1)
 
     [ "$report_line" -lt "$confirm_line" ] || fail_test 'migration confirmation occurs before report'
     [ "$confirm_line" -lt "$restore_line" ] || fail_test 'restore verification occurs before confirmed migration'
-    [ "$restore_line" -lt "$enable_line" ] || fail_test 'timer enablement occurs before restore verification'
+    [ "$restore_line" -lt "$validation_line" ] || fail_test 'failed-sync containment validation occurs before restore verification'
+    [ "$validation_line" -lt "$enable_line" ] || fail_test 'timer enablement occurs before failed-sync containment validation'
     "$runner" --help >/dev/null
 }
 

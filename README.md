@@ -80,7 +80,7 @@ For the production `--copy-links` to `--links` migration, use the fail-safe root
 sudo ./production-file-backup-migrate.sh
 ```
 
-It keeps `file-backup.timer` disabled unless deployment, dry-run reporting, explicit confirmation, confirmed migration, and a bounded remote restore test all succeed.
+It keeps `file-backup.timer` disabled unless deployment, dry-run reporting, explicit confirmation, confirmed migration, a bounded remote restore, cgroup/resource-accounting validation, and a one-notification/no-restart failed-sync test all succeed.
 
 ## What It Does
 

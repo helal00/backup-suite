@@ -287,6 +287,7 @@ render_unit() {
         -e "s|__LOCK_FILE__|$lock_file|g" \
         -e "s|__FILE_BACKUP_ONCALENDAR__|$FILE_BACKUP_ONCALENDAR|g" \
         -e "s|__FILE_BACKUP_RUNTIME_MAX_SEC__|${FILE_BACKUP_RUNTIME_MAX_SEC:-6h}|g" \
+        -e "s|__FILE_BACKUP_RANDOMIZED_DELAY_SEC__|${FILE_BACKUP_RANDOMIZED_DELAY_SEC:-15m}|g" \
         -e "s|__DB_BACKUP_ONCALENDAR__|$DB_BACKUP_ONCALENDAR|g" \
         -e "s|__DB_MONITOR_ONCALENDAR__|$DB_MONITOR_ONCALENDAR|g" \
         "$template_file")
@@ -383,10 +384,12 @@ run_cmd install -d -m 755 "$INSTALL_DIR/bin"
 run_cmd install -d -m 755 "$INSTALL_DIR/systemd"
 run_cmd install -d -m 750 "$CONFIG_DIR"
 run_cmd install -d -m 755 "$STATE_DIR"
+run_cmd install -d -m 755 "$STATE_DIR/locks"
 run_cmd install -d -m 750 "$DB_LOCAL_OUTPUT_DIR"
 
 deploy_file "$READ_SOURCE_DIR/bin/common.sh" "$INSTALL_DIR/bin/common.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
 deploy_file "$READ_SOURCE_DIR/bin/systemd-fork-run.sh" "$INSTALL_DIR/bin/systemd-fork-run.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
+deploy_file "$READ_SOURCE_DIR/bin/file-backup-service.sh" "$INSTALL_DIR/bin/file-backup-service.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
 deploy_file "$READ_SOURCE_DIR/bin/file-backup.sh" "$INSTALL_DIR/bin/file-backup.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
 deploy_file "$READ_SOURCE_DIR/bin/database-backup.sh" "$INSTALL_DIR/bin/database-backup.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
 deploy_file "$READ_SOURCE_DIR/bin/database-size-check.sh" "$INSTALL_DIR/bin/database-size-check.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
@@ -426,12 +429,12 @@ if is_enabled_value_local "${INSTALL_SYSTEMD_UNITS:-1}"; then
     echo "Installing systemd units"
     run_cmd install -d -m 755 "$SYSTEMD_UNIT_DIR"
 
-    file_lock="%t/backup-suite-file-backup.lock"
+    file_lock="$STATE_DIR/locks/file-backup.service.lock"
     db_lock="%t/backup-suite-database-backup.lock"
     monitor_lock="%t/backup-suite-database-monitor.lock"
 
     if [ "$EFFECTIVE_INSTALL_MODE" = "system" ]; then
-        file_lock="/run/backup-suite/file-backup.lock"
+        file_lock="$STATE_DIR/locks/file-backup.service.lock"
         db_lock="/run/backup-suite/database-backup.lock"
         monitor_lock="/run/backup-suite/database-monitor.lock"
     fi

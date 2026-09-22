@@ -5,16 +5,22 @@ Wants=network-online.target
 OnFailure=backup-suite-notify@%n.service
 
 [Service]
-Type=forking
+Type=exec
 __USER_GROUP_DIRECTIVES__
 Environment=BACKUP_SUITE_CONFIG_DIR=__CONFIG_DIR__
+Environment=BACKUP_SUITE_FILE_BACKUP_MODE=normal
+EnvironmentFile=-/run/backup-suite/file-backup.env
 RuntimeDirectory=backup-suite
-PIDFile=%t/backup-suite/file-backup.pid
-ExecStart=__INSTALL_DIR__/bin/systemd-fork-run.sh %t/backup-suite/file-backup.pid /usr/bin/flock -n -E 75 __LOCK_FILE__ __INSTALL_DIR__/bin/file-backup.sh
+ExecStart=__INSTALL_DIR__/bin/file-backup-service.sh __LOCK_FILE__
 SuccessExitStatus=SIGTERM 75
-TimeoutStartSec=30
+Restart=no
+TimeoutStartSec=infinity
+TimeoutStopSec=2min
 RuntimeMaxSec=__FILE_BACKUP_RUNTIME_MAX_SEC__
 KillMode=control-group
+CPUAccounting=true
+MemoryAccounting=true
+IOAccounting=true
 CPUQuota=50%
 CPUWeight=10
 IOWeight=10
