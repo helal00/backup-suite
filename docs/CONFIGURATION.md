@@ -26,6 +26,8 @@ Controls:
 - optional backend-specific extra `rclone` flags
 - file backup retention and schedule
 - project-level exclude filename for runtime-generated files you do not want backed up
+- project-level volatile filename for files that may be preserved and retried after observed changes
+- file-backup concurrency, stability retry, bounded reporting, and runtime limits
 - configurable process patterns that can pause file backup when matched
 - file backup heartbeat interval for long journal-visible phases
 - database backup retention and schedule
@@ -45,7 +47,7 @@ In user mode, the equivalent runtime symlink is under `~/.config/backup-suite/fi
 Format:
 
 ```text
-enabled|label|source_path|destination_mode|destination_value|sync_stop_file
+enabled|label|source_path|destination_mode|destination_value|sync_stop_file|isolation_mode
 ```
 
 `destination_mode` values:
@@ -57,13 +59,20 @@ enabled|label|source_path|destination_mode|destination_value|sync_stop_file
 Examples:
 
 ```text
-1|workspace-projects|/home/user/php-projects-lv|fixed|projects/php-projects-lv|.nosync
-1|web10-native|/var/www/clients/client0/web10/web|fixed|sites/web10|.nosync
+1|workspace-projects|/home/user/php-projects-lv|fixed|projects/php-projects-lv|.nosync|children
+1|web10-native|/var/www/clients/client0/web10/web|fixed|sites/web10|.nosync|single
 ```
 
 Whole-source stop behavior:
 
 - if `sync_stop_file` exists at the source root, that source is skipped entirely
+
+Isolation behavior:
+
+- `single` protects the configured source as one backup unit
+- `children` treats every immediate child directory as an independent project and appends its directory name to the remote destination
+- a failed child cannot prevent other children from being attempted
+- archive-retention deletion is skipped for the whole run if any child fails
 
 Project-level exclude behavior:
 
@@ -99,6 +108,39 @@ node_modules/**
 ```
 
 With that file in place, the suite can still back up the larger source tree while excluding runtime-generated or rebuildable content only for that project.
+
+Do not place credentials, key backups, recovery archives, or unique configuration in `.backup-excludes` merely because they live below a runtime directory. Exclude only reproducible caches, downloads, logs, browser profiles, and service/database trees that have a separate snapshot or restore procedure.
+
+### Changing-file classification
+
+`FILE_VOLATILE_FILENAME` defaults to `.backup-volatile`. Its syntax and recursive scoping match `.backup-excludes`, but its meaning is different:
+
+- volatile paths are attempted normally first
+- after a failed attempt, Backup Suite waits `FILE_STABILITY_INTERVAL_SECONDS` and retries the complete project
+- only paths observed changing during that interval and matching `.backup-volatile` may be preserved remotely and skipped for the final attempt
+- the run reports `completed-with-skips`, a `skipped_changed` count, and at most `FILE_CHANGED_DETAIL_LIMIT` path details
+- skipped paths are retried automatically on the next run
+- an unclassified changing file continues to fail its project; it is never silently skipped
+
+Live database files and wallet stores should still have an application-consistent snapshot/export policy. Volatile classification is a bounded availability fallback, not a database backup format.
+
+### Symlinks and migration
+
+Backup Suite uses rclone `--links`. It does not follow link targets. Relative, absolute, dangling, and directory symlinks are represented remotely as `.rclonelink` records and are recreated when restored with `rclone --links`.
+
+For a populated destination that was previously created with `--copy-links`, the first run is gated. Generate and review reports while the timer remains disabled:
+
+```bash
+/opt/backup-suite/bin/file-backup.sh --verbose --link-migration-report
+```
+
+The reports are stored below the configured state directory in `migration-reports/`. No remote changes occur in report mode. After reviewing destination-only candidates, apply the migration explicitly:
+
+```bash
+/opt/backup-suite/bin/file-backup.sh --verbose --confirm-link-migration
+```
+
+Confirmation is accepted only when a prior report exists. Changed and destination-only objects are retained below `deleted_files/<timestamp>/...` through rclone `--backup-dir`.
 
 ### Database backup config
 

@@ -82,6 +82,9 @@ See [docs/GOOGLE_DRIVE.md](docs/GOOGLE_DRIVE.md) and [docs/OPERATIONS.md](docs/O
 - treats source as authoritative
 - archives destination-only deleted files into `deleted_files`
 - supports multiple file sources and per-project excludes
+- stores symlinks as restorable `.rclonelink` records without following their targets
+- isolates immediate child projects when configured, with preserved prior remote versions
+- retries changing files and only skips explicitly classified volatile paths with bounded reporting
 - emits periodic journal heartbeat lines during long listing and sync phases
 
 ### Database backup

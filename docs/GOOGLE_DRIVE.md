@@ -51,3 +51,9 @@ Token lifetime notes:
 - in system mode, reconnect the Backup Suite config path, for example `sudo rclone --config /etc/backup-suite/rclone.conf config reconnect gdrive:`
 
 - reconnecting updates the stored token in `rclone.conf`; there is no supported setting in Backup Suite or `rclone` to make Google keep the same access token valid for a longer time
+
+## Client-side encryption
+
+A direct Drive destination such as `gdrive,root_folder_id=...:` uses the Drive backend directly. Google encrypts stored data as a provider, but filenames and contents are not protected by rclone client-side encryption. A client-side encrypted layout uses a separate rclone `crypt` remote whose `remote` points at the Drive remote.
+
+Audit only the remote topology (`type`, redacted upstream `remote`, and filename/directory encryption modes); never print passwords, tokens, or client secrets into logs or reports. If durable credentials, wallet keys, or recovery material are in scope, validate a `crypt` destination and a test restore before relying on the remote as the encrypted-copy policy.

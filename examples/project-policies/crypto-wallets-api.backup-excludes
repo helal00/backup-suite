@@ -1,0 +1,50 @@
+# Mutable or reproducible runtime artifacts. Durable credentials, wallet keys,
+# recovery material, project configuration, and backed-up systemd units remain included.
+
+# Downloaded/extracted executables and caches.
+.runtime/downloads/**
+.runtime/bitcoin-31.1/**
+.runtime/litecoin-0.21.5.8/**
+.runtime/litecoin-0.21.5.8-x86_64-linux-gnu.tar.gz
+.runtime/npm-cache/**
+
+# Disposable browser profiles and generated browser captures.
+.runtime/console-browser/**
+.runtime/passkey-browser/**
+.runtime/webview-style-browser/**
+.runtime/webview-styled.png
+
+# Rebuildable Tron image/root filesystem plus live node databases and logs.
+.runtime/tron/rootfs/**
+.runtime/tron/oci/**
+.runtime/tron/node/output-directory/**
+.runtime/tron/node/logs/**
+
+# Rebuildable Bitcoin/Litecoin chain state. Wallet directories and node config stay included.
+.runtime/node/regtest/blocks/**
+.runtime/node/regtest/chainstate/**
+.runtime/node/regtest/indexes/**
+.runtime/node/regtest/.cookie
+.runtime/node/regtest/.lock
+.runtime/node/regtest/banlist.json
+.runtime/node/regtest/bitcoind.pid
+.runtime/node/regtest/debug.log
+.runtime/node/regtest/fee_estimates.dat
+.runtime/node/regtest/mempool.dat
+.runtime/node/regtest/peers.dat
+.runtime/node-launch.log
+.runtime/node.pid
+
+.runtime/litecoin/regtest/blocks/**
+.runtime/litecoin/regtest/chainstate/**
+.runtime/litecoin/regtest/indexes/**
+.runtime/litecoin/regtest/.cookie
+.runtime/litecoin/regtest/.lock
+.runtime/litecoin/regtest/banlist.dat
+.runtime/litecoin/regtest/litecoind.pid
+.runtime/litecoin/regtest/debug.log
+.runtime/litecoin/regtest/fee_estimates.dat
+.runtime/litecoin/regtest/mempool.dat
+.runtime/litecoin/regtest/peers.dat
+.runtime/litecoin/launch.log
+.runtime/litecoin/litecoind.pid.local

@@ -15,6 +15,8 @@ GLOBAL_CONFIG_FILE="$BACKUP_SUITE_CONFIG_DIR/global.conf"
 
 BACKUP_SUITE_LOG_MODE="${BACKUP_SUITE_LOG_MODE:-journal}"
 BACKUP_SUITE_RCLONE_VERBOSE="${BACKUP_SUITE_RCLONE_VERBOSE:-0}"
+BACKUP_SUITE_LINK_MIGRATION_REPORT="${BACKUP_SUITE_LINK_MIGRATION_REPORT:-0}"
+BACKUP_SUITE_CONFIRM_LINK_MIGRATION="${BACKUP_SUITE_CONFIRM_LINK_MIGRATION:-0}"
 
 if [ -z "${HOME:-}" ]; then
     HOME=$(getent passwd "$(id -u)" | cut -d: -f6)
@@ -124,13 +126,33 @@ parse_standard_runtime_args() {
                 BACKUP_SUITE_LOG_MODE="journal"
                 BACKUP_SUITE_RCLONE_VERBOSE=0
                 ;;
+            --link-migration-report)
+                if [ "${BACKUP_SUITE_RUNTIME_SCOPE:-}" != "file-backup" ]; then
+                    echo "Unknown option: $1" >&2
+                    exit 1
+                fi
+                BACKUP_SUITE_LINK_MIGRATION_REPORT=1
+                ;;
+            --confirm-link-migration)
+                if [ "${BACKUP_SUITE_RUNTIME_SCOPE:-}" != "file-backup" ]; then
+                    echo "Unknown option: $1" >&2
+                    exit 1
+                fi
+                BACKUP_SUITE_CONFIRM_LINK_MIGRATION=1
+                ;;
             -h|--help)
                 cat <<'EOF'
 Supported runtime options:
-    --verbose       show live console output for manual runs with aggregate rclone progress stats
+  --verbose       show live console output with aggregate rclone progress stats
   --journal-only  force journal-only logging
   -h, --help      show this help
 EOF
+                if [ "${BACKUP_SUITE_RUNTIME_SCOPE:-}" = "file-backup" ]; then
+                    cat <<'EOF'
+  --link-migration-report   write dry-run reports and make no remote changes
+  --confirm-link-migration  apply a previously reported --links migration
+EOF
+                fi
                 exit 0
                 ;;
             *)

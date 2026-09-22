@@ -1,0 +1,7 @@
+# Live wallet databases are durable but may change during a file backup.
+# Backup Suite retries them normally, and only preserves/skips a path for one run
+# when two failed attempts coincide with an observed change. They are retried next run.
+.runtime/node/regtest/wallets/**/*.dat
+.runtime/node/regtest/wallets/**/*.dat-journal
+.runtime/litecoin/regtest/wallets/**/*.dat
+.runtime/litecoin/regtest/wallets/**/*.dat-journal

@@ -286,6 +286,7 @@ render_unit() {
         -e "s|__USER_GROUP_DIRECTIVES__||g" \
         -e "s|__LOCK_FILE__|$lock_file|g" \
         -e "s|__FILE_BACKUP_ONCALENDAR__|$FILE_BACKUP_ONCALENDAR|g" \
+        -e "s|__FILE_BACKUP_RUNTIME_MAX_SEC__|${FILE_BACKUP_RUNTIME_MAX_SEC:-6h}|g" \
         -e "s|__DB_BACKUP_ONCALENDAR__|$DB_BACKUP_ONCALENDAR|g" \
         -e "s|__DB_MONITOR_ONCALENDAR__|$DB_MONITOR_ONCALENDAR|g" \
         "$template_file")

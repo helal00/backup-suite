@@ -10,9 +10,19 @@ __USER_GROUP_DIRECTIVES__
 Environment=BACKUP_SUITE_CONFIG_DIR=__CONFIG_DIR__
 RuntimeDirectory=backup-suite
 PIDFile=%t/backup-suite/file-backup.pid
-ExecStart=__INSTALL_DIR__/bin/systemd-fork-run.sh %t/backup-suite/file-backup.pid /usr/bin/flock -n __LOCK_FILE__ __INSTALL_DIR__/bin/file-backup.sh
-SuccessExitStatus=SIGTERM
-TimeoutStartSec=infinity
+ExecStart=__INSTALL_DIR__/bin/systemd-fork-run.sh %t/backup-suite/file-backup.pid /usr/bin/flock -n -E 75 __LOCK_FILE__ __INSTALL_DIR__/bin/file-backup.sh
+SuccessExitStatus=SIGTERM 75
+TimeoutStartSec=30
+RuntimeMaxSec=__FILE_BACKUP_RUNTIME_MAX_SEC__
+KillMode=control-group
+CPUQuota=50%
+CPUWeight=10
+IOWeight=10
+Nice=15
+IOSchedulingClass=idle
+MemoryHigh=512M
+MemoryMax=1G
+TasksMax=64
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=backup-file

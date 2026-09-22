@@ -93,22 +93,32 @@ Do not rely on plain `sudo rclone lsd ...` or plain `sudo rclone config reconnec
 
 ## File Backup Behavior
 
-The file backup uses one-way `rclone sync`.
+The file backup uses one-way `rclone sync --links --backup-dir`.
 
 This means:
 
 - changes in source are copied to destination
 - files deleted from source are removed from destination
 - destination-only drift is removed on the next run
-- destination-only deleted files are first moved into `deleted_files`
-- changed files are overwritten in place instead of being archived
+- destination-only and replaced remote files are retained under timestamped `deleted_files` attempt directories
 - archived files older than the file retention period are deleted permanently
+- source symlinks are stored as `.rclonelink` records instead of being followed
+- rclone source errors retain its no-delete safety behavior
 
 If a configured source path exists but the runtime user cannot read or traverse it, the run logs an explicit error for that source and the overall run is marked failed.
 
 The file backup can also pause itself when configured processes are active.
 
-Manual and timer runs are also serialized by a shared suite lock, so no second backup-suite script starts while any other backup-suite script is already active.
+Manual file-backup runs are serialized by an explicit state lock. The systemd unit also uses a nonblocking lock, returns overlap status without starting a second worker, and has a bounded runtime.
+
+The file-backup service is limited independently of the rest of the host:
+
+- `CPUQuota=50%`, `CPUWeight=10`, `Nice=15`
+- `IOWeight=10`, `IOSchedulingClass=idle`
+- `MemoryHigh=512M`, `MemoryMax=1G`, `TasksMax=64`
+- `RuntimeMaxSec=6h` by default
+
+Default rclone file-backup concurrency is `transfers=2`, `checkers=4`, and `buffer-size=16M`.
 
 Relevant global config settings:
 
@@ -135,6 +145,28 @@ FILE_PROCESS_CHECK_PATTERNS="vscode-server|phpstorm|node /srv/watch-task"
 By default, the suite keeps this check enabled and scoped to the current runtime user only.
 
 This is source-to-destination only. Nothing from the destination is written back into source.
+
+## Durable Sources Versus Mutable Service State
+
+The file backup is for durable source, configuration, credentials, key/recovery material, and other files that are safe to copy from the filesystem. Mutable databases and live service state need application-consistent exports or snapshots.
+
+- keep durable credentials, wallet keys, recovery archives, and configuration in the encrypted durable backup unless a separately verified encrypted policy covers them
+- exclude reproducible downloads, binaries, caches, browser profiles, generated logs, chain databases, and container/root filesystem trees
+- back up MySQL/MariaDB through the database backup job rather than live data files
+- export or snapshot live wallet/node databases with the owning service quiesced or through its supported backup mechanism
+- document the restore procedure for every separately snapshotted service before excluding its live database tree
+
+## Link Migration Runbook
+
+Keep `file-backup.timer` disabled. Run `--link-migration-report`, inspect every report and restore a representative report-mode copy in a test location. Then run `--confirm-link-migration`. Only enable the timer after the confirmed run and symlink restore tests pass.
+
+To restore links, include `--links` on the remote-to-local operation:
+
+```bash
+rclone copy --config /etc/backup-suite/rclone.conf --links REMOTE:PATH /restore/path
+```
+
+Without `--links`, `.rclonelink` records are not recreated as symlinks.
 
 ## Database Restore Points
 

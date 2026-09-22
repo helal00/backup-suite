@@ -115,6 +115,8 @@ This means:
 - refresh installed systemd units
 - do not stop for overwrite confirmation prompts
 
+For the `--copy-links` to `--links` migration, keep `file-backup.timer` disabled while refreshing scripts/units and while running the migration dry-run and restore tests. Refreshing units does not enable a disabled timer. Enable it only after the explicit confirmed migration succeeds.
+
 Overwrite behavior:
 
 - existing installed files are kept by default
