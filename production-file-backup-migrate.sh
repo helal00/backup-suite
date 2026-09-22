@@ -57,6 +57,17 @@ require_command() {
 on_exit() {
     local status=$?
 
+    if [ -n "$VALIDATION_DIR" ]; then
+        case "$VALIDATION_DIR" in
+            "$STATE_DIR"/validation/*)
+                rm -rf "$VALIDATION_DIR/config"
+                ;;
+            *)
+                log "Refusing to clean unexpected validation directory: $VALIDATION_DIR" >&2
+                ;;
+        esac
+    fi
+
     if [ "$CHECK_ONLY" -eq 0 ] && [ "$MIGRATION_SUCCEEDED" -ne 1 ]; then
         rm -f "$CONTROL_ENV_FILE"
         systemctl disable --now "$TIMER_UNIT" >/dev/null 2>&1 || true
