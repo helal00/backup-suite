@@ -306,6 +306,30 @@ test_crypto_wallet_policy() {
     assert_contains "$volatile" '.runtime/node/regtest/wallets/**/*.dat'
 }
 
+test_production_migration_runner_guards() {
+    local runner="$ROOT_DIR/production-file-backup-migrate.sh"
+    local report_line
+    local confirm_line
+    local restore_line
+    local enable_line
+
+    assert_contains "$runner" 'systemctl disable --now "$TIMER_UNIT"'
+    assert_contains "$runner" 'trap on_exit EXIT'
+    assert_contains "$runner" 'APPLY LINK MIGRATION'
+    assert_contains "$runner" 'BACKUP_SUITE_RESTORE_MAX_BYTES'
+    assert_contains "$runner" 'systemctl enable --now "$TIMER_UNIT"'
+
+    report_line=$(grep -n 'run_resource_limited_backup "$report_unit" --link-migration-report' "$runner" | cut -d: -f1)
+    confirm_line=$(grep -n 'run_resource_limited_backup "$confirm_unit" --confirm-link-migration' "$runner" | cut -d: -f1)
+    restore_line=$(grep -n 'Remote restore verification passed' "$runner" | cut -d: -f1)
+    enable_line=$(grep -n 'systemctl enable --now "$TIMER_UNIT"' "$runner" | tail -1 | cut -d: -f1)
+
+    [ "$report_line" -lt "$confirm_line" ] || fail_test 'migration confirmation occurs before report'
+    [ "$confirm_line" -lt "$restore_line" ] || fail_test 'restore verification occurs before confirmed migration'
+    [ "$restore_line" -lt "$enable_line" ] || fail_test 'timer enablement occurs before restore verification'
+    "$runner" --help >/dev/null
+}
+
 run_test() {
     local name="$1"
     shift
@@ -335,6 +359,7 @@ run_test 'overlap prevention' test_overlap_prevention
 run_test 'durable failure history and ntfy correlation' test_durable_failure_history
 run_test 'resource unit generation and link flags' test_resource_unit_and_link_flags
 run_test 'crypto wallet durable/volatile policy' test_crypto_wallet_policy
+run_test 'production migration runner safety gates' test_production_migration_runner_guards
 
 echo "Tests: passed=$PASS_COUNT failed=$FAIL_COUNT"
 [ "$FAIL_COUNT" -eq 0 ]

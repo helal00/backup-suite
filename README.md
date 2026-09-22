@@ -74,6 +74,14 @@ sudo rclone --config /etc/backup-suite/rclone.conf config reconnect gdrive:
 
 See [docs/GOOGLE_DRIVE.md](docs/GOOGLE_DRIVE.md) and [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
+For the production `--copy-links` to `--links` migration, use the fail-safe root runner after reviewing the operations guide:
+
+```bash
+sudo ./production-file-backup-migrate.sh
+```
+
+It keeps `file-backup.timer` disabled unless deployment, dry-run reporting, explicit confirmation, confirmed migration, and a bounded remote restore test all succeed.
+
 ## What It Does
 
 ### File backup

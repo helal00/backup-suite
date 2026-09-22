@@ -160,6 +160,14 @@ The file backup is for durable source, configuration, credentials, key/recovery 
 
 Keep `file-backup.timer` disabled. Run `--link-migration-report`, inspect every report and restore a representative report-mode copy in a test location. Then run `--confirm-link-migration`. Only enable the timer after the confirmed run and symlink restore tests pass.
 
+The recommended production path is the repository runner:
+
+```bash
+sudo ./production-file-backup-migrate.sh
+```
+
+The runner performs preflight tests, saves protected config/unit backups, deploys without overwriting credentials, narrows the Crypto Wallet runtime policy, configures child-project isolation and bounded resource settings, runs the report and confirmed migration in resource-limited transient units, restores the smallest eligible migrated project, verifies every restored link record, and enables the timer only on complete success. Type `APPLY LINK MIGRATION` when prompted after reviewing the generated reports. `--check` performs non-mutating source checks, while `--yes` skips the interactive phrase and should be used only after reports are already understood.
+
 To restore links, include `--links` on the remote-to-local operation:
 
 ```bash
