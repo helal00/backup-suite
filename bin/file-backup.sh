@@ -10,6 +10,7 @@ BACKUP_SUITE_RUNTIME_SCOPE="file-backup"
 parse_standard_runtime_args "$@"
 setup_journal_logging "backup-file"
 load_global_config
+setup_durable_logging "backup-file"
 acquire_backup_lock "file-backup" "Backup Suite file backup"
 
 require_rclone_bin

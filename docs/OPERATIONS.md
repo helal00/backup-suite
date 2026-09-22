@@ -276,6 +276,17 @@ journalctl -t backup-db -f
 journalctl -t backup-db-monitor -f
 ```
 
+Bounded durable history is also kept below the configured state directory:
+
+```text
+/var/lib/backup-suite/logs/backup-file.log
+/var/lib/backup-suite/logs/backup-db.log
+/var/lib/backup-suite/logs/backup-db-monitor.log
+/var/lib/backup-suite/failures/
+```
+
+The `failures/` records are created before ntfy delivery, so a network or notification failure does not erase the local diagnostic record.
+
 ## ISPConfig Notes
 
 This suite does not assume the stock Linux `backup` account has enough permission to read ISPConfig site trees.

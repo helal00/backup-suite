@@ -9,6 +9,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 parse_standard_runtime_args "$@"
 setup_journal_logging "backup-db"
 load_global_config
+setup_durable_logging "backup-db"
 acquire_backup_lock "backup-suite" "backup-suite"
 
 require_command mysqldump

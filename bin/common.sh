@@ -211,6 +211,50 @@ setup_journal_logging() {
     esac
 }
 
+setup_durable_logging() {
+    local identifier="$1"
+    local log_dir
+    local log_file
+    local max_bytes="${BACKUP_SUITE_LOG_MAX_BYTES:-10485760}"
+    local keep_files="${BACKUP_SUITE_LOG_KEEP_FILES:-10}"
+    local current_bytes=0
+    local rotation_count
+    local index
+
+    [[ "$max_bytes" =~ ^[0-9]+$ ]] || fail "BACKUP_SUITE_LOG_MAX_BYTES must be a non-negative integer"
+    [[ "$keep_files" =~ ^[0-9]+$ ]] || fail "BACKUP_SUITE_LOG_KEEP_FILES must be a positive integer"
+    [ "$keep_files" -gt 0 ] || fail "BACKUP_SUITE_LOG_KEEP_FILES must be greater than zero"
+
+    log_dir=$(join_path "$STATE_DIR" "logs")
+    log_file=$(join_path "$log_dir" "${identifier}.log")
+    mkdir -p "$log_dir"
+    chmod 750 "$log_dir"
+
+    if [ -f "$log_file" ]; then
+        current_bytes=$(wc -c < "$log_file")
+    fi
+
+    if [ "$max_bytes" -gt 0 ] && [ "$current_bytes" -ge "$max_bytes" ]; then
+        rotation_count=$((keep_files - 1))
+        if [ "$rotation_count" -eq 0 ]; then
+            : > "$log_file"
+        else
+            rm -f "${log_file}.${rotation_count}"
+            for ((index=rotation_count - 1; index>=1; index--)); do
+                if [ -f "${log_file}.${index}" ]; then
+                    mv "${log_file}.${index}" "${log_file}.$((index + 1))"
+                fi
+            done
+            mv "$log_file" "${log_file}.1"
+        fi
+    fi
+
+    touch "$log_file"
+    chmod 640 "$log_file"
+    exec > >(tee -a "$log_file") 2>&1
+    echo "Durable log: $log_file"
+}
+
 load_global_config() {
     require_file "$GLOBAL_CONFIG_FILE"
     # shellcheck source=/dev/null

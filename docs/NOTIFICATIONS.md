@@ -10,6 +10,8 @@ NOTIFY_NTFY_TOPIC_URL="https://ntfy.sh/your-long-random-topic"
 NOTIFY_NTFY_TITLE_PREFIX="Backup Suite"
 NOTIFY_NTFY_PRIORITY="high"
 NOTIFY_JOURNAL_LINES="40"
+NOTIFY_DURABLE_LOG_LINES="120"
+NOTIFY_FAILURE_LOG_KEEP_FILES="100"
 ```
 
 How it works:
@@ -17,7 +19,11 @@ How it works:
 - a backup service exits with a real failure
 - `systemd` triggers `backup-suite-notify@.service`
 - the notifier reads recent `journalctl` lines for the failed unit
+- every backup/monitor run is also appended to a bounded durable log under the configured state directory (`logs/`)
+- the notifier records a timestamped local failure snapshot under the state directory (`failures/`)
 - the notifier sends those details to your configured `ntfy` topic
+
+System-mode defaults retain the local history under `/var/lib/backup-suite/logs/` and `/var/lib/backup-suite/failures/`. Logs rotate at `BACKUP_SUITE_LOG_MAX_BYTES`, retain `BACKUP_SUITE_LOG_KEEP_FILES` files per process, and retain the newest `NOTIFY_FAILURE_LOG_KEEP_FILES` failure snapshots. An ntfy message includes both the recent journal and durable-log tail plus the local snapshot path.
 
 How you receive it on mobile or desktop:
 

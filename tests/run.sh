@@ -167,11 +167,47 @@ test_changing_file_policy() {
     assert_contains "$output_file" 'outcome=completed-with-skips'
     assert_contains "$output_file" 'skipped_changed=1'
     assert_contains "$output_file" 'Skipped changed path: volatile.log'
+    assert_contains "$test_root/state/logs/backup-file.log" 'outcome=completed-with-skips'
     assert_contains "$test_root/fake/commands.log" '--links'
     assert_contains "$test_root/fake/commands.log" '--transfers 2'
     assert_contains "$test_root/fake/commands.log" '--checkers 4'
     assert_contains "$test_root/fake/commands.log" '--buffer-size 16M'
     assert_not_contains "$test_root/fake/commands.log" ' -L '
+    rm -rf "$test_root"
+}
+
+test_durable_failure_history() {
+    local test_root
+    local output_file
+    local failure_record
+    test_root=$(mktemp -d)
+    output_file="$test_root/output.log"
+    mkdir -p "$test_root/bin" "$test_root/state/logs"
+    write_test_config "$test_root" rclone 'fake:'
+    cat >> "$test_root/config/global.conf" <<'EOF'
+NOTIFY_FAILURES_ENABLED="1"
+NOTIFY_NTFY_TOPIC_URL="https://ntfy.invalid/test-topic"
+NOTIFY_NTFY_TITLE_PREFIX="Backup Suite Test"
+NOTIFY_NTFY_PRIORITY="high"
+NOTIFY_JOURNAL_LINES="5"
+NOTIFY_DURABLE_LOG_LINES="20"
+NOTIFY_FAILURE_LOG_KEEP_FILES="3"
+EOF
+    printf 'historic backup failure detail\n' > "$test_root/state/logs/backup-file.log"
+    ln -s "$ROOT_DIR/tests/fixtures/fake-curl.sh" "$test_root/bin/curl"
+
+    HOME="$test_root/home" \
+        PATH="$test_root/bin:$PATH" \
+        FAKE_CURL_LOG="$test_root/curl.log" \
+        BACKUP_SUITE_CONFIG_DIR="$test_root/config" \
+        "$ROOT_DIR/bin/notify-failure.sh" file-backup.service > "$output_file" 2>&1
+
+    failure_record=$(find "$test_root/state/failures" -type f -name '*file-backup.service.log' -print -quit)
+    assert_file "$failure_record"
+    assert_contains "$failure_record" 'Failed unit: file-backup.service'
+    assert_contains "$failure_record" 'historic backup failure detail'
+    assert_contains "$output_file" 'Failure record retained at:'
+    assert_contains "$test_root/curl.log" 'curl invoked'
     rm -rf "$test_root"
 }
 
@@ -289,13 +325,14 @@ if [ "${1:-}" = "--single" ]; then
     exit $?
 fi
 
-chmod 755 "$ROOT_DIR/tests/fixtures/fake-rclone.sh"
+chmod 755 "$ROOT_DIR/tests/fixtures/fake-rclone.sh" "$ROOT_DIR/tests/fixtures/fake-curl.sh"
 
 run_test 'symlink round-trip restore' test_symlink_round_trip
 run_test 'safe link migration gate and restore' test_link_migration_gate_and_restore
 run_test 'changing-file retry and bounded skip' test_changing_file_policy
 run_test 'project isolation and no delete on error' test_project_isolation_and_no_delete_on_error
 run_test 'overlap prevention' test_overlap_prevention
+run_test 'durable failure history and ntfy correlation' test_durable_failure_history
 run_test 'resource unit generation and link flags' test_resource_unit_and_link_flags
 run_test 'crypto wallet durable/volatile policy' test_crypto_wallet_policy
 
