@@ -17,6 +17,9 @@ require_rclone_bin
 require_file "$RCLONE_CONFIG_PATH"
 require_file "$FILE_SOURCE_CONFIG_PATH"
 require_command sha256sum
+if [ -n "${BACKUP_SUITE_PROJECT_FILTER_FILE:-}" ]; then
+    require_file "$BACKUP_SUITE_PROJECT_FILTER_FILE"
+fi
 
 run_started_at=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 archive_timestamp=$(date -u '+%Y-%m-%d_%H-%M-%S')
@@ -395,6 +398,12 @@ process_project() {
     local source_filter_args=()
     local source_sync_args=("${file_extra_args[@]}" "${file_progress_args[@]}")
 
+    if [ -n "${BACKUP_SUITE_PROJECT_FILTER_FILE:-}" ] && ! grep -Fxq "$project_label" "$BACKUP_SUITE_PROJECT_FILTER_FILE"; then
+        skipped_count=$((skipped_count + 1))
+        echo "Skipping '$project_label' because it is outside the explicit migration project filter."
+        return 0
+    fi
+
     if [ ! -d "$source_path" ]; then
         failed_count=$((failed_count + 1))
         failed_entries+=("${project_label}:missing-source")
@@ -414,6 +423,12 @@ process_project() {
     migration_key=$(migration_key_for_destination "$destination_path")
     migration_report_file=$(join_path "$STATE_DIR" "migration-reports" "${migration_key}.txt")
     migration_marker_file=$(join_path "$STATE_DIR" "link-migrations" "${migration_key}.confirmed")
+
+    if [ -f "$migration_marker_file" ] && { is_enabled_value "$BACKUP_SUITE_LINK_MIGRATION_REPORT" || is_enabled_value "$BACKUP_SUITE_CONFIRM_LINK_MIGRATION"; }; then
+        skipped_count=$((skipped_count + 1))
+        echo "Migration already confirmed for '$project_label'; skipping it in migration mode. Normal scheduled backups will continue to process it."
+        return 0
+    fi
 
     exclude_filter_file=$(build_project_pattern_file "$source_path" "${FILE_PROJECT_EXCLUDE_FILENAME:-.backup-excludes}")
     volatile_pattern_file=$(build_project_pattern_file "$source_path" "${FILE_VOLATILE_FILENAME:-.backup-volatile}")

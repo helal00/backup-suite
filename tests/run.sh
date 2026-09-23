@@ -116,6 +116,7 @@ test_link_migration_gate_and_restore() {
     local output_file
     local report_file
     local marker_file
+    local resume_output
     test_root=$(mktemp -d)
     output_file="$test_root/output.log"
     mkdir -p "$test_root/source/dir" "$test_root/remote/projects/project/directory"
@@ -144,6 +145,12 @@ EOF
     assert_file "$marker_file"
     assert_symlink_target "$test_root/remote/projects/project/directory" 'dir'
     find "$test_root/remote/deleted_files" -type f -name old.txt -print -quit | grep -q . || fail_test 'previous followed-link content was not retained'
+
+    resume_output="$test_root/resume.log"
+    printf 'not part of migration retry\n' > "$test_root/source/after-confirmation.txt"
+    run_backup "$test_root" --confirm-link-migration > "$resume_output" 2>&1
+    assert_contains "$resume_output" 'Migration already confirmed'
+    [ ! -e "$test_root/remote/projects/project/after-confirmation.txt" ] || fail_test 'confirmed project was redundantly synced during migration resume'
 
     mkdir -p "$test_root/restore"
     rclone copy "$test_root/remote/projects/project" "$test_root/restore" --links
@@ -300,6 +307,31 @@ test_overlap_prevention() {
     rm -rf "$test_root"
 }
 
+test_explicit_project_filter() {
+    local test_root
+    local output_file
+    local filter_file
+    test_root=$(mktemp -d)
+    output_file="$test_root/output.log"
+    filter_file="$test_root/project-filter"
+    mkdir -p "$test_root/projects/bad" "$test_root/projects/good" "$test_root/fake"
+    printf 'bad\n' > "$test_root/projects/bad/file.txt"
+    printf 'good\n' > "$test_root/projects/good/file.txt"
+    printf 'projects/good\n' > "$filter_file"
+    write_test_config "$test_root" "$ROOT_DIR/tests/fixtures/fake-rclone.sh" 'fake:'
+    printf '1|projects|%s|fixed|projects|.nosync|children\n' "$test_root/projects" > "$test_root/config/file-sources.conf"
+
+    BACKUP_SUITE_PROJECT_FILTER_FILE="$filter_file" \
+        FAKE_RCLONE_SCENARIO=isolation \
+        FAKE_RCLONE_STATE="$test_root/fake" \
+        run_backup "$test_root" > "$output_file" 2>&1
+
+    assert_contains "$output_file" "outside the explicit migration project filter"
+    assert_contains "$test_root/fake/commands.log" "$test_root/projects/good"
+    assert_not_contains "$test_root/fake/commands.log" "$test_root/projects/bad"
+    rm -rf "$test_root"
+}
+
 test_resource_unit_and_link_flags() {
     local test_root
     local rendered_unit
@@ -378,6 +410,7 @@ test_production_migration_runner_guards() {
     assert_contains "$runner" 'assert_service_property KillMode control-group'
     assert_contains "$runner" 'assert_service_property Restart no'
     assert_contains "$runner" 'FILE_GLOBAL_EXCLUDE_PATTERNS'
+    assert_contains "$runner" '--only-project'
     assert_contains "$runner" '[[ "$service_exec_start" == *"$INSTALL_DIR/bin/file-backup-service.sh"* ]]'
     assert_not_contains "$runner" '[ "$(systemctl show "$SERVICE_UNIT" -p ExecStart --value)" = *"$INSTALL_DIR/bin/file-backup-service.sh"* ]'
     assert_contains "$runner" 'Expected exactly one failed-sync notification record'
@@ -425,6 +458,7 @@ run_test 'safe link migration gate and restore' test_link_migration_gate_and_res
 run_test 'changing-file retry and bounded skip' test_changing_file_policy
 run_test 'project isolation and no delete on error' test_project_isolation_and_no_delete_on_error
 run_test 'overlap prevention' test_overlap_prevention
+run_test 'explicit migration project filter' test_explicit_project_filter
 run_test 'durable failure history and ntfy correlation' test_durable_failure_history
 run_test 'global AgentW cache policy retains canonical metadata' test_global_agentw_cache_policy
 run_test 'resource unit generation and link flags' test_resource_unit_and_link_flags

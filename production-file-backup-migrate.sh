@@ -25,12 +25,14 @@ RUN_ID=$(date -u '+%Y%m%dT%H%M%SZ')
 RUN_STARTED_MARKER=""
 BACKUP_DIR=""
 CONTROL_ENV_FILE="/run/backup-suite/file-backup.env"
+PROJECT_FILTER_FILE="/run/backup-suite/file-backup-projects"
 VALIDATION_DIR=""
 RESOURCE_REPORT=""
+MIGRATION_PROJECTS=()
 
 usage() {
     cat <<'EOF'
-Usage: sudo ./production-file-backup-migrate.sh [--yes] [--check]
+Usage: sudo ./production-file-backup-migrate.sh [--yes] [--check] [--only-project LABEL]...
 
 Safely deploys the current Backup Suite source, updates only known file-backup
 settings, runs the --links migration under resource limits, verifies a bounded
@@ -38,6 +40,8 @@ remote restore, and enables file-backup.timer only after every step succeeds.
 
   --yes    skip the interactive APPLY LINK MIGRATION confirmation
   --check  perform source/preflight checks only; make no production changes
+  --only-project LABEL
+           report and confirm only the exact isolated project label; repeatable
 EOF
 }
 
@@ -67,6 +71,7 @@ on_exit() {
                 ;;
         esac
     fi
+    rm -f "$PROJECT_FILTER_FILE"
 
     if [ "$CHECK_ONLY" -eq 0 ] && [ "$MIGRATION_SUCCEEDED" -ne 1 ]; then
         rm -f "$CONTROL_ENV_FILE"
@@ -95,6 +100,12 @@ while [ "$#" -gt 0 ]; do
             ;;
         --check)
             CHECK_ONLY=1
+            ;;
+        --only-project)
+            [ "$#" -ge 2 ] || die "--only-project requires an exact project label"
+            [[ "$2" != *'|'* && "$2" != *$'\n'* ]] || die "Invalid --only-project label"
+            MIGRATION_PROJECTS+=("$2")
+            shift
             ;;
         -h|--help)
             usage
@@ -375,11 +386,15 @@ log "The live systemd manager accepted the file-backup cgroup, accounting, timeo
 write_service_environment() {
     local mode="$1"
     local config_dir="${2:-$CONFIG_DIR}"
+    local use_project_filter="${3:-1}"
     local temp_environment
 
     install -d -m 755 /run/backup-suite
     temp_environment=$(mktemp /run/backup-suite/file-backup.env.XXXXXX)
     printf 'BACKUP_SUITE_FILE_BACKUP_MODE=%s\nBACKUP_SUITE_CONFIG_DIR=%s\n' "$mode" "$config_dir" > "$temp_environment"
+    if [ "$use_project_filter" -eq 1 ] && [ ${#MIGRATION_PROJECTS[@]} -gt 0 ]; then
+        printf 'BACKUP_SUITE_PROJECT_FILTER_FILE=%s\n' "$PROJECT_FILTER_FILE" >> "$temp_environment"
+    fi
     chmod 600 "$temp_environment"
     mv -f "$temp_environment" "$CONTROL_ENV_FILE"
 }
@@ -389,6 +404,7 @@ run_file_backup_service() {
     local mode="$2"
     local config_dir="${3:-$CONFIG_DIR}"
     local expected_result="${4:-success}"
+    local use_project_filter="${5:-1}"
     local active_state
     local tasks_current
     local tasks_peak=0
@@ -410,7 +426,7 @@ run_file_backup_service() {
     local io_write_total
     local result
 
-    write_service_environment "$mode" "$config_dir"
+    write_service_environment "$mode" "$config_dir" "$use_project_filter"
     systemctl reset-failed "$SERVICE_UNIT" >/dev/null 2>&1 || true
     printf '\n[%s] started_at=%s\n' "$label" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$RESOURCE_REPORT"
     systemctl start --no-block "$SERVICE_UNIT"
@@ -479,6 +495,12 @@ run_file_backup_service() {
 
 install -d -m 700 "$STATE_DIR/migration-reports"
 install -d -m 700 "$STATE_DIR/validation"
+if [ ${#MIGRATION_PROJECTS[@]} -gt 0 ]; then
+    install -d -m 755 /run/backup-suite
+    printf '%s\n' "${MIGRATION_PROJECTS[@]}" > "$PROJECT_FILTER_FILE"
+    chmod 600 "$PROJECT_FILTER_FILE"
+    log "Explicit migration retry filter: ${MIGRATION_PROJECTS[*]}"
+fi
 RESOURCE_REPORT="$STATE_DIR/validation/${RUN_ID}-resource-report.txt"
 : > "$RESOURCE_REPORT"
 chmod 600 "$RESOURCE_REPORT"
@@ -487,7 +509,11 @@ log "Running the no-change production link-migration report under resource limit
 run_file_backup_service "link-migration-report" link-migration-report
 
 mapfile -t report_files < <(find "$STATE_DIR/migration-reports" -maxdepth 1 -type f -name '*.txt' -newer "$RUN_STARTED_MARKER" -print | sort)
-[ ${#report_files[@]} -gt 0 ] || die "Migration report run produced no new report files"
+if [ ${#report_files[@]} -eq 0 ]; then
+    mapfile -t report_files < <(find "$STATE_DIR/migration-reports" -maxdepth 1 -type f -name '*.txt' -print | sort)
+    [ ${#report_files[@]} -gt 0 ] || die "Migration report run produced no reports and no earlier reports are available"
+    log "All applicable projects were already confirmed; reusing ${#report_files[@]} retained migration reports for restore selection."
+fi
 
 log "Migration reports completed: ${#report_files[@]}"
 total_symlinks=0
@@ -524,8 +550,10 @@ select_restore_report() {
     local selected_file=""
     local selected_destination=""
     local selected_size=0
+    local restore_report_files=()
 
-    for report_file in "${report_files[@]}"; do
+    mapfile -t restore_report_files < <(find "$STATE_DIR/migration-reports" -maxdepth 1 -type f -name '*.txt' -print | sort)
+    for report_file in "${restore_report_files[@]}"; do
         report_symlinks=$(awk -F= '$1 == "source_symlinks" { print $2; exit }' "$report_file")
         [ "${report_symlinks:-0}" -gt 0 ] || continue
         destination=$(awk -F= '$1 == "destination" { print substr($0, index($0, "=") + 1); exit }' "$report_file")
@@ -657,7 +685,7 @@ EOF
     chmod 700 "$VALIDATION_DIR/fake-rclone.sh"
     notification_marker=$(mktemp "$STATE_DIR/validation/.notification-start.XXXXXX")
     log "Running one intentional failed sync inside $SERVICE_UNIT; the configured OnFailure path should send exactly one notification."
-    run_file_backup_service "intentional-failed-sync" normal "$validation_config" failure
+    run_file_backup_service "intentional-failed-sync" normal "$validation_config" failure 0
 
     while [ "$notification_wait" -lt 120 ]; do
         active_state=$(systemctl show "$notification_unit" -p ActiveState --value 2>/dev/null || true)
