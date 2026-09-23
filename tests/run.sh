@@ -342,6 +342,8 @@ test_production_migration_runner_guards() {
     assert_contains "$runner" 'assert_service_property CPUAccounting yes'
     assert_contains "$runner" 'assert_service_property KillMode control-group'
     assert_contains "$runner" 'assert_service_property Restart no'
+    assert_contains "$runner" '[[ "$service_exec_start" == *"$INSTALL_DIR/bin/file-backup-service.sh"* ]]'
+    assert_not_contains "$runner" '[ "$(systemctl show "$SERVICE_UNIT" -p ExecStart --value)" = *"$INSTALL_DIR/bin/file-backup-service.sh"* ]'
     assert_contains "$runner" 'Expected exactly one failed-sync notification record'
     assert_contains "$runner" 'rclone_children_remaining=0'
     assert_contains "$runner" 'service_restarts=0'

@@ -367,7 +367,8 @@ assert_service_property MemoryMax 1073741824
 assert_service_property TasksMax 64
 assert_service_property RuntimeMaxUSec 6h
 assert_service_property TimeoutStopUSec 2min
-[ "$(systemctl show "$SERVICE_UNIT" -p ExecStart --value)" = *"$INSTALL_DIR/bin/file-backup-service.sh"* ] || die "$SERVICE_UNIT does not use the foreground cgroup-preserving launcher"
+service_exec_start=$(systemctl show "$SERVICE_UNIT" -p ExecStart --value)
+[[ "$service_exec_start" == *"$INSTALL_DIR/bin/file-backup-service.sh"* ]] || die "$SERVICE_UNIT does not use the foreground cgroup-preserving launcher"
 log "The live systemd manager accepted the file-backup cgroup, accounting, timeout, and no-restart properties."
 
 write_service_environment() {
