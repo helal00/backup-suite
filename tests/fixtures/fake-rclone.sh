@@ -24,12 +24,11 @@ increment_counter() {
     printf '%s' "$value"
 }
 
-argument_value() {
-    local wanted="$1"
+any_exclude_file_contains() {
+    local expected="$1"
     shift
     while [ "$#" -gt 0 ]; do
-        if [ "$1" = "$wanted" ] && [ "$#" -gt 1 ]; then
-            printf '%s' "$2"
+        if [ "$1" = "--exclude-from" ] && [ "$#" -gt 1 ] && grep -Fxq "$expected" "$2"; then
             return 0
         fi
         shift
@@ -60,8 +59,7 @@ case "$command_name" in
                     echo "simulated changing-file failure" >&2
                     exit 1
                 fi
-                skip_file=$(argument_value --exclude-from "$@" || true)
-                [ -n "$skip_file" ] && grep -Fxq 'volatile.log' "$skip_file"
+                any_exclude_file_contains 'volatile.log' "$@"
                 ;;
             isolation)
                 source_path="${1:-}"

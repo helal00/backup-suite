@@ -159,6 +159,7 @@ The file backup is for durable source, configuration, credentials, key/recovery 
 - back up MySQL/MariaDB through the database backup job rather than live data files
 - export or snapshot live wallet/node databases with the owning service quiesced or through its supported backup mechanism
 - document the restore procedure for every separately snapshotted service before excluding its live database tree
+- globally exclude only the explicitly configured AgentW observation/ready caches and prompt-run artifacts; retain canonical `.ai-metadata` continuity and instruction files as durable source
 
 ## Link Migration Runbook
 

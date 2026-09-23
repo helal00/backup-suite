@@ -63,6 +63,7 @@ FILE_ARCHIVE_FOLDER_NAME="deleted_files"
 FILE_RETENTION_DAYS="21d"
 FILE_SYNC_STOP_FILE=".nosync"
 FILE_PROJECT_EXCLUDE_FILENAME=".backup-excludes"
+FILE_GLOBAL_EXCLUDE_PATTERNS=".ai-metadata/observation-cache/**|.ai-metadata/.ready-observation-cache.*|.ai-metadata/ready-observation-cache.json|.ai-metadata/native-ready-cache/**|.ai-metadata/prompt-runs/**"
 FILE_VOLATILE_FILENAME=".backup-volatile"
 FILE_PROCESS_CHECK_ENABLED="0"
 FILE_RCLONE_TRANSFERS="2"
@@ -211,6 +212,40 @@ EOF
     rm -rf "$test_root"
 }
 
+test_global_agentw_cache_policy() {
+    local test_root
+    test_root=$(mktemp -d)
+    mkdir -p \
+        "$test_root/source/.ai-metadata/observation-cache" \
+        "$test_root/source/.ai-metadata/native-ready-cache" \
+        "$test_root/source/.ai-metadata/prompt-runs" \
+        "$test_root/remote"
+    printf 'durable continuity\n' > "$test_root/source/.ai-metadata/project-context-summary.md"
+    printf 'durable instructions\n' > "$test_root/source/.ai-metadata/current-instructions.md"
+    printf 'cache\n' > "$test_root/source/.ai-metadata/observation-cache/ready.json"
+    printf 'cache\n' > "$test_root/source/.ai-metadata/native-ready-cache/codex.json"
+    printf 'cache\n' > "$test_root/source/.ai-metadata/prompt-runs/lifecycle.json"
+    printf 'cache\n' > "$test_root/source/.ai-metadata/ready-observation-cache.json"
+
+    write_test_config "$test_root" rclone 'backup:'
+    cat > "$test_root/config/rclone.conf" <<EOF
+[backup]
+type = alias
+remote = $test_root/remote
+EOF
+    printf '1|agentw-cache-policy|%s|fixed|agentw-cache-policy|.nosync|single\n' "$test_root/source" > "$test_root/config/file-sources.conf"
+
+    run_backup "$test_root" >/dev/null 2>&1
+
+    assert_file "$test_root/remote/agentw-cache-policy/.ai-metadata/project-context-summary.md"
+    assert_file "$test_root/remote/agentw-cache-policy/.ai-metadata/current-instructions.md"
+    [ ! -e "$test_root/remote/agentw-cache-policy/.ai-metadata/observation-cache/ready.json" ] || fail_test 'observation cache was backed up'
+    [ ! -e "$test_root/remote/agentw-cache-policy/.ai-metadata/native-ready-cache/codex.json" ] || fail_test 'native-ready cache was backed up'
+    [ ! -e "$test_root/remote/agentw-cache-policy/.ai-metadata/prompt-runs/lifecycle.json" ] || fail_test 'prompt run cache was backed up'
+    [ ! -e "$test_root/remote/agentw-cache-policy/.ai-metadata/ready-observation-cache.json" ] || fail_test 'ready observation cache was backed up'
+    rm -rf "$test_root"
+}
+
 test_project_isolation_and_no_delete_on_error() {
     local test_root
     local output_file
@@ -342,6 +377,7 @@ test_production_migration_runner_guards() {
     assert_contains "$runner" 'assert_service_property CPUAccounting yes'
     assert_contains "$runner" 'assert_service_property KillMode control-group'
     assert_contains "$runner" 'assert_service_property Restart no'
+    assert_contains "$runner" 'FILE_GLOBAL_EXCLUDE_PATTERNS'
     assert_contains "$runner" '[[ "$service_exec_start" == *"$INSTALL_DIR/bin/file-backup-service.sh"* ]]'
     assert_not_contains "$runner" '[ "$(systemctl show "$SERVICE_UNIT" -p ExecStart --value)" = *"$INSTALL_DIR/bin/file-backup-service.sh"* ]'
     assert_contains "$runner" 'Expected exactly one failed-sync notification record'
@@ -390,6 +426,7 @@ run_test 'changing-file retry and bounded skip' test_changing_file_policy
 run_test 'project isolation and no delete on error' test_project_isolation_and_no_delete_on_error
 run_test 'overlap prevention' test_overlap_prevention
 run_test 'durable failure history and ntfy correlation' test_durable_failure_history
+run_test 'global AgentW cache policy retains canonical metadata' test_global_agentw_cache_policy
 run_test 'resource unit generation and link flags' test_resource_unit_and_link_flags
 run_test 'crypto wallet durable/volatile policy' test_crypto_wallet_policy
 run_test 'production migration runner safety gates' test_production_migration_runner_guards

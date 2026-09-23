@@ -259,6 +259,7 @@ install_policy_file "$SOURCE_DIR/examples/project-policies/crypto-wallets-api.ba
 
 log "Updating only known file-backup settings in $GLOBAL_CONFIG."
 set_shell_config_value "$GLOBAL_CONFIG" FILE_VOLATILE_FILENAME .backup-volatile
+set_shell_config_value "$GLOBAL_CONFIG" FILE_GLOBAL_EXCLUDE_PATTERNS '.ai-metadata/observation-cache/**|.ai-metadata/.ready-observation-cache.*|.ai-metadata/ready-observation-cache.json|.ai-metadata/native-ready-cache/**|.ai-metadata/prompt-runs/**'
 set_shell_config_value "$GLOBAL_CONFIG" FILE_RCLONE_TRANSFERS 2
 set_shell_config_value "$GLOBAL_CONFIG" FILE_RCLONE_CHECKERS 4
 set_shell_config_value "$GLOBAL_CONFIG" FILE_RCLONE_BUFFER_SIZE 16M
@@ -394,13 +395,17 @@ run_file_backup_service() {
     local cpu_current=0
     local cpu_previous=0
     local cpu_peak_percent=0
+    local sample_time_ns=0
+    local previous_sample_time_ns=0
+    local elapsed_sample_ns=0
     local io_read_current=0
     local io_read_previous=0
     local io_read_peak_bps=0
     local io_write_current=0
     local io_write_previous=0
     local io_write_peak_bps=0
-    local memory_peak
+    local memory_current=0
+    local memory_peak=0
     local io_read_total
     local io_write_total
     local result
@@ -417,20 +422,31 @@ run_file_backup_service() {
             tasks_peak="$tasks_current"
         fi
         cpu_current=$(systemctl show "$SERVICE_UNIT" -p CPUUsageNSec --value)
+        memory_current=$(systemctl show "$SERVICE_UNIT" -p MemoryCurrent --value)
         io_read_current=$(systemctl show "$SERVICE_UNIT" -p IOReadBytes --value)
         io_write_current=$(systemctl show "$SERVICE_UNIT" -p IOWriteBytes --value)
-        if [[ "$cpu_current" =~ ^[0-9]+$ ]] && [ "$cpu_previous" -gt 0 ] && [ $(( (cpu_current - cpu_previous) / 10000000 )) -gt "$cpu_peak_percent" ]; then
-            cpu_peak_percent=$(( (cpu_current - cpu_previous) / 10000000 ))
+        sample_time_ns=$(date +%s%N)
+        if [[ "$memory_current" =~ ^[0-9]+$ ]] && [ "$memory_current" -gt "$memory_peak" ]; then
+            memory_peak="$memory_current"
         fi
-        if [[ "$io_read_current" =~ ^[0-9]+$ ]] && [ "$io_read_previous" -gt 0 ] && [ $((io_read_current - io_read_previous)) -gt "$io_read_peak_bps" ]; then
-            io_read_peak_bps=$((io_read_current - io_read_previous))
-        fi
-        if [[ "$io_write_current" =~ ^[0-9]+$ ]] && [ "$io_write_previous" -gt 0 ] && [ $((io_write_current - io_write_previous)) -gt "$io_write_peak_bps" ]; then
-            io_write_peak_bps=$((io_write_current - io_write_previous))
+        if [ "$previous_sample_time_ns" -gt 0 ]; then
+            elapsed_sample_ns=$((sample_time_ns - previous_sample_time_ns))
+            if [ "$elapsed_sample_ns" -gt 0 ]; then
+                if [[ "$cpu_current" =~ ^[0-9]+$ ]] && [ "$cpu_previous" -gt 0 ] && [ "$cpu_current" -ge "$cpu_previous" ] && [ $(( (cpu_current - cpu_previous) * 100 / elapsed_sample_ns )) -gt "$cpu_peak_percent" ]; then
+                    cpu_peak_percent=$(( (cpu_current - cpu_previous) * 100 / elapsed_sample_ns ))
+                fi
+                if [[ "$io_read_current" =~ ^[0-9]+$ ]] && [ "$io_read_previous" -gt 0 ] && [ "$io_read_current" -ge "$io_read_previous" ] && [ $(( (io_read_current - io_read_previous) * 1000000000 / elapsed_sample_ns )) -gt "$io_read_peak_bps" ]; then
+                    io_read_peak_bps=$(( (io_read_current - io_read_previous) * 1000000000 / elapsed_sample_ns ))
+                fi
+                if [[ "$io_write_current" =~ ^[0-9]+$ ]] && [ "$io_write_previous" -gt 0 ] && [ "$io_write_current" -ge "$io_write_previous" ] && [ $(( (io_write_current - io_write_previous) * 1000000000 / elapsed_sample_ns )) -gt "$io_write_peak_bps" ]; then
+                    io_write_peak_bps=$(( (io_write_current - io_write_previous) * 1000000000 / elapsed_sample_ns ))
+                fi
+            fi
         fi
         [[ "$cpu_current" =~ ^[0-9]+$ ]] && cpu_previous="$cpu_current"
         [[ "$io_read_current" =~ ^[0-9]+$ ]] && io_read_previous="$io_read_current"
         [[ "$io_write_current" =~ ^[0-9]+$ ]] && io_write_previous="$io_write_current"
+        previous_sample_time_ns="$sample_time_ns"
         if [ "$active_state" = "activating" ] || [ "$active_state" = "active" ]; then
             systemd-cgls --unit "$SERVICE_UNIT" --no-pager >> "$RESOURCE_REPORT" 2>&1 || true
             sleep 1
@@ -444,13 +460,14 @@ run_file_backup_service() {
         -p Result -p ExecMainStatus -p CPUUsageNSec -p MemoryPeak \
         -p IOReadBytes -p IOWriteBytes -p TasksCurrent -p NRestarts \
         -p ControlGroup >> "$RESOURCE_REPORT"
-    printf 'TasksPeakObserved=%s\n' "$tasks_peak" >> "$RESOURCE_REPORT"
+    printf 'TasksPeakObserved=%s\nMemoryPeakBytesObserved=%s\n' "$tasks_peak" "$memory_peak" >> "$RESOURCE_REPORT"
     printf 'CPUPeakPercentObserved=%s\nIOReadPeakBytesPerSecObserved=%s\nIOWritePeakBytesPerSecObserved=%s\n' \
         "$cpu_peak_percent" "$io_read_peak_bps" "$io_write_peak_bps" >> "$RESOURCE_REPORT"
     result=$(systemctl show "$SERVICE_UNIT" -p Result --value)
-    memory_peak=$(systemctl show "$SERVICE_UNIT" -p MemoryPeak --value)
     io_read_total=$(systemctl show "$SERVICE_UNIT" -p IOReadBytes --value)
     io_write_total=$(systemctl show "$SERVICE_UNIT" -p IOWriteBytes --value)
+    [[ "$io_read_total" =~ ^[0-9]+$ ]] || io_read_total="$io_read_previous"
+    [[ "$io_write_total" =~ ^[0-9]+$ ]] || io_write_total="$io_write_previous"
     log "Resource result [$label]: result=$result cpu_peak=${cpu_peak_percent}% memory_peak=${memory_peak}B io_read_peak=${io_read_peak_bps}B/s io_write_peak=${io_write_peak_bps}B/s io_read_total=${io_read_total}B io_write_total=${io_write_total}B tasks_peak=$tasks_peak; details=$RESOURCE_REPORT"
 
     if [ "$expected_result" = "success" ]; then

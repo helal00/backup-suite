@@ -81,6 +81,17 @@ build_project_pattern_file() {
 
     [ -n "$definition_filename" ] || return 0
 
+    if [ "$definition_filename" = "${FILE_PROJECT_EXCLUDE_FILENAME:-.backup-excludes}" ] && [ -n "${FILE_GLOBAL_EXCLUDE_PATTERNS:-}" ]; then
+        temp_filter_file=$(mktemp)
+        temp_runtime_files+=("$temp_filter_file")
+        while IFS= read -r pattern || [ -n "$pattern" ]; do
+            pattern=$(trim "$pattern")
+            [ -n "$pattern" ] || continue
+            [[ "$pattern" == \#* ]] && continue
+            printf '%s\n' "${pattern#/}" >> "$temp_filter_file"
+        done < <(printf '%s\n' "$FILE_GLOBAL_EXCLUDE_PATTERNS" | tr '|' '\n')
+    fi
+
     while IFS= read -r definition_file; do
         if [ -z "$temp_filter_file" ]; then
             temp_filter_file=$(mktemp)

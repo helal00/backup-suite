@@ -35,6 +35,9 @@ FILE_ARCHIVE_SUFFIX="_old"
 FILE_RETENTION_DAYS="21d"
 FILE_SYNC_STOP_FILE=".nosync"
 FILE_PROJECT_EXCLUDE_FILENAME=".backup-excludes"
+# Explicit rebuildable AgentW runtime artifacts. Canonical .ai-metadata Markdown
+# continuity files remain included.
+FILE_GLOBAL_EXCLUDE_PATTERNS=".ai-metadata/observation-cache/**|.ai-metadata/.ready-observation-cache.*|.ai-metadata/ready-observation-cache.json|.ai-metadata/native-ready-cache/**|.ai-metadata/prompt-runs/**"
 FILE_VOLATILE_FILENAME=".backup-volatile"
 FILE_PROCESS_CHECK_ENABLED="1"
 FILE_PROCESS_CHECK_USER_ONLY="1"

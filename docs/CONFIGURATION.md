@@ -77,9 +77,12 @@ Isolation behavior:
 Project-level exclude behavior:
 
 - `FILE_PROJECT_EXCLUDE_FILENAME` defaults to `.backup-excludes`
+- `FILE_GLOBAL_EXCLUDE_PATTERNS` is an explicit `|`-separated set of root-relative patterns applied to every isolated project
 - the file backup job searches recursively under each source for files with that name
 - each matching file contributes exclude patterns relative to its own directory
 - this is useful for Laravel or PHP runtime-generated content inside a project tree
+
+The default global policy excludes only rebuildable AgentW observation/ready caches and prompt-run artifacts under `.ai-metadata`. It intentionally retains canonical continuity Markdown such as `project-context-summary.md`, active instructions, status, issues, and handoff files. Do not replace it with a broad `.ai-metadata/**` exclusion.
 
 `default-root` means the remote destination is built from:
 
