@@ -25,7 +25,7 @@ RUN_ID=$(date -u '+%Y%m%dT%H%M%SZ')
 RUN_STARTED_MARKER=""
 BACKUP_DIR=""
 CONTROL_ENV_FILE="/run/backup-suite/file-backup.env"
-PROJECT_FILTER_FILE="/run/backup-suite/file-backup-projects"
+PROJECT_FILTER_FILE=""
 VALIDATION_DIR=""
 RESOURCE_REPORT=""
 MIGRATION_PROJECTS=()
@@ -71,7 +71,16 @@ on_exit() {
                 ;;
         esac
     fi
-    rm -f "$PROJECT_FILTER_FILE"
+    if [ -n "$PROJECT_FILTER_FILE" ]; then
+        case "$PROJECT_FILTER_FILE" in
+            "$STATE_DIR"/validation/*-project-filter)
+                rm -f "$PROJECT_FILTER_FILE"
+                ;;
+            *)
+                log "Refusing to clean unexpected project filter: $PROJECT_FILTER_FILE" >&2
+                ;;
+        esac
+    fi
 
     if [ "$CHECK_ONLY" -eq 0 ] && [ "$MIGRATION_SUCCEEDED" -ne 1 ]; then
         rm -f "$CONTROL_ENV_FILE"
@@ -495,8 +504,8 @@ run_file_backup_service() {
 
 install -d -m 700 "$STATE_DIR/migration-reports"
 install -d -m 700 "$STATE_DIR/validation"
+PROJECT_FILTER_FILE="$STATE_DIR/validation/${RUN_ID}-project-filter"
 if [ ${#MIGRATION_PROJECTS[@]} -gt 0 ]; then
-    install -d -m 755 /run/backup-suite
     printf '%s\n' "${MIGRATION_PROJECTS[@]}" > "$PROJECT_FILTER_FILE"
     chmod 600 "$PROJECT_FILTER_FILE"
     log "Explicit migration retry filter: ${MIGRATION_PROJECTS[*]}"

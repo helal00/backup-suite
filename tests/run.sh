@@ -411,6 +411,8 @@ test_production_migration_runner_guards() {
     assert_contains "$runner" 'assert_service_property Restart no'
     assert_contains "$runner" 'FILE_GLOBAL_EXCLUDE_PATTERNS'
     assert_contains "$runner" '--only-project'
+    assert_contains "$runner" 'PROJECT_FILTER_FILE="$STATE_DIR/validation/${RUN_ID}-project-filter"'
+    assert_not_contains "$runner" 'PROJECT_FILTER_FILE="/run/backup-suite/file-backup-projects"'
     assert_contains "$runner" '[[ "$service_exec_start" == *"$INSTALL_DIR/bin/file-backup-service.sh"* ]]'
     assert_not_contains "$runner" '[ "$(systemctl show "$SERVICE_UNIT" -p ExecStart --value)" = *"$INSTALL_DIR/bin/file-backup-service.sh"* ]'
     assert_contains "$runner" 'Expected exactly one failed-sync notification record'
