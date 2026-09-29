@@ -279,7 +279,8 @@ install_policy_file "$SOURCE_DIR/examples/project-policies/crypto-wallets-api.ba
 
 log "Updating only known file-backup settings in $GLOBAL_CONFIG."
 set_shell_config_value "$GLOBAL_CONFIG" FILE_VOLATILE_FILENAME .backup-volatile
-set_shell_config_value "$GLOBAL_CONFIG" FILE_GLOBAL_EXCLUDE_PATTERNS '.ai-metadata/observation-cache/**|.ai-metadata/.ready-observation-cache.*|.ai-metadata/ready-observation-cache.json|.ai-metadata/native-ready-cache/**|.ai-metadata/prompt-runs/**'
+set_shell_config_value "$GLOBAL_CONFIG" FILE_GLOBAL_EXCLUDE_PATTERNS '.ai-metadata/observation-cache/**|.ai-metadata/.ready-observation-cache.*|.ai-metadata/ready-observation-cache.json|.ai-metadata/native-ready-cache/**|.ai-metadata/prompt-runs/**|.ai-metadata/terminal-choice-state.json'
+set_shell_config_value "$GLOBAL_CONFIG" FILE_GLOBAL_VOLATILE_PATTERNS '.ai-metadata/chat-store/**|.ai-metadata/prompts/gui-autosave-*.prompt.txt|.ai-metadata/claude/current.json|.ai-metadata/claude/events/**'
 set_shell_config_value "$GLOBAL_CONFIG" FILE_RCLONE_TRANSFERS 2
 set_shell_config_value "$GLOBAL_CONFIG" FILE_RCLONE_CHECKERS 4
 set_shell_config_value "$GLOBAL_CONFIG" FILE_RCLONE_BUFFER_SIZE 16M

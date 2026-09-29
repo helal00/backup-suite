@@ -63,8 +63,9 @@ FILE_ARCHIVE_FOLDER_NAME="deleted_files"
 FILE_RETENTION_DAYS="21d"
 FILE_SYNC_STOP_FILE=".nosync"
 FILE_PROJECT_EXCLUDE_FILENAME=".backup-excludes"
-FILE_GLOBAL_EXCLUDE_PATTERNS=".ai-metadata/observation-cache/**|.ai-metadata/.ready-observation-cache.*|.ai-metadata/ready-observation-cache.json|.ai-metadata/native-ready-cache/**|.ai-metadata/prompt-runs/**"
+FILE_GLOBAL_EXCLUDE_PATTERNS=".ai-metadata/observation-cache/**|.ai-metadata/.ready-observation-cache.*|.ai-metadata/ready-observation-cache.json|.ai-metadata/native-ready-cache/**|.ai-metadata/prompt-runs/**|.ai-metadata/terminal-choice-state.json"
 FILE_VOLATILE_FILENAME=".backup-volatile"
+FILE_GLOBAL_VOLATILE_PATTERNS=".ai-metadata/chat-store/**|.ai-metadata/prompts/gui-autosave-*.prompt.txt|.ai-metadata/claude/current.json|.ai-metadata/claude/events/**"
 FILE_PROCESS_CHECK_ENABLED="0"
 FILE_RCLONE_TRANSFERS="2"
 FILE_RCLONE_CHECKERS="4"
@@ -166,8 +167,8 @@ test_changing_file_policy() {
     output_file="$test_root/output.log"
     mkdir -p "$test_root/source" "$test_root/fake"
     printf 'changing\n' > "$test_root/source/volatile.log"
-    printf 'volatile.log\n' > "$test_root/source/.backup-volatile"
     write_test_config "$test_root" "$ROOT_DIR/tests/fixtures/fake-rclone.sh" 'fake:'
+    printf '\nFILE_GLOBAL_VOLATILE_PATTERNS="volatile.log"\n' >> "$test_root/config/global.conf"
     printf '1|changing|%s|fixed|changing|.nosync|single\n' "$test_root/source" > "$test_root/config/file-sources.conf"
 
     FAKE_RCLONE_SCENARIO=changing FAKE_RCLONE_STATE="$test_root/fake" run_backup "$test_root" > "$output_file" 2>&1
@@ -226,6 +227,7 @@ test_global_agentw_cache_policy() {
         "$test_root/source/.ai-metadata/observation-cache" \
         "$test_root/source/.ai-metadata/native-ready-cache" \
         "$test_root/source/.ai-metadata/prompt-runs" \
+        "$test_root/source/.ai-metadata/chat-store" \
         "$test_root/remote"
     printf 'durable continuity\n' > "$test_root/source/.ai-metadata/project-context-summary.md"
     printf 'durable instructions\n' > "$test_root/source/.ai-metadata/current-instructions.md"
@@ -233,6 +235,8 @@ test_global_agentw_cache_policy() {
     printf 'cache\n' > "$test_root/source/.ai-metadata/native-ready-cache/codex.json"
     printf 'cache\n' > "$test_root/source/.ai-metadata/prompt-runs/lifecycle.json"
     printf 'cache\n' > "$test_root/source/.ai-metadata/ready-observation-cache.json"
+    printf 'transient choice\n' > "$test_root/source/.ai-metadata/terminal-choice-state.json"
+    printf 'stable durable chat state\n' > "$test_root/source/.ai-metadata/chat-store/catalog.json"
 
     write_test_config "$test_root" rclone 'backup:'
     cat > "$test_root/config/rclone.conf" <<EOF
@@ -246,10 +250,12 @@ EOF
 
     assert_file "$test_root/remote/agentw-cache-policy/.ai-metadata/project-context-summary.md"
     assert_file "$test_root/remote/agentw-cache-policy/.ai-metadata/current-instructions.md"
+    assert_file "$test_root/remote/agentw-cache-policy/.ai-metadata/chat-store/catalog.json"
     [ ! -e "$test_root/remote/agentw-cache-policy/.ai-metadata/observation-cache/ready.json" ] || fail_test 'observation cache was backed up'
     [ ! -e "$test_root/remote/agentw-cache-policy/.ai-metadata/native-ready-cache/codex.json" ] || fail_test 'native-ready cache was backed up'
     [ ! -e "$test_root/remote/agentw-cache-policy/.ai-metadata/prompt-runs/lifecycle.json" ] || fail_test 'prompt run cache was backed up'
     [ ! -e "$test_root/remote/agentw-cache-policy/.ai-metadata/ready-observation-cache.json" ] || fail_test 'ready observation cache was backed up'
+    [ ! -e "$test_root/remote/agentw-cache-policy/.ai-metadata/terminal-choice-state.json" ] || fail_test 'terminal choice state was backed up'
     rm -rf "$test_root"
 }
 
@@ -410,6 +416,12 @@ test_production_migration_runner_guards() {
     assert_contains "$runner" 'assert_service_property KillMode control-group'
     assert_contains "$runner" 'assert_service_property Restart no'
     assert_contains "$runner" 'FILE_GLOBAL_EXCLUDE_PATTERNS'
+    assert_contains "$runner" 'FILE_GLOBAL_VOLATILE_PATTERNS'
+    assert_contains "$runner" '.ai-metadata/terminal-choice-state.json'
+    assert_contains "$runner" '.ai-metadata/chat-store/**'
+    assert_contains "$runner" '.ai-metadata/prompts/gui-autosave-*.prompt.txt'
+    assert_contains "$runner" '.ai-metadata/claude/current.json'
+    assert_contains "$runner" '.ai-metadata/claude/events/**'
     assert_contains "$runner" '--only-project'
     assert_contains "$runner" 'PROJECT_FILTER_FILE="$STATE_DIR/validation/${RUN_ID}-project-filter"'
     assert_not_contains "$runner" 'PROJECT_FILTER_FILE="/run/backup-suite/file-backup-projects"'

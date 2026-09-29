@@ -81,10 +81,17 @@ build_project_pattern_file() {
     local pattern
     local normalized_pattern
     local final_pattern
+    local global_patterns=""
 
     [ -n "$definition_filename" ] || return 0
 
-    if [ "$definition_filename" = "${FILE_PROJECT_EXCLUDE_FILENAME:-.backup-excludes}" ] && [ -n "${FILE_GLOBAL_EXCLUDE_PATTERNS:-}" ]; then
+    if [ "$definition_filename" = "${FILE_PROJECT_EXCLUDE_FILENAME:-.backup-excludes}" ]; then
+        global_patterns="${FILE_GLOBAL_EXCLUDE_PATTERNS:-}"
+    elif [ "$definition_filename" = "${FILE_VOLATILE_FILENAME:-.backup-volatile}" ]; then
+        global_patterns="${FILE_GLOBAL_VOLATILE_PATTERNS:-}"
+    fi
+
+    if [ -n "$global_patterns" ]; then
         temp_filter_file=$(mktemp)
         temp_runtime_files+=("$temp_filter_file")
         while IFS= read -r pattern || [ -n "$pattern" ]; do
@@ -92,7 +99,7 @@ build_project_pattern_file() {
             [ -n "$pattern" ] || continue
             [[ "$pattern" == \#* ]] && continue
             printf '%s\n' "${pattern#/}" >> "$temp_filter_file"
-        done < <(printf '%s\n' "$FILE_GLOBAL_EXCLUDE_PATTERNS" | tr '|' '\n')
+        done < <(printf '%s\n' "$global_patterns" | tr '|' '\n')
     fi
 
     while IFS= read -r definition_file; do
@@ -390,6 +397,7 @@ process_project() {
     local attempt_three_log
     local before_snapshot
     local after_snapshot
+    local retry_snapshot
     local changed_volatile_file
     local changed_count
     local detail_count
@@ -496,8 +504,9 @@ process_project() {
     attempt_three_log=$(mktemp)
     before_snapshot=$(mktemp)
     after_snapshot=$(mktemp)
+    retry_snapshot=$(mktemp)
     changed_volatile_file=$(mktemp)
-    temp_runtime_files+=("$attempt_one_log" "$attempt_two_log" "$attempt_three_log" "$before_snapshot" "$after_snapshot" "$changed_volatile_file")
+    temp_runtime_files+=("$attempt_one_log" "$attempt_two_log" "$attempt_three_log" "$before_snapshot" "$after_snapshot" "$retry_snapshot" "$changed_volatile_file")
 
     if [ "$migration_applies" -eq 1 ]; then
         if ! preserve_confirmed_migration_candidates "$source_path" "$destination_path" "$archive_path" "${source_filter_args[@]}"; then
@@ -539,8 +548,14 @@ process_project() {
         return 0
     fi
 
+    if ! snapshot_source_files "$source_path" "$retry_snapshot" "${source_filter_args[@]}"; then
+        failed_count=$((failed_count + 1))
+        failed_entries+=("${project_label}:stability-snapshot")
+        return 1
+    fi
+
     if [ -n "$volatile_pattern_file" ]; then
-        classify_changed_volatile_paths "$before_snapshot" "$after_snapshot" "$volatile_pattern_file" "$changed_volatile_file"
+        classify_changed_volatile_paths "$before_snapshot" "$retry_snapshot" "$volatile_pattern_file" "$changed_volatile_file"
     else
         : > "$changed_volatile_file"
     fi

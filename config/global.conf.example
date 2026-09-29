@@ -37,8 +37,11 @@ FILE_SYNC_STOP_FILE=".nosync"
 FILE_PROJECT_EXCLUDE_FILENAME=".backup-excludes"
 # Explicit rebuildable AgentW runtime artifacts. Canonical .ai-metadata Markdown
 # continuity files remain included.
-FILE_GLOBAL_EXCLUDE_PATTERNS=".ai-metadata/observation-cache/**|.ai-metadata/.ready-observation-cache.*|.ai-metadata/ready-observation-cache.json|.ai-metadata/native-ready-cache/**|.ai-metadata/prompt-runs/**"
+FILE_GLOBAL_EXCLUDE_PATTERNS=".ai-metadata/observation-cache/**|.ai-metadata/.ready-observation-cache.*|.ai-metadata/ready-observation-cache.json|.ai-metadata/native-ready-cache/**|.ai-metadata/prompt-runs/**|.ai-metadata/terminal-choice-state.json"
 FILE_VOLATILE_FILENAME=".backup-volatile"
+# These paths remain backed up when stable. Only entries observed changing across
+# the stability interval are preserved remotely and retried on the next run.
+FILE_GLOBAL_VOLATILE_PATTERNS=".ai-metadata/chat-store/**|.ai-metadata/prompts/gui-autosave-*.prompt.txt|.ai-metadata/claude/current.json|.ai-metadata/claude/events/**"
 FILE_PROCESS_CHECK_ENABLED="1"
 FILE_PROCESS_CHECK_USER_ONLY="1"
 FILE_PROCESS_CHECK_PATTERNS="vscode-server"
