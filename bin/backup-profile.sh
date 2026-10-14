@@ -114,8 +114,12 @@ show_profiles() {
     local marker
     local entry
     local memory_bytes
+    local current_level=""
 
     resolve_profile_ladder
+    if [ "$PROFILE_MODE" = "adaptive" ]; then
+        current_level=$(current_adaptive_profile)
+    fi
     memory_bytes=$(host_memory_bytes)
     echo "Backup Suite file-backup resource profiles (host: $(host_cpu_cores) CPU cores, $(( ${memory_bytes:-0} / 1048576 )) MiB RAM)"
     echo "Limits mode: ${FILE_PROFILE_LIMITS_MODE:-fixed}. The watchdog contains or stops a backup that goes past its limits and reports it via ntfy."
@@ -123,7 +127,14 @@ show_profiles() {
     for profile_name in "${FILE_BACKUP_PROFILE_NAMES[@]}"; do
         marker=""
         for entry in "${PROFILE_LADDER[@]}"; do
-            [ "$entry" = "$profile_name" ] && marker="   <- in use"
+            [ "$entry" = "$profile_name" ] || continue
+            if [ "$PROFILE_MODE" != "adaptive" ]; then
+                marker="   <- in use"
+            elif [ "$profile_name" = "$current_level" ]; then
+                marker="   <- adaptive range, current level"
+            else
+                marker="   <- adaptive range"
+            fi
         done
         print_profile_row "$profile_name" "$marker"
         echo ""
