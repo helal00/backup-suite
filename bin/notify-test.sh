@@ -46,4 +46,4 @@ EOF
 } > "$detail_file"
 
 ntfy_publish "${NOTIFY_NTFY_TITLE_PREFIX:-Backup Suite}: notification test on $host_name" default "test_tube,backup" \
-    "$message" "$detail_file" "notification-test.txt"
+    "$message" "$detail_file" "notification-test.txt" test

@@ -50,6 +50,7 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$monitored_unit" ] || { usage >&2; exit 64; }
 [[ "$monitored_unit" =~ ^[A-Za-z0-9@._-]+$ ]] || fail "Invalid unit name: $monitored_unit"
+BACKUP_EVENT_UNIT="$monitored_unit"
 
 load_global_config
 resolve_profile_ladder
@@ -417,6 +418,7 @@ send_event() {
     local next_step="$7"
     local detail_file
     local message
+    local event_category
 
     events_seen+=("$event_key")
     echo "WATCHDOG EVENT [$event_key] $headline - $action_taken"
@@ -447,8 +449,14 @@ MSG
         echo "Durable run log: $(join_path "$STATE_DIR" "logs" "backup-file.log")"
         echo "Watchdog history: $history_file"
     } > "$detail_file"
+    case "$event_key" in
+        contained|released|tasks-limit) event_category="watchdog-contain" ;;
+        server-pressure|resumed) event_category="watchdog-pause" ;;
+        step-down|step-up) event_category="profile-step" ;;
+        *) event_category="watchdog-stop" ;;
+    esac
     ntfy_publish "$title_prefix: $headline on $host_name" "$priority" "$tags" "$message" \
-        "$detail_file" "watchdog-${event_key}-$(date -u '+%Y%m%dT%H%M%SZ').txt" || true
+        "$detail_file" "watchdog-${event_key}-$(date -u '+%Y%m%dT%H%M%SZ').txt" "$event_category" || true
     rm -f "$detail_file"
 }
 
@@ -567,7 +575,7 @@ Run resources: $(( duration_seconds / 60 )) min, peak $(mib "$peak_memory") RAM 
 If this keeps happening, choose a lower profile with: backup-profile.sh set slow
 $(limits_text)
 MSG
-)" || true
+)" "" "" run-finished || true
     fi
     watchdog_state="finished"
     write_status

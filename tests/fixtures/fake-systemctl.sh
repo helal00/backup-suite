@@ -18,7 +18,30 @@ case "${arguments[0]:-}" in
         exit "${FAKE_SYSTEMCTL_IS_ACTIVE_STATUS:-3}"
         ;;
     show)
-        printf '%s\n' "${FAKE_SYSTEMCTL_CONTROL_GROUP:-}"
+        units=()
+        properties=""
+        index=1
+        while [ "$index" -lt "${#arguments[@]}" ]; do
+            case "${arguments[$index]}" in
+                -p) index=$((index + 1)); properties="${arguments[$index]}" ;;
+                -*) ;;
+                *) units+=("${arguments[$index]}") ;;
+            esac
+            index=$((index + 1))
+        done
+        if [[ ",$properties," == *",Id,"* ]]; then
+            # Property blocks, one per unit, as `systemctl show A B -p Id,...` prints them.
+            for unit in "${units[@]}"; do
+                state="inactive"
+                [ "$unit" = "${FAKE_SYSTEMCTL_ACTIVE_UNIT:-}" ] && state="active"
+                printf 'Id=%s\nLoadState=loaded\nActiveState=%s\nSubState=dead\nResult=success\nUnitFileState=static\n\n' "$unit" "$state"
+            done
+        else
+            printf '%s\n' "${FAKE_SYSTEMCTL_CONTROL_GROUP:-}"
+        fi
+        ;;
+    is-enabled)
+        echo "enabled"
         ;;
 esac
 exit 0

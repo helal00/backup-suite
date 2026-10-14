@@ -1,0 +1,19 @@
+[Unit]
+Description=Backup Suite control socket for the GUI (system mode)
+Documentation=file://__INSTALL_DIR__/README.md
+
+[Socket]
+ListenStream=/run/backup-suite/control.sock
+SocketUser=root
+SocketGroup=__GUI_GROUP__
+SocketMode=0660
+DirectoryMode=0755
+Accept=yes
+MaxConnections=8
+MaxConnectionsPerSource=4
+# Members of __GUI_GROUP__ get an ACL entry on the socket, so a running GUI
+# can connect without its user manager restarting to pick up the group.
+ExecStartPost=__INSTALL_DIR__/bin/install-gui-broker.sh --refresh-acl --group __GUI_GROUP__
+
+[Install]
+WantedBy=sockets.target

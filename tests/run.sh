@@ -1024,6 +1024,288 @@ run_test() {
     fi
 }
 
+setup_control_root() {
+    # A user-mode installation with fake systemctl/journalctl/curl for the
+    # control script. Prints nothing; the caller passes the root around.
+    local test_root="$1"
+    write_test_config "$test_root" rclone 'fake:'
+    write_notify_config "$test_root"
+    install_fake_tools "$test_root"
+    ln -sf "$ROOT_DIR/tests/fixtures/fake-journalctl.sh" "$test_root/bin/journalctl"
+    mkdir -p "$test_root/source/project-a/sub" "$test_root/state/logs" "$test_root/state/watchdog" "$test_root/state/failures" "$test_root/state/active-files"
+    printf '1|workspace|%s/source|fixed|projects/workspace|.nosync|children\n' "$test_root" > "$test_root/config/file-sources.conf"
+    printf 'cache/**\n*.tmp\n' > "$test_root/source/project-a/sub/.backup-excludes"
+    printf 'type = drive\ntoken = {"access_token":"rclone-secret-value"}\n' > "$test_root/config/rclone.conf"
+    cat >> "$test_root/config/global.conf" <<'CONF'
+NOTIFY_NTFY_TOKEN="tk_secret_token_value"
+CONF
+}
+
+control_call() {
+    # control_call <test_root> <json-request> [extra args...]
+    local test_root="$1"
+    local request="$2"
+    shift 2
+    printf '%s\n' "$request" | HOME="$test_root/home" PATH="$test_root/bin:$PATH" \
+        FAKE_CURL_LOG="$test_root/curl.log" FAKE_SYSTEMCTL_LOG="$test_root/systemctl.log" \
+        FAKE_JOURNALCTL_LOG="$test_root/journalctl.log" \
+        BACKUP_SUITE_CONFIG_DIR="$test_root/config" \
+        "$ROOT_DIR/bin/backup-control.sh" "$@"
+}
+
+json_field() {
+    # json_field <json> <python expression on d>
+    python3 -c 'import json, sys; d = json.loads(sys.argv[1]); print(eval(sys.argv[2]))' "$1" "$2"
+}
+
+test_control_read_verbs() {
+    local test_root
+    local reply
+    test_root=$(mktemp -d)
+    setup_control_root "$test_root"
+    {
+        echo 'File backup started at 2026-10-13 10:00:00 UTC'
+        echo 'old run'
+        echo 'File backup started at 2026-10-14 10:00:00 UTC'
+        for index in $(seq 1 3000); do echo "line $index"; done
+    } > "$test_root/state/logs/backup-file.log"
+    printf 'started\tended\tunit\tprofile\tduration_s\tpeak_mem\tpeak_anon\tpeak_swap\tavg_cpu_pct\tpeak_cpu_pct\tpeak_tasks\tio_read\tio_write\tevents\toutcome\n' > "$test_root/state/watchdog/history.tsv"
+    printf '2026-10-14T10:00:00Z\t2026-10-14T11:00:00Z\tfile-backup.service\tmoderate\t3600\t104857600\t52428800\t0\t2\t40\t20\t1000\t2000\tstep-down,step-up\tcompleted\n' >> "$test_root/state/watchdog/history.tsv"
+    printf 'state=running\nmemory_bytes=1000\n' > "$test_root/state/watchdog/file-backup.service.status"
+    printf '3\tproject-a/file.db\n' > "$test_root/state/active-files/workspace_project-a.tsv"
+    printf 'failure text\n' > "$test_root/state/failures/20261014T100000Z-file-backup.service.log"
+
+    reply=$(control_call "$test_root" '{"verb":"status"}')
+    [ "$(json_field "$reply" 'd["ok"]')" = "True" ] || fail_test "status failed: $reply"
+    [ "$(json_field "$reply" 'd["data"]["services"]["file-backup.service"]["ActiveState"]')" = "inactive" ] || fail_test "status did not parse unit blocks: $reply"
+    [ "$(json_field "$reply" 'd["data"]["watchdog"]["state"]')" = "running" ] || fail_test 'status did not read the watchdog status file'
+    [ "$(json_field "$reply" 'd["data"]["mode"]')" = "user" ] || fail_test 'status mode is not user'
+    assert_contains "$test_root/systemctl.log" '--user show file-backup.service'
+
+    reply=$(control_call "$test_root" '{"verb":"history","args":{"limit":5}}')
+    [ "$(json_field "$reply" 'd["data"]["rows"][0]["events"]')" = "['step-down', 'step-up']" ] || fail_test "history events not parsed: $reply"
+    [ "$(json_field "$reply" 'd["data"]["rows"][0]["peak_mem"]')" = "104857600" ] || fail_test 'history numbers not parsed'
+
+    reply=$(control_call "$test_root" '{"verb":"runlog","args":{"run":"latest","lines":100000}}')
+    [ "$(json_field "$reply" 'len(d["data"]["lines"])')" = "2000" ] || fail_test 'runlog was not bounded to 2000 lines'
+    [ "$(json_field "$reply" 'd["data"]["truncated"]')" = "True" ] || fail_test 'runlog did not report truncation'
+    reply=$(control_call "$test_root" '{"verb":"runlog","args":{"run":"2026-10-13T10:01:00Z","lines":10}}')
+    [ "$(json_field "$reply" 'd["data"]["lines"][-1]')" = "old run" ] || fail_test "runlog did not pick the run by start time: $reply"
+
+    reply=$(control_call "$test_root" '{"verb":"journal","args":{"source":"watchdog","lines":5}}')
+    assert_contains "$test_root/journalctl.log" '--user -t backup-watchdog -n 5'
+
+    reply=$(control_call "$test_root" '{"verb":"failures.list"}')
+    [ "$(json_field "$reply" 'd["data"]["failures"][0]["name"]')" = "20261014T100000Z-file-backup.service.log" ] || fail_test 'failure list wrong'
+    reply=$(control_call "$test_root" '{"verb":"deferrals"}')
+    [ "$(json_field "$reply" 'd["data"]["rows"][0]["count"]')" = "3" ] || fail_test 'deferrals not read'
+    reply=$(control_call "$test_root" '{"verb":"sources.get"}')
+    [ "$(json_field "$reply" 'd["data"]["rows"][0]["isolation"]')" = "children" ] || fail_test 'sources not parsed'
+    [ "$(json_field "$reply" 'd["data"]["editable"]')" = "False" ] || fail_test 'sources must be read-only in v1'
+    reply=$(control_call "$test_root" '{"verb":"excludes.list"}')
+    [ "$(json_field "$reply" 'd["data"]["files"][0]["lines"]')" = "['cache/**', '*.tmp']" ] || fail_test "excludes not found: $reply"
+    reply=$(control_call "$test_root" '{"verb":"profile.show"}')
+    [ "$(json_field "$reply" 'd["data"]["profiles"][0]["name"]')" = "slow" ] || fail_test 'profile.show failed'
+
+    for request in '{"verb":"nope"}' '{"verb":"status","extra":1}' '{"verb":"status","args":{"x":1}}' \
+        '{"verb":"failures.read","args":{"name":"../../etc/passwd"}}' '{"verb":"history","args":{"limit":"9"}}' \
+        '{"verb":"journal","args":{"source":"sshd"}}' 'not json' '{"verb":"backup.start","args":{"what":"everything"}}'; do
+        reply=$(control_call "$test_root" "$request")
+        [ "$(json_field "$reply" 'd["error"]["code"]')" = "invalid_request" ] || fail_test "not refused: $request -> $reply"
+    done
+    [ ! -s "$test_root/state/gui/audit.jsonl" ] || fail_test 'a refused request left an audit line'
+}
+
+test_control_never_returns_secrets() {
+    local test_root
+    local verb
+    local all_replies
+    test_root=$(mktemp -d)
+    setup_control_root "$test_root"
+    all_replies="$test_root/replies.txt"
+    for verb in status history runlog journal failures.list deferrals sources.get excludes.list profile.show config.get events.since audit; do
+        control_call "$test_root" "{\"verb\":\"$verb\"}" >> "$all_replies"
+    done
+    assert_not_contains "$all_replies" 'tk_secret_token_value'
+    assert_not_contains "$all_replies" 'rclone-secret-value'
+    assert_not_contains "$all_replies" 'https://ntfy.invalid/test-topic'
+    assert_contains "$all_replies" '"key":"NOTIFY_NTFY_TOKEN"'
+    assert_contains "$all_replies" '"is_set":true'
+}
+
+test_control_config_set() {
+    local test_root
+    local reply
+    local sha
+    local inode_before
+    local sources_sha
+    test_root=$(mktemp -d)
+    setup_control_root "$test_root"
+    mv "$test_root/config/global.conf" "$test_root/config/global.conf.real"
+    ln -s global.conf.real "$test_root/config/global.conf"
+    inode_before=$(stat -c %i "$test_root/config/global.conf.real")
+    sources_sha=$(sha256sum "$test_root/config/file-sources.conf" | cut -d' ' -f1)
+
+    reply=$(control_call "$test_root" '{"verb":"config.set","args":{"changes":{"WATCHDOG_KILL_PERCENT":"85"},"expect_sha":"0000000000000000000000000000000000000000000000000000000000000000"}}')
+    [ "$(json_field "$reply" 'd["error"]["code"]')" = "config_conflict" ] || fail_test "stale sha accepted: $reply"
+    assert_not_contains "$test_root/config/global.conf.real" 'WATCHDOG_KILL_PERCENT="85"'
+
+    sha=$(json_field "$(control_call "$test_root" '{"verb":"config.get"}')" 'd["data"]["sha256"]')
+    for changes in '{"RCLONE_BIN":"/bin/sh"}' '{"WATCHDOG_KILL_PERCENT":"50"}' '{"WATCHDOG_KILL_PERCENT":"8$(id)"}' \
+        '{"NOTIFY_NTFY_TOPIC_URL":"http://insecure.example/x"}' '{"WATCHDOG_SYSTEM_CRITICAL_AVAILABLE_PERCENT":"15"}'; do
+        reply=$(control_call "$test_root" "{\"verb\":\"config.set\",\"args\":{\"changes\":$changes,\"expect_sha\":\"$sha\"}}")
+        [ "$(json_field "$reply" 'd["error"]["code"]')" = "invalid_request" ] || fail_test "invalid change accepted: $changes -> $reply"
+    done
+
+    reply=$(control_call "$test_root" "{\"verb\":\"config.set\",\"args\":{\"changes\":{\"WATCHDOG_KILL_PERCENT\":\"85\",\"NOTIFY_NTFY_TOKEN\":\"tk_new_token\"},\"expect_sha\":\"$sha\"},\"session\":\"s1\"}")
+    [ "$(json_field "$reply" 'd["ok"]')" = "True" ] || fail_test "valid change failed: $reply"
+    assert_contains "$test_root/config/global.conf.real" 'WATCHDOG_KILL_PERCENT="85"'
+    assert_contains "$test_root/config/global.conf.real" 'NOTIFY_NTFY_TOKEN="tk_new_token"'
+    [ -L "$test_root/config/global.conf" ] || fail_test 'config symlink was replaced'
+    [ "$(stat -c %i "$test_root/config/global.conf.real")" = "$inode_before" ] || fail_test 'config inode changed'
+    ls "$test_root/state/gui/config-backups/" | grep -q '^global.conf\.' || fail_test 'no config backup copy'
+    assert_contains "$test_root/state/gui/audit.jsonl" '"verb": "config.set"'
+    assert_contains "$test_root/state/gui/audit.jsonl" '"NOTIFY_NTFY_TOKEN": "[set]"'
+    assert_not_contains "$test_root/state/gui/audit.jsonl" 'tk_new_token'
+    assert_not_contains "$test_root/state/events.jsonl" 'tk_new_token'
+    assert_contains "$test_root/state/events.jsonl" '"category":"gui-action"'
+    [ "$(sha256sum "$test_root/config/file-sources.conf" | cut -d' ' -f1)" = "$sources_sha" ] || fail_test 'file-sources.conf changed'
+}
+
+test_control_profile_matches_cli() {
+    local gui_root
+    local cli_root
+    local reply
+    gui_root=$(mktemp -d)
+    cli_root=$(mktemp -d)
+    setup_control_root "$gui_root"
+    setup_control_root "$cli_root"
+
+    reply=$(control_call "$gui_root" '{"verb":"profile.set","args":{"mode":"adaptive","top":"moderate","floor":"slow"}}')
+    [ "$(json_field "$reply" 'd["ok"]')" = "True" ] || fail_test "profile.set failed: $reply"
+    [ "$(json_field "$reply" 'd["data"]["profiles"]["ladder"]')" = "['moderate', 'slow']" ] || fail_test 'ladder not returned'
+    HOME="$cli_root/home" PATH="$cli_root/bin:$PATH" FAKE_SYSTEMCTL_LOG="$cli_root/systemctl.log" \
+        BACKUP_SUITE_CONFIG_DIR="$cli_root/config" "$ROOT_DIR/bin/backup-profile.sh" adaptive moderate slow > /dev/null
+
+    diff <(grep '^FILE_BACKUP_PROFILE' "$gui_root/config/global.conf") <(grep '^FILE_BACKUP_PROFILE' "$cli_root/config/global.conf") \
+        || fail_test 'GUI and CLI wrote different profile keys'
+    diff "$gui_root/home/.config/systemd/user/file-backup.service.d/50-backup-profile.conf" \
+        "$cli_root/home/.config/systemd/user/file-backup.service.d/50-backup-profile.conf" || fail_test 'GUI and CLI wrote different drop-ins'
+
+    for request in '{"verb":"profile.set","args":{"mode":"adaptive","top":"slow","floor":"moderate"}}' \
+        '{"verb":"profile.set","args":{"mode":"fixed","profile":"turbo"}}' \
+        '{"verb":"profile.override","args":{"profile":"slow","key":"MEMORY_MAX","value":"1G; rm -rf /"}}' \
+        '{"verb":"profile.override","args":{"profile":"slow","key":"PATH","value":"1"}}'; do
+        reply=$(control_call "$gui_root" "$request")
+        [ "$(json_field "$reply" 'd["error"]["code"]')" = "invalid_request" ] || fail_test "not refused: $request -> $reply"
+    done
+    reply=$(control_call "$gui_root" '{"verb":"profile.override","args":{"profile":"slow","key":"MEMORY_MAX","value":"384M"}}')
+    [ "$(json_field "$reply" 'd["ok"]')" = "True" ] || fail_test "override failed: $reply"
+    assert_contains "$gui_root/config/global.conf" 'FILE_PROFILE_SLOW_MEMORY_MAX="384M"'
+    reply=$(control_call "$gui_root" '{"verb":"profile.preview","args":{"mode":"fixed","profile":"slow"}}')
+    [[ "$(json_field "$reply" 'd["data"]["dropin"]')" == *"MemoryMax=384M"* ]] || fail_test "preview missing override: $reply"
+}
+
+test_control_actions_and_peer_check() {
+    local test_root
+    local reply
+    local own_group
+    test_root=$(mktemp -d)
+    setup_control_root "$test_root"
+
+    reply=$(control_call "$test_root" '{"verb":"backup.start","args":{"what":"files"}}')
+    [ "$(json_field "$reply" 'd["ok"]')" = "True" ] || fail_test "backup.start failed: $reply"
+    assert_contains "$test_root/systemctl.log" '--user start --no-block file-backup.service'
+    control_call "$test_root" '{"verb":"backup.stop"}' > /dev/null
+    assert_contains "$test_root/systemctl.log" '--user stop --no-block file-backup.service'
+    control_call "$test_root" '{"verb":"timer.set","args":{"timer":"file-backup.timer","enabled":false}}' > /dev/null
+    assert_contains "$test_root/systemctl.log" '--user disable --now file-backup.timer'
+    assert_contains "$test_root/state/events.jsonl" '"category":"schedule-off"'
+    reply=$(control_call "$test_root" '{"verb":"notify.test"}')
+    [ "$(json_field "$reply" 'd["ok"]')" = "True" ] || fail_test "notify.test failed: $reply"
+    assert_contains "$test_root/curl.log" 'arg: Filename: notification-test.txt'
+    assert_contains "$test_root/state/events.jsonl" '"category":"test"'
+    [ "$(grep -c '"ok": true' "$test_root/state/gui/audit.jsonl")" -eq 4 ] || fail_test 'expected 4 audit lines'
+
+    reply=$(control_call "$test_root" '{"verb":"status"}' --peer "0-1234-65534")
+    [ "$(json_field "$reply" 'd["error"]["code"]')" = "forbidden" ] || fail_test "nobody was allowed: $reply"
+    reply=$(control_call "$test_root" '{"verb":"status"}' --peer "0-1234-notanumber")
+    [ "$(json_field "$reply" 'd["error"]["code"]')" = "forbidden" ] || fail_test "bad peer was allowed: $reply"
+    own_group=$(id -gn)
+    reply=$(BACKUP_SUITE_GUI_GROUP="$own_group" control_call "$test_root" '{"verb":"status"}' --peer "3-1234-$(id -u)")
+    [ "$(json_field "$reply" 'd["ok"]')" = "True" ] || fail_test "group member refused: $reply"
+    [ "$(json_field "$reply" 'd["data"]["caller"]["uid"]')" = "$(id -u)" ] || fail_test 'caller uid not taken from the peer'
+}
+
+test_events_and_progress_files() {
+    local test_root
+    local output_file
+    test_root=$(mktemp -d)
+    output_file="$test_root/output.log"
+    setup_control_root "$test_root"
+    sed -i 's/^NOTIFY_FAILURES_ENABLED="1"/NOTIFY_FAILURES_ENABLED="0"/' "$test_root/config/global.conf"
+    printf '1|workspace|%s/source|fixed|projects/workspace|.nosync|children\n' "$test_root" > "$test_root/config/file-sources.conf"
+    mkdir -p "$test_root/source/project-b" "$test_root/remote"
+    printf 'a\n' > "$test_root/source/project-a/a.txt"
+    printf 'b\n' > "$test_root/source/project-b/b.txt"
+    sed -i "s|^RCLONE_REMOTE_ROOT=.*|RCLONE_REMOTE_ROOT=\"$test_root/remote\"|" "$test_root/config/global.conf"
+
+    PATH="$test_root/bin:$PATH" FAKE_CURL_LOG="$test_root/curl.log" FAKE_SYSTEMCTL_LOG="$test_root/systemctl.log" \
+        run_backup "$test_root" > "$output_file" 2>&1 || { cat "$output_file" >&2; fail_test 'backup failed'; }
+    assert_contains "$test_root/state/run/progress.env" 'state=finished'
+    assert_contains "$test_root/state/run/progress.env" 'projects_total=2'
+    assert_contains "$test_root/state/run/progress.env" 'project_index=2'
+    assert_contains "$test_root/state/events.jsonl" '"category":"run-finished"'
+
+    # ntfy_publish records an event even when ntfy is off, as valid JSON.
+    HOME="$test_root/home" PATH="$test_root/bin:$PATH" FAKE_CURL_LOG="$test_root/curl.log" BACKUP_SUITE_CONFIG_DIR="$test_root/config" \
+        bash -c '. "$1/bin/common.sh"; . "$1/bin/notify-lib.sh"; load_global_config
+            for i in $(seq 1 3); do ntfy_publish "title \"$i\"" high "x" "line one
+line two	tab \\ backslash" "" "" watchdog-stop > /dev/null; done' _ "$ROOT_DIR"
+    python3 -c '
+import json, sys
+events = [json.loads(line) for line in open(sys.argv[1])]
+seqs = [event["seq"] for event in events]
+assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs
+last = events[-1]
+assert last["severity"] == "error" and last["category"] == "watchdog-stop", last
+assert last["title"] == "title \"3\"" and "\\ backslash" in last["message"], last
+' "$test_root/state/events.jsonl" || fail_test 'events.jsonl is not valid or ordered'
+    [ ! -s "$test_root/curl.log" ] || fail_test 'ntfy was called although disabled'
+    reply=$(control_call "$test_root" '{"verb":"events.since","args":{"seq":1}}')
+    [ "$(json_field "$reply" 'd["data"]["events"][0]["seq"]')" = "2" ] || fail_test "events.since wrong: $reply"
+}
+
+test_gui_broker_installer_guards() {
+    local test_root
+    local output_file
+    test_root=$(mktemp -d)
+    output_file="$test_root/output.log"
+    "$ROOT_DIR/bin/install-gui-broker.sh" --help > "$output_file"
+    assert_contains "$output_file" 'refresh-acl'
+    if "$ROOT_DIR/bin/install-gui-broker.sh" --bogus > "$output_file" 2>&1; then
+        fail_test 'unknown option accepted'
+    fi
+    if [ "$(id -u)" -ne 0 ]; then
+        if "$ROOT_DIR/bin/install-gui-broker.sh" --templates "$ROOT_DIR/systemd" > "$output_file" 2>&1; then
+            fail_test 'non-root install accepted'
+        fi
+        assert_contains "$output_file" 'Run as root'
+    fi
+    # Templates render without leftover placeholders.
+    for template in backup-suite-control.socket.template backup-suite-control@.service.template; do
+        sed -e 's|__INSTALL_DIR__|/opt/x|g' -e 's|__CONFIG_DIR__|/etc/x|g' -e 's|__STATE_DIR__|/var/lib/x|g' \
+            -e 's|__CANONICAL_CONFIG_DIR__|/opt/x-src/config|g' -e 's|__GUI_GROUP__|backup-suite-gui|g' \
+            "$ROOT_DIR/systemd/$template" > "$test_root/$template"
+        if grep -Eq '__[A-Z0-9_]+__' "$test_root/$template"; then
+            fail_test "placeholder left in $template"
+        fi
+    done
+    assert_contains "$test_root/backup-suite-control.socket.template" 'SocketMode=0660'
+    assert_contains "$test_root/backup-suite-control.socket.template" 'ExecStartPost=/opt/x/bin/install-gui-broker.sh --refresh-acl'
+    assert_contains "$test_root/backup-suite-control@.service.template" 'ExecStart=/opt/x/bin/backup-control.sh --peer %i'
+}
+
 if [ "${1:-}" = "--single" ]; then
     shift
     "$@"
@@ -1058,6 +1340,13 @@ run_test 'auto-scaled limits and per-profile overrides' test_profile_auto_limits
 run_test 'adaptive profile commands' test_adaptive_profile_cli
 run_test 'watchdog steps the profile down and back up' test_watchdog_adaptive_steps_down_and_up
 run_test 'adaptive level carries into the next run' test_adaptive_level_carries_into_next_run
+run_test 'control script read verbs and refusals' test_control_read_verbs
+run_test 'control script never returns secrets' test_control_never_returns_secrets
+run_test 'control script config.set safety' test_control_config_set
+run_test 'control script profile verbs match the CLI' test_control_profile_matches_cli
+run_test 'control script actions, audit and peer check' test_control_actions_and_peer_check
+run_test 'events file and run progress' test_events_and_progress_files
+run_test 'GUI broker installer guards and templates' test_gui_broker_installer_guards
 
 echo "Tests: passed=$PASS_COUNT failed=$FAIL_COUNT"
 [ "$FAIL_COUNT" -eq 0 ]

@@ -22,6 +22,9 @@ SERVICE_UNIT="file-backup.service"
 WATCHDOG_TEMPLATE_UNIT="backup-suite-watchdog@.service"
 WATCHDOG_INSTANCE_UNIT="backup-suite-watchdog@file-backup.service"
 PROFILE_DROPIN_DIR="$UNIT_DIR/$SERVICE_UNIT.d"
+CONTROL_SOCKET_UNIT="backup-suite-control.socket"
+MANAGED_UNIT_FILES=(file-backup.service backup-suite-notify@.service "$WATCHDOG_TEMPLATE_UNIT" "$CONTROL_SOCKET_UNIT" backup-suite-control@.service)
+GUI_ADMINS=()
 RUN_ID=$(date -u '+%Y%m%dT%H%M%SZ')
 BACKUP_DIR=""
 CHECK_ONLY=0
@@ -62,6 +65,10 @@ Options:
                    retried by the next run; remote versions stay protected)
   --test-notification
                    send one ntfy test message in the new format after deploying
+  --gui-admin LOGIN
+                   a login that may use the GUI's control broker (repeatable;
+                   default: the user who ran sudo). Members can start and stop
+                   backups and change profiles and settings through the GUI.
   --check          run source checks and tests only; change nothing
   -h, --help       show this help
 EOF
@@ -87,7 +94,13 @@ restore_previous_installation() {
         rm -rf "$INSTALL_DIR/bin"
         mv "$INSTALL_DIR/bin.deploy-restore" "$INSTALL_DIR/bin"
     fi
-    for backup_file in file-backup.service backup-suite-notify@.service "$WATCHDOG_TEMPLATE_UNIT"; do
+    if [ -f "$BACKUP_DIR/units/.absent-$CONTROL_SOCKET_UNIT" ]; then
+        # A first broker install is undone by stopping it and removing its link;
+        # this script never disables units (it must never touch the timer).
+        systemctl stop "$CONTROL_SOCKET_UNIT" >/dev/null 2>&1 || true
+        rm -f "$UNIT_DIR/sockets.target.wants/$CONTROL_SOCKET_UNIT"
+    fi
+    for backup_file in "${MANAGED_UNIT_FILES[@]}"; do
         if [ -f "$BACKUP_DIR/units/$backup_file" ]; then
             cp -a "$BACKUP_DIR/units/$backup_file" "$UNIT_DIR/$backup_file"
         elif [ -f "$BACKUP_DIR/units/.absent-$backup_file" ]; then
@@ -168,6 +181,12 @@ while [ "$#" -gt 0 ]; do
         --test-notification)
             SEND_TEST_NOTIFICATION=1
             ;;
+        --gui-admin)
+            [ "$#" -ge 2 ] || die "--gui-admin requires a login"
+            [[ "$2" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "Invalid login: $2"
+            GUI_ADMINS+=("$2")
+            shift
+            ;;
         --check)
             CHECK_ONLY=1
             ;;
@@ -192,6 +211,11 @@ required_source_files=(
     "$SOURCE_DIR/bin/notify-test.sh"
     "$SOURCE_DIR/bin/backup-watchdog.sh"
     "$SOURCE_DIR/bin/backup-profile.sh"
+    "$SOURCE_DIR/bin/backup-control.sh"
+    "$SOURCE_DIR/bin/backup-control.py"
+    "$SOURCE_DIR/bin/install-gui-broker.sh"
+    "$SOURCE_DIR/systemd/backup-suite-control.socket.template"
+    "$SOURCE_DIR/systemd/backup-suite-control@.service.template"
     "$SOURCE_DIR/systemd/file-backup.service.template"
     "$SOURCE_DIR/systemd/backup-suite-notify@.service.template"
     "$SOURCE_DIR/systemd/backup-suite-watchdog@.service.template"
@@ -200,12 +224,13 @@ required_source_files=(
 for source_file in "${required_source_files[@]}"; do
     [ -f "$source_file" ] || die "Required source file is missing: $source_file"
 done
-for command_name in awk cp find flock git grep install mktemp readlink sed systemctl systemd-analyze; do
+for command_name in awk cp find flock git grep install mktemp python3 readlink sed setfacl systemctl systemd-analyze; do
     command -v "$command_name" >/dev/null 2>&1 || die "Required command not found: $command_name"
 done
 [[ "$WAIT_LIMIT_SECONDS" =~ ^[0-9]+$ ]] || die "BACKUP_SUITE_DEPLOY_WAIT_LIMIT_SECONDS must be an integer"
 
 bash -n "$SOURCE_DIR/setup.sh" "$SOURCE_DIR/production-deploy.sh" "$SOURCE_DIR"/bin/*.sh "$SOURCE_DIR/tests/run.sh" "$SOURCE_DIR/tests/fixtures"/*.sh
+python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "$SOURCE_DIR/bin/backup-control.py"
 if [ -d "$SOURCE_DIR/.git" ]; then
     if ! git -C "$SOURCE_DIR" diff --quiet || ! git -C "$SOURCE_DIR" diff --cached --quiet; then
         die "Tracked repository changes are present. Commit or discard them before deploying."
@@ -299,7 +324,7 @@ BACKUP_DIR="$STATE_DIR/deploy-backups/$RUN_ID"
 install -d -m 700 "$BACKUP_DIR" "$BACKUP_DIR/units"
 cp -a "$INSTALL_DIR/bin" "$BACKUP_DIR/install-bin"
 cp -a "$(readlink -f "$GLOBAL_CONFIG")" "$BACKUP_DIR/global.conf"
-for unit_file in file-backup.service backup-suite-notify@.service "$WATCHDOG_TEMPLATE_UNIT"; do
+for unit_file in "${MANAGED_UNIT_FILES[@]}"; do
     if [ -f "$UNIT_DIR/$unit_file" ]; then
         cp -a "$UNIT_DIR/$unit_file" "$BACKUP_DIR/units/$unit_file"
     else
@@ -314,8 +339,8 @@ DEPLOY_STARTED=1
 
 log "Installing scripts (production config and credentials are not replaced)."
 install -d -m 755 "$INSTALL_DIR/bin" "$CANONICAL_DIR/bin" "$CANONICAL_DIR/systemd"
-install -m 755 "$SOURCE_DIR"/bin/*.sh "$INSTALL_DIR/bin/"
-install -m 755 "$SOURCE_DIR"/bin/*.sh "$CANONICAL_DIR/bin/"
+install -m 755 "$SOURCE_DIR"/bin/*.sh "$SOURCE_DIR"/bin/*.py "$INSTALL_DIR/bin/"
+install -m 755 "$SOURCE_DIR"/bin/*.sh "$SOURCE_DIR"/bin/*.py "$CANONICAL_DIR/bin/"
 install -m 644 "$SOURCE_DIR"/systemd/*.template "$CANONICAL_DIR/systemd/"
 install -m 755 "$SOURCE_DIR/setup.sh" "$SOURCE_DIR/production-deploy.sh" "$SOURCE_DIR/production-file-backup-migrate.sh" "$CANONICAL_DIR/"
 install -m 644 "$SOURCE_DIR/README.md" "$INSTALL_DIR/README.md"
@@ -398,6 +423,38 @@ systemctl show "$SERVICE_UNIT" -p Wants --value | grep -Fq "$WATCHDOG_INSTANCE_U
 log "systemd accepted the profile limits and the watchdog wiring."
 
 BACKUP_SUITE_CONFIG_DIR="$CONFIG_DIR" "$INSTALL_DIR/bin/backup-watchdog.sh" "$SERVICE_UNIT" --self-test
+
+log "Installing the GUI control broker ($CONTROL_SOCKET_UNIT)."
+gui_admin_args=()
+for gui_admin in "${GUI_ADMINS[@]}"; do
+    gui_admin_args+=(--admin "$gui_admin")
+done
+"$INSTALL_DIR/bin/install-gui-broker.sh" --templates "$SOURCE_DIR/systemd" --install-dir "$INSTALL_DIR" \
+    --config-dir "$CONFIG_DIR" --state-dir "$STATE_DIR" --unit-dir "$UNIT_DIR" "${gui_admin_args[@]}"
+"$INSTALL_DIR/bin/install-gui-broker.sh" --check
+control_reply=$(printf '{"verb":"status"}\n' | BACKUP_SUITE_CONFIG_DIR="$CONFIG_DIR" "$INSTALL_DIR/bin/backup-control.sh")
+case "$control_reply" in
+    '{"ok":true'*) ;;
+    *) die "backup-control.sh status failed: ${control_reply:0:300}" ;;
+esac
+socket_reply=$(python3 -I -c '
+import socket, sys
+connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+connection.settimeout(20)
+connection.connect("/run/backup-suite/control.sock")
+connection.sendall(b"{\"verb\":\"events.stat\"}\n")
+data = b""
+while not data.endswith(b"\n"):
+    chunk = connection.recv(65536)
+    if not chunk:
+        break
+    data += chunk
+sys.stdout.write(data.decode())
+')
+case "$socket_reply" in
+    '{"ok":true'*) log "The control broker answers on /run/backup-suite/control.sock." ;;
+    *) die "The control broker did not answer correctly: ${socket_reply:0:300}" ;;
+esac
 
 DEPLOY_SUCCEEDED=1
 log "Deployment complete. Backup copy of the previous installation: $BACKUP_DIR"

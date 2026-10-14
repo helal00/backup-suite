@@ -50,6 +50,61 @@ file_active_window_seconds="${FILE_ACTIVE_WINDOW_SECONDS:-120}"
 file_active_max_deferrals="${FILE_ACTIVE_MAX_DEFERRALS:-12}"
 file_rclone_tuning_args=()
 active_profile_name=""
+run_progress_file=$(join_path "$STATE_DIR" "run" "progress.env")
+projects_total=0
+project_index=0
+current_project_label=""
+
+write_run_progress() {
+    # One small key=value file for the GUI: where the run is and its counts.
+    local run_state="$1"
+    local progress_dir
+    local temp_file
+
+    progress_dir=$(dirname "$run_progress_file")
+    mkdir -p "$progress_dir" 2>/dev/null || return 0
+    temp_file="$run_progress_file.tmp.$$"
+    {
+        printf 'state=%s\n' "$run_state"
+        printf 'outcome=%s\n' "${run_outcome:-}"
+        printf 'started_at=%s\n' "$run_started_at"
+        printf 'updated_at=%s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+        printf 'pid=%s\n' "$$"
+        printf 'projects_total=%s\n' "$projects_total"
+        printf 'project_index=%s\n' "$project_index"
+        printf 'current_project=%s\n' "${current_project_label//$'\n'/ }"
+        printf 'profile=%s\n' "${PROFILE_NAME:-}"
+        printf 'synced=%s\nskipped=%s\nskipped_changed=%s\ndeferred_active=%s\nfailed=%s\n' \
+            "$synced_count" "$skipped_count" "$skipped_changed_count" "$deferred_active_count" "$failed_count"
+    } > "$temp_file" 2>/dev/null && mv -f "$temp_file" "$run_progress_file" 2>/dev/null
+    rm -f "$temp_file" 2>/dev/null
+    return 0
+}
+
+count_planned_projects() {
+    # Counts the projects this run will visit, the same way the main loop does.
+    local enabled label source_path destination_mode destination_value sync_stop_file isolation_mode unexpected_fields
+    local count=0
+    local child_count
+
+    [ -r "$FILE_SOURCE_CONFIG_PATH" ] || { printf '0'; return 0; }
+    while IFS='|' read -r enabled label source_path destination_mode destination_value sync_stop_file isolation_mode unexpected_fields; do
+        enabled=$(trim "$enabled")
+        source_path=$(trim "$source_path")
+        isolation_mode=$(trim "${isolation_mode:-single}")
+        [ -n "$enabled" ] || continue
+        [[ "$enabled" == \#* ]] && continue
+        is_enabled_value "$enabled" || continue
+        [ -d "$source_path" ] || continue
+        if [ "$isolation_mode" = "children" ]; then
+            child_count=$(find "$source_path" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+            count=$((count + child_count))
+        else
+            count=$((count + 1))
+        fi
+    done < "$FILE_SOURCE_CONFIG_PATH"
+    printf '%s' "$count"
+}
 
 select_project_profile() {
     # In adaptive mode the watchdog may step the profile down or up while the
@@ -101,8 +156,13 @@ finish() {
     if [ ${#temp_runtime_files[@]} -gt 0 ]; then
         rm -f "${temp_runtime_files[@]}"
     fi
+    current_project_label=""
+    write_run_progress finished
     if [ "$exit_code" -eq 0 ]; then
         echo "File backup finished at ${run_finished_at} with status: ${run_outcome}"
+        record_backup_event info run-finished "File backup finished: ${run_outcome}" \
+            "Synced ${synced_count}, skipped ${skipped_count}, deferred while changing $((skipped_changed_count + deferred_active_count)), failed ${failed_count}. Profile ${PROFILE_NAME:-unknown}. Started ${run_started_at}, finished ${run_finished_at}." \
+            file-backup.service
     else
         echo "File backup finished at ${run_finished_at} with status: failure (exit code ${exit_code}, outcome ${run_outcome})"
     fi
@@ -385,7 +445,7 @@ What to do: if a file is a log or cache, add it to .backup-excludes in that proj
 Host: $(hostname) | Profile: $PROFILE_NAME
 MSG
 )
-    ntfy_publish "${NOTIFY_NTFY_TITLE_PREFIX:-Backup Suite}: files repeatedly skipped while changing on $(hostname)" default "hourglass,backup" "$message" || true
+    ntfy_publish "${NOTIFY_NTFY_TITLE_PREFIX:-Backup Suite}: files repeatedly skipped while changing on $(hostname)" default "hourglass,backup" "$message" "" "" changing-files || true
 }
 
 migration_key_for_destination() {
@@ -533,6 +593,17 @@ mark_migration_complete() {
 }
 
 process_project() {
+    local project_label="$1"
+    local source_path="$2"
+    local destination_relative="$3"
+
+    project_index=$((project_index + 1))
+    current_project_label="$project_label"
+    write_run_progress running
+    process_project_sync "$project_label" "$source_path" "$destination_relative"
+}
+
+process_project_sync() {
     local project_label="$1"
     local source_path="$2"
     local destination_relative="$3"
@@ -765,6 +836,8 @@ process_project() {
 
 echo "File backup started at ${run_started_at}"
 select_project_profile
+projects_total=$(count_planned_projects)
+write_run_progress running
 echo "Using source config: $FILE_SOURCE_CONFIG_PATH"
 echo "Remote base: $remote_base"
 

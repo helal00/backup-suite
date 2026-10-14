@@ -354,6 +354,19 @@ is_enabled_value() {
     esac
 }
 
+json_escape() {
+    # Prints $1 as the inside of a JSON string (no surrounding quotes).
+    local text
+
+    text=$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177')
+    text=${text//\\/\\\\}
+    text=${text//\"/\\\"}
+    text=${text//$'\n'/\\n}
+    text=${text//$'\r'/\\r}
+    text=${text//$'\t'/\\t}
+    printf '%s' "$text"
+}
+
 size_to_bytes() {
     # Converts systemd-style sizes (512M, 1G, 2048K, 1073741824) to bytes.
     # Prints nothing for "infinity", "max", or an empty value.

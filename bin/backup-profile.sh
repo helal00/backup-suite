@@ -15,7 +15,7 @@ Usage: backup-profile.sh [command]
 Choose how much of the server the file backup may use.
 
 Commands:
-  show                       list the profiles, their limits, and the active setup
+  show [--json]              list the profiles, their limits, and the active setup
   choose                     interactive menu (default when run in a terminal)
   set <profile>              fixed mode: always use slow, moderate, fast, or custom
   adaptive <top> <floor>     adaptive mode: start at <top>; the watchdog steps
@@ -147,6 +147,81 @@ show_profiles() {
     if [ "$PROFILE_MODE" = "adaptive" ]; then
         echo "The watchdog steps one level down when the backup or the server is short of resources, and one level up after ${WATCHDOG_ADAPTIVE_STEP_UP_SECONDS:-300}s of normal conditions."
     fi
+}
+
+json_string_array() {
+    local item
+    local first=1
+
+    printf '['
+    for item in "$@"; do
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '"%s"' "$(json_escape "$item")"
+    done
+    printf ']'
+}
+
+observed_json_for_profile() {
+    # The newest watchdog history line for this profile, or null.
+    local profile_name="$1"
+    local history_file
+    local observed
+
+    history_file=$(join_path "$STATE_DIR" "watchdog" "history.tsv")
+    observed=""
+    if [ -r "$history_file" ]; then
+        observed=$(awk -F '\t' -v wanted="$profile_name" '
+            NR > 1 && $4 == wanted { line = $0 }
+            END {
+                if (line == "") { exit }
+                split(line, f, "\t")
+                printf "{\"started\":\"%s\",\"duration_s\":%d,\"peak_memory_bytes\":%d,\"avg_cpu_percent\":%s,\"outcome\":\"%s\"}", f[1], f[5], f[6], (f[9] == "" ? 0 : f[9]), f[15]
+            }
+        ' "$history_file")
+    fi
+    printf '%s' "${observed:-null}"
+}
+
+show_profiles_json() {
+    local profile_name
+    local current_level=""
+    local first=1
+    local in_ladder
+    local entry
+    local names=("${FILE_BACKUP_PROFILE_NAMES[@]}")
+
+    resolve_profile_ladder
+    if [ "$PROFILE_MODE" = "adaptive" ]; then
+        current_level=$(current_adaptive_profile)
+    else
+        current_level="${PROFILE_LADDER[0]}"
+    fi
+    [ "${FILE_BACKUP_PROFILE:-custom}" != "custom" ] || names+=(custom)
+    printf '{"host":{"cpu_cores":%s,"memory_bytes":%s},' "$(host_cpu_cores)" "$(host_memory_bytes || true)"
+    printf '"limits_mode":"%s","mode":"%s","ladder":%s,"current_level":"%s","setup":"%s",' \
+        "$(json_escape "${FILE_PROFILE_LIMITS_MODE:-fixed}")" "$PROFILE_MODE" "$(json_string_array "${PROFILE_LADDER[@]}")" \
+        "$(json_escape "$current_level")" "$(json_escape "$(describe_setup)")"
+    printf '"step_up_seconds":%s,"override_keys":%s,"profiles":[' "${WATCHDOG_ADAPTIVE_STEP_UP_SECONDS:-300}" "$(json_string_array "${FILE_PROFILE_OVERRIDE_KEYS[@]}")"
+    for profile_name in "${names[@]}"; do
+        resolve_file_backup_profile "$profile_name"
+        in_ladder=false
+        for entry in "${PROFILE_LADDER[@]}"; do
+            [ "$entry" = "$profile_name" ] && in_ladder=true
+        done
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '{"name":"%s","summary":"%s","in_ladder":%s,"current":%s,' "$PROFILE_NAME" "$(json_escape "$PROFILE_SUMMARY")" \
+            "$in_ladder" "$([ "$PROFILE_NAME" = "$current_level" ] && echo true || echo false)"
+        printf '"limits":{"CPU_QUOTA":"%s","CPU_WEIGHT":"%s","IO_WEIGHT":"%s","NICE":"%s","IO_SCHEDULING_CLASS":"%s","MEMORY_HIGH":"%s","MEMORY_MAX":"%s","MEMORY_SWAP_MAX":"%s","TASKS_MAX":"%s","RCLONE_TRANSFERS":"%s","RCLONE_CHECKERS":"%s","RCLONE_BUFFER_SIZE":"%s","RCLONE_TPSLIMIT":"%s","RCLONE_BWLIMIT":"%s"},' \
+            "$PROFILE_CPU_QUOTA" "$PROFILE_CPU_WEIGHT" "$PROFILE_IO_WEIGHT" "$PROFILE_NICE" "$PROFILE_IO_SCHEDULING_CLASS" \
+            "$PROFILE_MEMORY_HIGH" "$PROFILE_MEMORY_MAX" "$PROFILE_MEMORY_SWAP_MAX" "$PROFILE_TASKS_MAX" \
+            "$PROFILE_RCLONE_TRANSFERS" "$PROFILE_RCLONE_CHECKERS" "$PROFILE_RCLONE_BUFFER_SIZE" "$PROFILE_RCLONE_TPSLIMIT" \
+            "$(json_escape "${PROFILE_RCLONE_BWLIMIT:-}")"
+        printf '"limits_source":"%s","overrides":%s,"observed":%s}' "$(json_escape "${PROFILE_LIMITS_SOURCE:-}")" \
+            "$(json_string_array "${PROFILE_OVERRIDDEN_KEYS[@]}")" "$(observed_json_for_profile "$PROFILE_NAME")"
+    done
+    printf ']}\n'
 }
 
 set_config_value() {
@@ -384,7 +459,11 @@ fi
 
 case "$command_name" in
     show)
-        show_profiles
+        if [ "${2:-}" = "--json" ]; then
+            show_profiles_json
+        else
+            show_profiles
+        fi
         ;;
     choose)
         choose_profile

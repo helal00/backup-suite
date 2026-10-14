@@ -35,19 +35,74 @@ ntfy_bound_text() {
     printf '%s%s' "$text" "$marker"
 }
 
+BACKUP_EVENTS_KEEP_LINES=1000
+
+ntfy_priority_severity() {
+    case "$1" in
+        urgent|max|5|high|4) printf 'error' ;;
+        low|2|min|1) printf 'info' ;;
+        *) printf 'warning' ;;
+    esac
+}
+
+record_backup_event() {
+    # Usage: record_backup_event <info|warning|error> <category> <title> <message> [unit]
+    # Appends one JSON line to STATE_DIR/events.jsonl for the GUI and Tunnel
+    # Manager. Never fails the caller.
+    local severity="$1"
+    local category="$2"
+    local title="$3"
+    local message="$4"
+    local unit="${5:-}"
+    local events_file
+    local sequence_file
+    local lock_file
+
+    [ -n "${STATE_DIR:-}" ] || return 0
+    mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+    events_file=$(join_path "$STATE_DIR" "events.jsonl")
+    sequence_file=$(join_path "$STATE_DIR" "events.seq")
+    lock_file=$(join_path "$STATE_DIR" "events.lock")
+    case "$severity" in
+        info|warning|error) ;;
+        *) severity="warning" ;;
+    esac
+    message="${message:0:4000}"
+    (
+        flock -w 5 9 || exit 0
+        sequence=$(cat "$sequence_file" 2>/dev/null || true)
+        [[ "$sequence" =~ ^[0-9]+$ ]] || sequence=0
+        sequence=$((sequence + 1))
+        printf '%s\n' "$sequence" > "$sequence_file"
+        printf '{"seq":%s,"id":"evt-%s-%s","created_at":"%s","severity":"%s","category":"%s","title":"%s","message":"%s","unit":"%s"}\n' \
+            "$sequence" "$sequence" "$(date -u '+%s')" "$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')" "$severity" \
+            "$(json_escape "$category")" "$(json_escape "$title")" "$(json_escape "$message")" "$(json_escape "$unit")" >> "$events_file"
+        if [ "$(wc -l < "$events_file")" -gt $((BACKUP_EVENTS_KEEP_LINES + 100)) ]; then
+            trimmed_file=$(mktemp)
+            tail -n "$BACKUP_EVENTS_KEEP_LINES" "$events_file" > "$trimmed_file" && cat "$trimmed_file" > "$events_file"
+            rm -f "$trimmed_file"
+        fi
+    ) 9>>"$lock_file" 2>/dev/null || true
+    return 0
+}
+
 ntfy_publish() {
-    # Usage: ntfy_publish <title> <priority> <tags> <message> [attachment-file] [attachment-name]
+    # Usage: ntfy_publish <title> <priority> <tags> <message> [attachment-file] [attachment-name] [event-category]
+    # Every call is also recorded as a GUI event, whether or not ntfy is on.
     local title="$1"
     local priority="$2"
     local tags="$3"
     local message="$4"
     local attachment_file="${5:-}"
     local attachment_name="${6:-}"
+    local event_category="${7:-alert}"
     local topic_url
     local max_bytes="${NOTIFY_NTFY_MESSAGE_MAX_BYTES:-3500}"
     local header_message
     local curl_common=()
     local token
+
+    record_backup_event "$(ntfy_priority_severity "$priority")" "$event_category" "$title" "$message" "${BACKUP_EVENT_UNIT:-}"
 
     if ! is_enabled_value "${NOTIFY_FAILURES_ENABLED:-0}"; then
         echo "ntfy notifications are disabled; not sending: $title"

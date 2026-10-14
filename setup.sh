@@ -8,6 +8,7 @@ DRY_RUN=0
 REFRESH_SCRIPTS=0
 REFRESH_CONFIG=0
 REFRESH_UNITS=0
+GUI_ADMINS=()
 AUTO_YES=0
 CONFIRMED_SCRIPTS=0
 CONFIRMED_CONFIG=0
@@ -30,12 +31,16 @@ run_cmd() {
 usage() {
     cat <<'EOF'
 Usage: setup.sh [--dry-run] [--refresh-scripts] [--refresh-config] [--refresh-units] [--yes]
+                [--gui-admin LOGIN]...
 
 This script installs Backup Suite in user mode or system mode, depending on how it is run.
 It deploys the runtime scripts, symlinks runtime config back to the canonical source tree,
 and installs matching systemd units.
 
 Edit the real config files in the source tree before running this script.
+
+System mode also installs the GUI's control broker. --gui-admin names a login
+that may use it (repeatable; default: the user who ran sudo).
 EOF
 }
 
@@ -327,6 +332,11 @@ while [ "$#" -gt 0 ]; do
         --yes)
             AUTO_YES=1
             ;;
+        --gui-admin)
+            [ "$#" -ge 2 ] || { echo "--gui-admin requires a login" >&2; exit 1; }
+            GUI_ADMINS+=("$2")
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -405,6 +415,9 @@ deploy_file "$READ_SOURCE_DIR/bin/notify-lib.sh" "$INSTALL_DIR/bin/notify-lib.sh
 deploy_file "$READ_SOURCE_DIR/bin/notify-test.sh" "$INSTALL_DIR/bin/notify-test.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
 deploy_file "$READ_SOURCE_DIR/bin/backup-watchdog.sh" "$INSTALL_DIR/bin/backup-watchdog.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
 deploy_file "$READ_SOURCE_DIR/bin/backup-profile.sh" "$INSTALL_DIR/bin/backup-profile.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
+deploy_file "$READ_SOURCE_DIR/bin/backup-control.sh" "$INSTALL_DIR/bin/backup-control.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
+deploy_file "$READ_SOURCE_DIR/bin/backup-control.py" "$INSTALL_DIR/bin/backup-control.py" 755 scripts CONFIRMED_SCRIPTS "installed script"
+deploy_file "$READ_SOURCE_DIR/bin/install-gui-broker.sh" "$INSTALL_DIR/bin/install-gui-broker.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
 deploy_file "$READ_SOURCE_DIR/README.md" "$INSTALL_DIR/README.md" 644 scripts CONFIRMED_SCRIPTS "installed documentation"
 
 deploy_symlink "$DEPLOYED_CONFIG_SOURCE_DIR/global.conf" "$CONFIG_DIR/global.conf" config CONFIRMED_CONFIG "runtime config"
@@ -463,6 +476,16 @@ if is_enabled_value_local "${INSTALL_SYSTEMD_UNITS:-1}"; then
     run_cmd "${SYSTEMCTL_COMMAND[@]}" daemon-reload
     # Writes the file-backup resource-profile drop-in and reloads systemd.
     run_cmd env BACKUP_SUITE_CONFIG_DIR="$CONFIG_DIR" "$INSTALL_DIR/bin/backup-profile.sh" apply
+
+    if [ "$EFFECTIVE_INSTALL_MODE" = "system" ]; then
+        gui_admin_args=()
+        for gui_admin in "${GUI_ADMINS[@]}"; do
+            gui_admin_args+=(--admin "$gui_admin")
+        done
+        run_cmd "$INSTALL_DIR/bin/install-gui-broker.sh" --templates "$READ_SOURCE_DIR/systemd" \
+            --install-dir "$INSTALL_DIR" --config-dir "$CONFIG_DIR" --state-dir "$STATE_DIR" \
+            --unit-dir "$SYSTEMD_UNIT_DIR" "${gui_admin_args[@]}"
+    fi
 
     if is_enabled_value_local "${ENABLE_TIMERS_AFTER_INSTALL:-0}"; then
         run_cmd "${SYSTEMCTL_COMMAND[@]}" enable --now file-backup.timer

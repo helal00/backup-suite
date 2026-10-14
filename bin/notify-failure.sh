@@ -252,8 +252,9 @@ if [ ${#stale_failure_logs[@]} -gt 0 ]; then
     rm -f "${stale_failure_logs[@]}"
 fi
 
+BACKUP_EVENT_UNIT="$unit_name"
 ntfy_publish "$title_prefix failure on $host_name: $unit_name" "$priority" "warning,backup" \
-    "$summary_message" "$failure_log_path" "${failure_timestamp}-${failure_unit_name}.log" \
+    "$summary_message" "$failure_log_path" "${failure_timestamp}-${failure_unit_name}.log" run-failed \
     || fail "Failure notification could not be delivered for unit: $unit_name"
 
 echo "Failure notification sent for unit: $unit_name"

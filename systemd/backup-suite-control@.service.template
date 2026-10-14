@@ -1,0 +1,30 @@
+[Unit]
+Description=Backup Suite control request (connection %i)
+Documentation=file://__INSTALL_DIR__/README.md
+CollectMode=inactive-or-failed
+
+[Service]
+Type=exec
+# One JSON request on the socket, one JSON reply. The instance name of an
+# accepted Unix socket connection is <n>-<peer pid>-<peer uid>; the script
+# allows only root and members of __GUI_GROUP__.
+Environment=BACKUP_SUITE_CONFIG_DIR=__CONFIG_DIR__
+Environment=BACKUP_SUITE_GUI_GROUP=__GUI_GROUP__
+ExecStart=__INSTALL_DIR__/bin/backup-control.sh --peer %i
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+SyslogIdentifier=backup-suite-control
+RuntimeMaxSec=120
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__CONFIG_DIR__ __STATE_DIR__ /etc/systemd/system __CANONICAL_CONFIG_DIR__
+ProtectKernelModules=yes
+# backup-profile.sh writes live limits into the running backup's cgroup.
+ProtectControlGroups=no
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryMax=64M
+TasksMax=32
