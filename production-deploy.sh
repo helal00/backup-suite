@@ -213,8 +213,18 @@ if [ -d "$SOURCE_DIR/.git" ]; then
     log "Source commit: $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
 fi
 
+# Record the timer state before anything else runs, so nothing later (including
+# the test suite) can change what gets restored.
+systemctl is-enabled --quiet "$TIMER_UNIT" 2>/dev/null && TIMER_WAS_ENABLED=1
+systemctl is-active --quiet "$TIMER_UNIT" 2>/dev/null && TIMER_WAS_ACTIVE=1
+
 log "Running the repository integration suite."
 "$SOURCE_DIR/tests/run.sh"
+if [ "$CHECK_ONLY" -eq 0 ] && [ "$(id -u)" -eq 0 ]; then
+    tests_timer_enabled=0
+    systemctl is-enabled --quiet "$TIMER_UNIT" 2>/dev/null && tests_timer_enabled=1
+    [ "$tests_timer_enabled" -eq "$TIMER_WAS_ENABLED" ] || die "$TIMER_UNIT changed state while the tests ran; refusing to continue."
+fi
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
     log "Check-only preflight passed. No production changes were made."
@@ -260,8 +270,6 @@ else
     log "Setup to apply: fixed $REQUESTED_PROFILE"
 fi
 
-systemctl is-enabled --quiet "$TIMER_UNIT" 2>/dev/null && TIMER_WAS_ENABLED=1
-systemctl is-active --quiet "$TIMER_UNIT" 2>/dev/null && TIMER_WAS_ACTIVE=1
 log "$TIMER_UNIT before deployment: enabled=$TIMER_WAS_ENABLED active=$TIMER_WAS_ACTIVE"
 
 # Stop (never disable) the timer so no run starts while files are replaced.

@@ -447,6 +447,20 @@ test_production_migration_runner_guards() {
     [ "$restore_line" -lt "$validation_line" ] || fail_test 'failed-sync containment validation occurs before restore verification'
     [ "$validation_line" -lt "$enable_line" ] || fail_test 'timer enablement occurs before failed-sync containment validation'
     "$runner" --help >/dev/null
+    assert_contains "$runner" 'PRODUCTION_CHANGES_STARTED=1'
+}
+
+test_help_never_touches_systemd() {
+    local test_root
+    test_root=$(mktemp -d)
+    install_fake_tools "$test_root"
+    : > "$test_root/systemctl.log"
+    PATH="$test_root/bin:$PATH" FAKE_SYSTEMCTL_LOG="$test_root/systemctl.log" "$ROOT_DIR/production-file-backup-migrate.sh" --help >/dev/null
+    PATH="$test_root/bin:$PATH" FAKE_SYSTEMCTL_LOG="$test_root/systemctl.log" "$ROOT_DIR/production-file-backup-migrate.sh" --bogus >/dev/null 2>&1 || true
+    PATH="$test_root/bin:$PATH" FAKE_SYSTEMCTL_LOG="$test_root/systemctl.log" "$ROOT_DIR/production-deploy.sh" --help >/dev/null
+    PATH="$test_root/bin:$PATH" FAKE_SYSTEMCTL_LOG="$test_root/systemctl.log" "$ROOT_DIR/production-deploy.sh" --bogus >/dev/null 2>&1 || true
+    [ ! -s "$test_root/systemctl.log" ] || fail_test "help or option errors called systemctl: $(cat "$test_root/systemctl.log")"
+    rm -rf "$test_root"
 }
 
 write_notify_config() {
@@ -1039,6 +1053,7 @@ run_test 'watchdog force-kills a hung stop' test_watchdog_force_kills_hung_stop
 run_test 'watchdog pauses for server memory pressure' test_watchdog_pauses_for_server_pressure
 run_test 'watchdog stops for critical server memory' test_watchdog_stops_for_critical_server_memory
 run_test 'watchdog unit and deploy safety guards' test_watchdog_unit_and_deploy_guards
+run_test 'help and option errors never touch systemd' test_help_never_touches_systemd
 run_test 'auto-scaled limits and per-profile overrides' test_profile_auto_limits_and_overrides
 run_test 'adaptive profile commands' test_adaptive_profile_cli
 run_test 'watchdog steps the profile down and back up' test_watchdog_adaptive_steps_down_and_up

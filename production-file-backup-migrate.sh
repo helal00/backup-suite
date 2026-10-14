@@ -20,6 +20,10 @@ RESTORE_MAX_BYTES="${BACKUP_SUITE_RESTORE_MAX_BYTES:-268435456}"
 AUTO_CONFIRM=0
 CHECK_ONLY=0
 MIGRATION_SUCCEEDED=0
+# Set only once production changes begin. --help, option errors, and --check
+# must never touch the timer (the test suite runs this script with --help, as
+# root during deployments).
+PRODUCTION_CHANGES_STARTED=0
 RESTORE_DIR=""
 RUN_ID=$(date -u '+%Y%m%dT%H%M%SZ')
 RUN_STARTED_MARKER=""
@@ -82,7 +86,7 @@ on_exit() {
         esac
     fi
 
-    if [ "$CHECK_ONLY" -eq 0 ] && [ "$MIGRATION_SUCCEEDED" -ne 1 ]; then
+    if [ "$CHECK_ONLY" -eq 0 ] && [ "$PRODUCTION_CHANGES_STARTED" -eq 1 ] && [ "$MIGRATION_SUCCEEDED" -ne 1 ]; then
         rm -f "$CONTROL_ENV_FILE"
         systemctl disable --now "$TIMER_UNIT" >/dev/null 2>&1 || true
         systemctl stop "$SERVICE_UNIT" >/dev/null 2>&1 || true
@@ -184,6 +188,7 @@ done
 exec {MIGRATION_LOCK_FD}>/run/backup-suite-production-migrate.lock
 flock -n "$MIGRATION_LOCK_FD" || die "Another Backup Suite production migration is already running."
 
+PRODUCTION_CHANGES_STARTED=1
 log "Disabling the file-backup timer before deployment."
 systemctl disable --now "$TIMER_UNIT" >/dev/null 2>&1 || true
 systemctl stop "$SERVICE_UNIT" >/dev/null 2>&1 || true
