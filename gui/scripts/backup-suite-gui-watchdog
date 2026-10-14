@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Backup Suite GUI watchdog: defence in depth for the GUI's systemd user unit.
+#
+# It only ever stops the GUI unit, after the GUI stays above its memory limit for
+# three samples (15 s) or above its task limit for two. It never touches the backup,
+# Backup Suite's units, or any other process. It reads cgroup files only, so each
+# sample costs no extra processes. The stop reason is kept for the GUI to show.
+#
+# Usage: backup-suite-gui-watchdog run|once|status [--dry-run]
+
+set -u
+
+INSTANCE=4337
+UNIT="backup-suite-gui-$INSTANCE.service"
+ACTION="${1:-status}"
+shift || true
+DRY_RUN=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    *) printf 'Unknown argument: %s\n' "$1" >&2; exit 64 ;;
+  esac
+  shift
+done
+
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+ENV_FILE="${BACKUP_SUITE_GUI_WATCHDOG_ENV:-$CONFIG_HOME/backup-suite-gui/watchdog.env}"
+STATE_DIR="${BACKUP_SUITE_GUI_STATE_DIR:-$STATE_HOME/backup-suite-gui}"
+MARKER="$STATE_DIR/watchdog-trip.env"
+INTERVAL_SECONDS=5
+GUI_MEMORY_STOP_MB=140
+GUI_TASKS_STOP=56
+# shellcheck disable=SC1090
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+CGROUP_DIR="${BACKUP_SUITE_GUI_WATCHDOG_CGROUP_DIR:-}"
+
+log() { printf '%s backup-suite-gui-watchdog %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+
+read_number() {
+  local value=""
+  [ -r "$1" ] && read -r value < "$1"
+  case "$value" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$value" ;; esac
+}
+
+resolve_cgroup() {
+  [ -n "$CGROUP_DIR" ] && return 0
+  local group
+  group=$(systemctl --user show "$UNIT" -p ControlGroup --value 2>/dev/null || true)
+  [ -n "$group" ] && CGROUP_DIR="/sys/fs/cgroup$group"
+}
+
+trip() {
+  local reason="$1" detail="$2"
+  log "TRIP reason=$reason $detail"
+  mkdir -p "$STATE_DIR"
+  printf 'reason=%s\ndetail=%s\nat=%s\n' "$reason" "$detail" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$MARKER"
+  if [ "$DRY_RUN" = true ]; then
+    log "dry-run: would stop $UNIT"
+    return 0
+  fi
+  timeout 45 systemctl --user stop "$UNIT" || systemctl --user kill --signal=SIGKILL "$UNIT"
+}
+
+memory_hits=0
+task_hits=0
+sample() {
+  local memory_mb tasks
+  memory_mb=$(( $(read_number "$CGROUP_DIR/memory.current") / 1048576 ))
+  tasks=$(read_number "$CGROUP_DIR/pids.current")
+  if [ "$memory_mb" -gt "$GUI_MEMORY_STOP_MB" ]; then memory_hits=$((memory_hits + 1)); else memory_hits=0; fi
+  if [ "$tasks" -gt "$GUI_TASKS_STOP" ]; then task_hits=$((task_hits + 1)); else task_hits=0; fi
+  printf 'memory_mb=%s tasks=%s memory_hits=%s task_hits=%s\n' "$memory_mb" "$tasks" "$memory_hits" "$task_hits"
+  if [ "$memory_hits" -ge 3 ]; then
+    trip memory "memory ${memory_mb} MB > ${GUI_MEMORY_STOP_MB} MB for 15 s"
+    return 1
+  fi
+  if [ "$task_hits" -ge 2 ]; then
+    trip tasks "tasks ${tasks} > ${GUI_TASKS_STOP}"
+    return 1
+  fi
+  return 0
+}
+
+case "$ACTION" in
+  run)
+    resolve_cgroup
+    [ -n "$CGROUP_DIR" ] && [ -d "$CGROUP_DIR" ] || { log "GUI cgroup not found; is $UNIT running?"; exit 0; }
+    log "watching $UNIT ($CGROUP_DIR): stop above ${GUI_MEMORY_STOP_MB} MB (15 s) or ${GUI_TASKS_STOP} tasks"
+    while [ -d "$CGROUP_DIR" ]; do
+      sample > /dev/null || exit 0
+      sleep "$INTERVAL_SECONDS"
+    done
+    ;;
+  once)
+    resolve_cgroup
+    [ -n "$CGROUP_DIR" ] && [ -d "$CGROUP_DIR" ] || { echo "GUI cgroup not found"; exit 1; }
+    sample
+    ;;
+  status)
+    if [ -f "$MARKER" ]; then
+      echo "Last stop by the GUI watchdog:"
+      cat "$MARKER"
+    else
+      echo "The GUI watchdog has not stopped the GUI."
+    fi
+    echo "Limits: ${GUI_MEMORY_STOP_MB} MB, ${GUI_TASKS_STOP} tasks (from $ENV_FILE when present)."
+    ;;
+  *)
+    printf 'Unknown action: %s\n' "$ACTION" >&2
+    exit 64
+    ;;
+esac

@@ -134,6 +134,7 @@ User mode defaults:
 - [Operations](docs/OPERATIONS.md)
 - [Notifications](docs/NOTIFICATIONS.md)
 - [Resource profiles, watchdog, and changing files](docs/RESOURCES.md)
+- [Browser GUI through Tunnel Manager](docs/GUI.md) and its [specification](docs/GUI-SPECIFICATION.md)
 - [Google Drive Notes](docs/GOOGLE_DRIVE.md)
 - [Contributing](CONTRIBUTING.md)
 

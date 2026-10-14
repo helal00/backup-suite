@@ -1,0 +1,28 @@
+[Unit]
+Description=Backup Suite GUI (instance __INSTANCE__)
+Documentation=https://github.com/helal00/backup-suite/blob/main/docs/GUI-SPECIFICATION.md
+Wants=backup-suite-gui-watchdog-__INSTANCE__.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=__GUI_DIR__
+Environment=NODE_ENV=production
+ExecStart=__NODE__ __GUI_DIR__/server.js
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=yes
+Nice=10
+CPUQuota=50%
+MemoryAccounting=yes
+MemoryHigh=__MEMORY_HIGH__M
+MemoryMax=__MEMORY_MAX__M
+TasksMax=__TASKS_MAX__
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=backup-suite-gui
+
+[Install]
+WantedBy=default.target

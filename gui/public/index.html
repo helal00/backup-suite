@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backup Suite GUI</title>
+  <meta name="description" content="Backup Suite status, resource use and controls through an SSH tunnel.">
+  <meta name="theme-color" content="#1a6b5b">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/theme-boot.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div id="connection-banner" class="connection-banner" role="alert" hidden>
+    Connection to the server lost. Retrying… (check the tunnel in Tunnel Manager)
+  </div>
+
+  <header class="app-topbar" id="app-topbar">
+    <div class="topbar-commandbar" id="topbar-commandbar">
+      <button id="reload-button" class="icon-button" type="button" title="Reload the GUI" aria-label="Reload the GUI">&#10227;</button>
+      <button id="settings-button" class="icon-button" type="button" title="Settings" aria-label="Settings">&#9881;</button>
+      <div class="menu-anchor">
+        <button id="actions-button" type="button" aria-haspopup="menu" aria-expanded="false">Actions &#9662;</button>
+        <div id="actions-menu" class="popover-menu" role="menu" hidden>
+          <button type="button" role="menuitem" data-action="start-files">Start file backup now</button>
+          <button type="button" role="menuitem" data-action="stop-files">Stop file backup</button>
+          <button type="button" role="menuitem" data-action="start-databases">Start database backup now</button>
+          <button type="button" role="menuitem" data-action="notify-test">Send test notification</button>
+        </div>
+      </div>
+      <button id="connect-button" class="icon-button" type="button" title="Ways to connect to this GUI" aria-label="Ways to connect to this GUI">&#8681;</button>
+      <button id="reset-panels-button" type="button" title="Reset panels to the default arrangement">Reset Panels</button>
+      <div class="runtime-label" title="Backup Suite install mode this GUI manages">
+        <span class="eyebrow">Runtime</span>
+        <strong id="mode-label">checking…</strong>
+      </div>
+    </div>
+    <div class="topbar-middle">
+      <span id="state-chip" class="state-chip state-unknown" role="status" aria-live="polite">Checking…</span>
+      <button id="bell-button" class="icon-button bell-button" type="button" title="Activity" aria-label="Activity" aria-haspopup="dialog" aria-expanded="false">
+        <svg class="bell-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3a6 6 0 0 0-6 6v3.6L4.3 15.5A1 1 0 0 0 5.2 17h13.6a1 1 0 0 0 .9-1.5L18 12.6V9a6 6 0 0 0-6-6Zm-2.4 15a2.5 2.5 0 0 0 4.8 0Z"/></svg><span id="bell-badge" class="badge" hidden>0</span>
+      </button>
+    </div>
+    <div class="topbar-brand">
+      <strong>Backup-Suite-Gui</strong>
+      <span id="version-label" class="version-label"></span>
+    </div>
+  </header>
+
+  <div class="layout" id="layout">
+    <nav class="sidebar panel" id="sidebar" aria-label="Sections">
+      <div class="panel-titlebar">
+        <h2>Backup Suite</h2>
+        <button class="help-button" type="button" data-help="navigation" aria-label="Help: sections">?</button>
+      </div>
+      <ul class="nav-list">
+        <li><button type="button" data-section="overview" aria-current="page">Overview</button></li>
+        <li><button type="button" data-section="runs">Runs</button></li>
+        <li><button type="button" data-section="projects">Projects &amp; changing files</button></li>
+        <li><button type="button" data-section="profiles">Profiles &amp; limits</button></li>
+        <li><button type="button" data-section="watchdog">Watchdog</button></li>
+        <li><button type="button" data-section="notifications">Notifications (ntfy)</button></li>
+        <li><button type="button" data-section="sources">Sources</button></li>
+        <li><button type="button" data-section="activity">Activity &amp; audit</button></li>
+      </ul>
+    </nav>
+
+    <main class="main panel" id="main" tabindex="-1">
+      <div class="panel-titlebar">
+        <h2 id="section-title">Overview</h2>
+        <div class="titlebar-actions">
+          <button class="help-button" type="button" id="section-help" data-help="overview" aria-label="Help for this section">?</button>
+          <button class="icon-button small" type="button" id="main-maximize" aria-label="Maximize" title="Maximize">&#9634;</button>
+        </div>
+      </div>
+      <div class="panel-body" id="section-body" aria-live="polite"></div>
+    </main>
+
+    <aside class="details panel" id="details" aria-labelledby="details-title">
+      <div class="panel-titlebar">
+        <h2 id="details-title">Details</h2>
+        <div class="titlebar-actions">
+          <button class="help-button" type="button" data-help="details" aria-label="Help: details">?</button>
+          <button class="icon-button small" type="button" id="details-maximize" aria-label="Maximize details" title="Maximize">&#9634;</button>
+          <button class="icon-button small" type="button" id="details-close" aria-label="Close details" title="Close">&#10005;</button>
+        </div>
+      </div>
+      <div class="panel-body" id="details-body">
+        <p class="muted">Open a run, a log or a profile preview to see it here.</p>
+      </div>
+    </aside>
+  </div>
+
+  <nav class="responsive-switcher" aria-label="Panels">
+    <button type="button" data-show-panel="sidebar">Sections</button>
+    <button type="button" data-show-panel="main" class="active">Main</button>
+    <button type="button" data-show-panel="details">Details</button>
+  </nav>
+
+  <div id="help-panel" class="help-panel" role="dialog" aria-modal="false" aria-labelledby="help-title" hidden>
+    <div class="panel-titlebar">
+      <h2 id="help-title">Help</h2>
+      <button class="icon-button small" type="button" id="help-close" aria-label="Close help">&#10005;</button>
+    </div>
+    <div class="panel-body" id="help-body"></div>
+  </div>
+
+  <div id="bell-panel" class="bell-panel" role="dialog" aria-modal="false" aria-labelledby="bell-title" hidden>
+    <div class="panel-titlebar">
+      <h2 id="bell-title">Activity</h2>
+      <button class="icon-button small" type="button" id="bell-close" aria-label="Close activity">&#10005;</button>
+    </div>
+    <div class="panel-body" id="bell-body"></div>
+  </div>
+
+  <dialog id="confirm-dialog" class="dialog" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <p class="eyebrow">Server change</p>
+      <h2 id="confirm-title">Please confirm</h2>
+      <div id="confirm-body" class="confirm-body"></div>
+      <div class="toolbar-row end">
+        <button value="cancel" type="submit" formnovalidate>Cancel</button>
+        <button value="ok" type="submit" class="primary-button" id="confirm-ok">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog" class="dialog settings-dialog" aria-labelledby="settings-title">
+    <form method="dialog" id="settings-form" novalidate>
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Backup Suite GUI</p>
+          <h2 id="settings-title">Settings</h2>
+        </div>
+        <button class="icon-button small" type="submit" value="cancel" formnovalidate aria-label="Close settings">&#10005;</button>
+      </div>
+      <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+        <button type="button" role="tab" data-settings-tab-button="general" aria-selected="true">General</button>
+        <button type="button" role="tab" data-settings-tab-button="notifications" aria-selected="false">Notifications</button>
+        <button type="button" role="tab" data-settings-tab-button="tunnel" aria-selected="false">Tunnel Manager</button>
+        <button type="button" role="tab" data-settings-tab-button="resources" aria-selected="false">GUI resource limits</button>
+        <button type="button" role="tab" data-settings-tab-button="server" aria-selected="false">Server settings</button>
+      </div>
+
+      <section class="settings-tab-panel" data-settings-tab="general" role="tabpanel">
+        <fieldset class="settings-option-group">
+          <legend>Display</legend>
+          <label>Live refresh interval (seconds)
+            <input name="general.refreshSeconds" type="number" min="2" max="60" step="1" required>
+          </label>
+          <label>Chart window (minutes)
+            <input name="general.chartMinutes" type="number" min="10" max="120" step="1" required>
+          </label>
+          <label>Times
+            <select name="general.timeDisplay">
+              <option value="utc">UTC (local time on hover)</option>
+              <option value="local">Browser local time (UTC on hover)</option>
+            </select>
+          </label>
+          <label>Theme
+            <select name="general.theme">
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </label>
+        </fieldset>
+        <fieldset class="settings-option-group">
+          <legend>Backup Suite installation</legend>
+          <label>Backend
+            <select name="general.backend">
+              <option value="auto">Automatic</option>
+              <option value="system">System mode (root broker socket)</option>
+              <option value="user">User mode (my own installation)</option>
+            </select>
+          </label>
+          <p class="settings-help" id="settings-backend-note"></p>
+        </fieldset>
+      </section>
+
+      <section class="settings-tab-panel" data-settings-tab="notifications" role="tabpanel" hidden>
+        <fieldset class="settings-option-group">
+          <legend>Notifications</legend>
+          <label class="inline-check"><input name="notifications.tunnelManager" type="checkbox"><span>Tunnel Manager delivery</span></label>
+          <label class="inline-check"><input name="notifications.browser" type="checkbox"><span>Browser notification delivery</span></label>
+          <label class="inline-check"><input name="notifications.preferTunnelManager" type="checkbox"><span>Prefer Tunnel Manager notifications when active</span></label>
+          <p class="settings-help">Tunnel Manager shows warnings and errors as desktop notices. Every event, including "run finished", is also in the bell's Activity list. ntfy alerts are separate (Notifications section).</p>
+          <div class="settings-notification-categories" id="settings-categories" aria-label="Notification categories"></div>
+          <div class="toolbar-row tight">
+            <button id="browser-notification-button" type="button">Enable browser notifications</button>
+            <span id="browser-notification-status" role="status"></span>
+          </div>
+        </fieldset>
+      </section>
+
+      <section class="settings-tab-panel" data-settings-tab="tunnel" role="tabpanel" hidden>
+        <fieldset class="settings-option-group">
+          <legend>GUI listener</legend>
+          <label>Listen on
+            <select name="tunnel.listenMode">
+              <option value="socket">Private Unix socket (recommended)</option>
+              <option value="tcp">TCP 127.0.0.1 only</option>
+              <option value="both">Both</option>
+            </select>
+          </label>
+          <p class="settings-help" id="settings-listen-note"></p>
+          <label>TCP port (tcp and both modes)
+            <input name="tunnel.tcpPort" type="number" min="1024" max="65535" step="1">
+          </label>
+          <div class="toolbar-row tight">
+            <button id="restart-gui-button" type="button">Restart GUI to apply</button>
+          </div>
+        </fieldset>
+        <fieldset class="settings-option-group">
+          <legend>Tunnel Manager profile</legend>
+          <label>Server host or address used in the bundle
+            <input name="tunnel.sshHost" type="text" autocomplete="off" spellcheck="false" placeholder="this server's IP address">
+          </label>
+          <label>Tunnel Manager backend (user@host)
+            <input name="tunnel.backendId" type="text" autocomplete="off" spellcheck="false" placeholder="derived from your login and the host above">
+          </label>
+          <p class="settings-help">Must be the user@host of your Tunnel Manager profile for this server, exactly as Tunnel Manager shows it. Tunnel Manager refuses a bundle whose backend differs.</p>
+          <label>Preferred local port on your PC
+            <input name="tunnel.localPort" type="number" min="1024" max="65435" step="1">
+          </label>
+        </fieldset>
+      </section>
+
+      <section class="settings-tab-panel" data-settings-tab="resources" role="tabpanel" hidden>
+        <fieldset class="settings-option-group">
+          <legend>GUI unit and watchdog</legend>
+          <p class="settings-help">Limits for the GUI itself (not the backup). They take effect after the GUI restarts: run <code>backup-suite-gui-server install</code> again or use Restart GUI.</p>
+          <label>Memory soft limit (MB)
+            <input name="limits.memoryHighMb" type="number" min="48" max="1024" step="1">
+          </label>
+          <label>Memory hard limit (MB)
+            <input name="limits.memoryMaxMb" type="number" min="64" max="2048" step="1">
+          </label>
+          <label>Task limit
+            <input name="limits.tasksMax" type="number" min="16" max="512" step="1">
+          </label>
+          <label>Watchdog stops the GUI above (MB, sustained 15 s)
+            <input name="limits.watchdogMemoryMb" type="number" min="48" max="2048" step="1">
+          </label>
+          <label>Watchdog stops the GUI above (tasks)
+            <input name="limits.watchdogTasks" type="number" min="8" max="512" step="1">
+          </label>
+        </fieldset>
+      </section>
+
+      <section class="settings-tab-panel" data-settings-tab="server" role="tabpanel" hidden>
+        <p class="settings-help">These change Backup Suite's <code>global.conf</code> on the server. Each save is confirmed, backed up and recorded in the audit log. Watchdog thresholds are in the Watchdog section; ntfy in the Notifications section.</p>
+        <div id="server-settings-body"><p class="muted">Loading…</p></div>
+        <div class="toolbar-row end">
+          <button id="server-settings-save" type="button" class="primary-button">Save server settings…</button>
+        </div>
+      </section>
+
+      <div class="toolbar-row end settings-footer">
+        <button value="cancel" type="submit" formnovalidate>Cancel</button>
+        <button id="save-settings-button" value="save" type="submit" class="primary-button">Save Settings</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="connect-dialog" class="dialog connect-dialog" aria-labelledby="connect-title">
+    <form method="dialog">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Tunnel Manager</p>
+          <h2 id="connect-title">Ways to connect</h2>
+        </div>
+        <button class="icon-button small" type="submit" value="close" aria-label="Close">&#10005;</button>
+      </div>
+      <div id="connect-body"><p class="muted">Loading…</p></div>
+    </form>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+  <script src="/help.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

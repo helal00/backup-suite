@@ -1,0 +1,17 @@
+[Unit]
+Description=Backup Suite GUI watchdog (instance __INSTANCE__)
+BindsTo=backup-suite-gui-__INSTANCE__.service
+After=backup-suite-gui-__INSTANCE__.service
+
+[Service]
+Type=simple
+ExecStart=__GUI_DIR__/scripts/backup-suite-gui-watchdog run
+Restart=on-failure
+RestartSec=10
+Nice=5
+MemoryMax=24M
+TasksMax=8
+SyslogIdentifier=backup-suite-gui-watchdog
+
+[Install]
+WantedBy=backup-suite-gui-__INSTANCE__.service

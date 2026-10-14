@@ -490,8 +490,13 @@ def to_epoch(text):
     return None
 
 
+PROJECT_LINE_RE = re.compile(r"^(File backup (started|finished) at|Resource profile|Syncing label=|File sync (completed|failed)|Deferring [0-9]+ path|Retrying '|Initial sync failed|Migration confirmation required|Skipping |No child project|Invalid |Source path is|destination_value is required|Run summary:|Failed file sources:|WARNING: )")
+ERROR_LINE_RE = re.compile(r"ERROR|error|failed|Failed|WARNING")
+
+
 def verb_runlog(request):
-    args = get_args(request, ["run", "lines", "list"])
+    args = get_args(request, ["run", "lines", "list", "filter"])
+    line_filter = choice(args, "filter", ["projects", "errors"], required=False)
     lines_wanted = bounded_int(args, "lines", 500, 1, 100000)
     text, truncated_file = read_text(state_path("logs", "backup-file.log"), 8 * 1024 * 1024)
     lines, starts = log_runs(text)
@@ -521,6 +526,10 @@ def verb_runlog(request):
     first = starts[chosen][1]
     last = starts[chosen + 1][1] if chosen + 1 < len(starts) else len(lines)
     slice_lines = lines[first:last]
+    if line_filter == "projects":
+        slice_lines = [line for line in slice_lines if PROJECT_LINE_RE.match(line)]
+    elif line_filter == "errors":
+        slice_lines = [line for line in slice_lines if ERROR_LINE_RE.search(line)]
     limit = min(lines_wanted, MAX_LOG_LINES)
     truncated = len(slice_lines) > limit
     if truncated:
@@ -660,8 +669,11 @@ def verb_excludes_list(request):
     return {"filename": EXCLUDE_FILENAME, "files": files, "truncated": truncated}
 
 
-def profile_show():
-    code, out, err = run([bin_script("backup-profile.sh"), "show", "--json"], READ_TIMEOUT)
+def profile_show(limits_mode=None):
+    command = [bin_script("backup-profile.sh"), "show", "--json"]
+    if limits_mode:
+        command += ["--limits", limits_mode]
+    code, out, err = run(command, READ_TIMEOUT)
     if code != 0:
         raise ControlError("profile_error", (err or out).strip()[:500] or "backup-profile.sh show failed.")
     try:
@@ -671,8 +683,9 @@ def profile_show():
 
 
 def verb_profile_show(request):
-    get_args(request, [])
-    return profile_show()
+    args = get_args(request, ["limits_mode"])
+    limits_mode = choice(args, "limits_mode", ["fixed", "auto"], required=False)
+    return profile_show(limits_mode)
 
 
 def profile_setup_args(args):

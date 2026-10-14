@@ -525,6 +525,12 @@ write_status() {
         printf 'peak_memory_bytes=%s\npeak_anon_bytes=%s\npeak_swap_bytes=%s\npeak_cpu_percent=%s\npeak_tasks=%s\n' \
             "$peak_memory" "$peak_anon" "$peak_swap" "$peak_cpu" "$peak_tasks"
         printf 'events=%s\n' "${events_seen[*]:-none}"
+        printf 'memory_high_bytes=%s\n' "${memory_high_original:-max}"
+        printf 'threshold_contain_percent=%s\nthreshold_release_percent=%s\nthreshold_kill_percent=%s\n' \
+            "$contain_percent" "$contain_release_percent" "$kill_percent"
+        printf 'threshold_swap_contain_percent=%s\nthreshold_swap_kill_percent=%s\n' "$swap_contain_percent" "$swap_kill_percent"
+        printf 'threshold_server_pause_percent=%s\nthreshold_server_critical_percent=%s\nthreshold_psi_full=%s\n' \
+            "$system_min_available_percent" "$system_critical_available_percent" "$system_psi_full_limit"
     } > "$status_file.tmp" 2>/dev/null && mv -f "$status_file.tmp" "$status_file" 2>/dev/null
 }
 

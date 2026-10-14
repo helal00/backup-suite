@@ -1306,6 +1306,28 @@ test_gui_broker_installer_guards() {
     assert_contains "$test_root/backup-suite-control@.service.template" 'ExecStart=/opt/x/bin/backup-control.sh --peer %i'
 }
 
+test_gui_node_suite() {
+    # The GUI's own tests (gui/test/*.test.js): guard, bundle, events, control
+    # client, server end to end and colour contrast. They need Node >= 18.
+    local node_bin=""
+    local candidate
+    for candidate in "${BACKUP_SUITE_GUI_NODE:-}" /usr/bin/node /usr/local/bin/node "$(command -v node 2>/dev/null || true)"; do
+        [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+        if [ "$("$candidate" -e 'process.stdout.write(process.versions.node.split(".")[0])')" -ge 18 ]; then
+            node_bin="$candidate"
+            break
+        fi
+    done
+    if [ -z "$node_bin" ]; then
+        echo "Node.js 18 or newer not found; skipping the GUI tests."
+        return 0
+    fi
+    (cd "$ROOT_DIR/gui" && "$node_bin" --test test/*.test.js) > "$(mktemp -d)/gui-tests.log" 2>&1 || {
+        (cd "$ROOT_DIR/gui" && "$node_bin" --test test/*.test.js 2>&1 | grep -E '^not ok|error:' | head -20) >&2
+        fail_test 'GUI node tests failed'
+    }
+}
+
 if [ "${1:-}" = "--single" ]; then
     shift
     "$@"
@@ -1347,6 +1369,7 @@ run_test 'control script profile verbs match the CLI' test_control_profile_match
 run_test 'control script actions, audit and peer check' test_control_actions_and_peer_check
 run_test 'events file and run progress' test_events_and_progress_files
 run_test 'GUI broker installer guards and templates' test_gui_broker_installer_guards
+run_test 'GUI server, events, bundle and contrast (node)' test_gui_node_suite
 
 echo "Tests: passed=$PASS_COUNT failed=$FAIL_COUNT"
 [ "$FAIL_COUNT" -eq 0 ]

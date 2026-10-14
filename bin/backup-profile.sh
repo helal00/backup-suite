@@ -15,7 +15,8 @@ Usage: backup-profile.sh [command]
 Choose how much of the server the file backup may use.
 
 Commands:
-  show [--json]              list the profiles, their limits, and the active setup
+  show [--json [--limits fixed|auto]]
+                             list the profiles, their limits, and the active setup
   choose                     interactive menu (default when run in a terminal)
   set <profile>              fixed mode: always use slow, moderate, fast, or custom
   adaptive <top> <floor>     adaptive mode: start at <top>; the watchdog steps
@@ -460,6 +461,13 @@ fi
 case "$command_name" in
     show)
         if [ "${2:-}" = "--json" ]; then
+            # --limits fixed|auto previews the other limits mode without saving it.
+            if [ "${3:-}" = "--limits" ]; then
+                case "${4:-}" in
+                    fixed|auto) FILE_PROFILE_LIMITS_MODE="$4" ;;
+                    *) fail "Usage: backup-profile.sh show --json [--limits fixed|auto]" ;;
+                esac
+            fi
             show_profiles_json
         else
             show_profiles

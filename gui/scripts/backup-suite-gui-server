@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# Installs and runs the Backup Suite GUI as a systemd user unit of the login that
+# administers Backup Suite (no sudo), like agentw-gui.
+#
+#   backup-suite-gui-server install     copy the GUI to ~/.local/share/backup-suite-gui/app,
+#                                       write and start the user units (run again to update)
+#   backup-suite-gui-server uninstall   stop and remove the user units (keeps settings)
+#   backup-suite-gui-server start|stop|restart|status
+#   backup-suite-gui-server bundle [--backend user@host]
+#                                       print the Tunnel Manager bundle (first import)
+#   backup-suite-gui-server service-run run the server in the foreground (debugging)
+
+set -euo pipefail
+
+INSTANCE=4337
+UNIT="backup-suite-gui-$INSTANCE.service"
+WATCHDOG_UNIT="backup-suite-gui-watchdog-$INSTANCE.service"
+SOURCE_GUI_DIR=$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+APP_DIR="$DATA_HOME/backup-suite-gui/app"
+UNIT_DIR="$CONFIG_HOME/systemd/user"
+NODE_MIN_MAJOR=18
+
+usage() {
+  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+die() {
+  printf 'backup-suite-gui-server: %s\n' "$*" >&2
+  exit 1
+}
+
+node_major() {
+  "$1" -e 'process.stdout.write(String(process.versions.node.split(".")[0]))' 2>/dev/null || printf '0'
+}
+
+# The absolute path of a Node >= 18: BACKUP_SUITE_GUI_NODE, /usr/bin/node, then PATH.
+find_node() {
+  local candidate
+  for candidate in "${BACKUP_SUITE_GUI_NODE:-}" /usr/bin/node /usr/local/bin/node "$(command -v node 2>/dev/null || true)"; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    if [ "$(node_major "$candidate")" -ge "$NODE_MIN_MAJOR" ]; then
+      readlink -f "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+settings_value() {
+  # settings_value <node> <app-dir> <expression on the normalized settings>
+  "$1" -e 'const s = require(process.argv[1] + "/lib/settings").load(); process.stdout.write(String(eval(process.argv[2])));' "$2" "$3"
+}
+
+render() {
+  local template="$1" output="$2" node="$3"
+  local memory_high memory_max tasks_max
+  memory_high=$(settings_value "$node" "$APP_DIR" 's.limits.memoryHighMb')
+  memory_max=$(settings_value "$node" "$APP_DIR" 's.limits.memoryMaxMb')
+  tasks_max=$(settings_value "$node" "$APP_DIR" 's.limits.tasksMax')
+  sed \
+    -e "s|__INSTANCE__|$INSTANCE|g" \
+    -e "s|__GUI_DIR__|$APP_DIR|g" \
+    -e "s|__NODE__|$node|g" \
+    -e "s|__MEMORY_HIGH__|$memory_high|g" \
+    -e "s|__MEMORY_MAX__|$memory_max|g" \
+    -e "s|__TASKS_MAX__|$tasks_max|g" \
+    "$template" > "$output.tmp"
+  if grep -Eq '__[A-Z_]+__' "$output.tmp"; then
+    rm -f "$output.tmp"
+    die "Unresolved placeholder in $(basename "$output")"
+  fi
+  mv -f "$output.tmp" "$output"
+}
+
+copy_app() {
+  local staging="$APP_DIR.new"
+  rm -rf "$staging"
+  mkdir -p "$staging"
+  cp -a "$SOURCE_GUI_DIR/server.js" "$SOURCE_GUI_DIR/package.json" "$SOURCE_GUI_DIR/lib" "$SOURCE_GUI_DIR/public" \
+    "$SOURCE_GUI_DIR/scripts" "$SOURCE_GUI_DIR/systemd" "$staging/"
+  chmod -R go-w "$staging"
+  rm -rf "$APP_DIR.old"
+  [ -d "$APP_DIR" ] && mv "$APP_DIR" "$APP_DIR.old"
+  mv "$staging" "$APP_DIR"
+  rm -rf "$APP_DIR.old"
+}
+
+install_gui() {
+  local node linger socket_path
+  [ "$(id -u)" -ne 0 ] || die "Install the GUI as the login that administers Backup Suite, not as root."
+  node=$(find_node) || die "Node.js $NODE_MIN_MAJOR or newer is required (set BACKUP_SUITE_GUI_NODE to its path)."
+  mkdir -p "$DATA_HOME/backup-suite-gui" "$UNIT_DIR" "$CONFIG_HOME/backup-suite-gui"
+  chmod 700 "$DATA_HOME/backup-suite-gui" "$CONFIG_HOME/backup-suite-gui"
+  copy_app
+  render "$APP_DIR/systemd/backup-suite-gui.service.template" "$UNIT_DIR/$UNIT" "$node"
+  render "$APP_DIR/systemd/backup-suite-gui-watchdog.service.template" "$UNIT_DIR/$WATCHDOG_UNIT" "$node"
+  {
+    printf 'GUI_MEMORY_STOP_MB=%s\n' "$(settings_value "$node" "$APP_DIR" 's.limits.watchdogMemoryMb')"
+    printf 'GUI_TASKS_STOP=%s\n' "$(settings_value "$node" "$APP_DIR" 's.limits.watchdogTasks')"
+  } > "$CONFIG_HOME/backup-suite-gui/watchdog.env"
+  systemctl --user daemon-reload
+  systemctl --user enable "$UNIT" "$WATCHDOG_UNIT" >/dev/null
+  systemctl --user restart "$UNIT"
+  systemctl --user start "$WATCHDOG_UNIT" || true
+  sleep 1
+  socket_path=$("$node" -e 'const l = require(process.argv[1] + "/lib/listen-config"); const s = require(process.argv[1] + "/lib/settings").load(); process.stdout.write(l.resolveListen({ settings: s }).socketPath)' "$APP_DIR")
+  linger=$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || echo unknown)
+  echo "Installed $UNIT (Node $node, app $APP_DIR)."
+  echo "State: $(systemctl --user is-active "$UNIT" 2>/dev/null || true)"
+  echo "Socket: $socket_path"
+  if [ "$linger" != "yes" ]; then
+    echo "Linger is '$linger': the GUI stops when you log out. Run once: loginctl enable-linger $(id -un)"
+  else
+    echo "Linger is on: the GUI keeps running with nobody logged in."
+  fi
+  echo "Tunnel Manager bundle: $0 bundle --backend $(id -un)@<this server as in your Tunnel Manager profile>"
+}
+
+uninstall_gui() {
+  systemctl --user disable --now "$WATCHDOG_UNIT" "$UNIT" >/dev/null 2>&1 || true
+  rm -f "$UNIT_DIR/$UNIT" "$UNIT_DIR/$WATCHDOG_UNIT"
+  systemctl --user daemon-reload
+  echo "Removed $UNIT. Settings stay in $CONFIG_HOME/backup-suite-gui; the app copy in $APP_DIR."
+}
+
+print_bundle() {
+  local backend="" node app_dir="$APP_DIR"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --backend) backend="${2:?--backend needs user@host}"; shift 2 ;;
+      *) die "Unknown option: $1" ;;
+    esac
+  done
+  node=$(find_node) || die "Node.js $NODE_MIN_MAJOR or newer is required."
+  [ -f "$app_dir/server.js" ] || app_dir="$SOURCE_GUI_DIR"
+  "$node" -e '
+    const dir = process.argv[1];
+    const settingsStore = require(dir + "/lib/settings");
+    const listenConfig = require(dir + "/lib/listen-config");
+    const bundle = require(dir + "/lib/bundle");
+    const settings = settingsStore.load();
+    if (process.argv[2]) {
+      const merged = settingsStore.merge(settings, { tunnel: { backendId: process.argv[2] } });
+      if (merged.tunnel.backendId !== process.argv[2]) { console.error("Use the form login@host."); process.exit(64); }
+      Object.assign(settings, merged);
+    }
+    const listen = listenConfig.resolveListen({ settings });
+    process.stdout.write(bundle.tunnelManagerToml(bundle.profile(settings, listen, "backup-suite-gui-" + listenConfig.INSTANCE + ".service")));
+  ' "$app_dir" "$backend"
+}
+
+case "${1:-}" in
+  install) install_gui ;;
+  uninstall) uninstall_gui ;;
+  start|stop|restart) systemctl --user "$1" "$UNIT" ;;
+  status)
+    systemctl --user --no-pager status "$UNIT" || true
+    "$SOURCE_GUI_DIR/scripts/backup-suite-gui-watchdog" status
+    ;;
+  bundle) shift; print_bundle "$@" ;;
+  service-run)
+    node=$(find_node) || die "Node.js $NODE_MIN_MAJOR or newer is required."
+    exec "$node" "$SOURCE_GUI_DIR/server.js"
+    ;;
+  -h|--help|help|"") usage ;;
+  *) usage >&2; exit 64 ;;
+esac
