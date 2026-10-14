@@ -45,13 +45,36 @@ FILE_GLOBAL_VOLATILE_PATTERNS=".ai-metadata/chat-store/**|.ai-metadata/prompts/g
 FILE_PROCESS_CHECK_ENABLED="1"
 FILE_PROCESS_CHECK_USER_ONLY="1"
 FILE_PROCESS_CHECK_PATTERNS="vscode-server"
+# Resource profile for file backups: slow, moderate, fast, or custom.
+# Run "backup-profile.sh show" for the limits of each, "backup-profile.sh set <name>"
+# for one fixed profile, or "backup-profile.sh adaptive <top> <floor>" to let the
+# watchdog step down toward the floor when resources are tight and back up when
+# they are normal (moderate>slow, or fast>moderate>slow).
+# The FILE_RCLONE_* tuning below (and FILE_CUSTOM_* systemd limits) apply only to "custom".
+FILE_BACKUP_PROFILE="moderate"
+FILE_BACKUP_PROFILE_MODE="adaptive"
+FILE_BACKUP_PROFILE_FLOOR="slow"
+# "fixed" uses the built-in limits table; "auto" scales memory and CPU to this host
+# (slow 5%/3%, moderate 10%/6%, fast 20%/12% of RAM / total CPU).
+FILE_PROFILE_LIMITS_MODE="fixed"
+# Optional per-profile overrides, e.g. (keys: backup-profile.sh --help):
+# FILE_PROFILE_SLOW_MEMORY_MAX="384M"
+# FILE_PROFILE_MODERATE_RCLONE_BWLIMIT="20M"
 FILE_RCLONE_TRANSFERS="2"
 FILE_RCLONE_CHECKERS="4"
 FILE_RCLONE_BUFFER_SIZE="16M"
 FILE_RCLONE_TPSLIMIT="10"
+FILE_RCLONE_BWLIMIT=""
 FILE_RCLONE_EXTRA_FLAGS=""
 FILE_STABILITY_INTERVAL_SECONDS="10"
 FILE_CHANGED_DETAIL_LIMIT="20"
+# Changing-file tracking: files modified within FILE_ACTIVE_WINDOW_SECONDS, or
+# seen changing during an upload, are kept away from rclone for that run. Their
+# previous remote version stays in place and they are retried on the next run.
+# A file deferred for FILE_ACTIVE_MAX_DEFERRALS runs in a row triggers an ntfy warning.
+FILE_ACTIVE_TRACKING_ENABLED="1"
+FILE_ACTIVE_WINDOW_SECONDS="120"
+FILE_ACTIVE_MAX_DEFERRALS="12"
 FILE_BACKUP_RUNTIME_MAX_SEC="6h"
 FILE_BACKUP_ONCALENDAR="*:0/30"
 FILE_BACKUP_RANDOMIZED_DELAY_SEC="15m"
@@ -77,6 +100,32 @@ NOTIFY_NTFY_PRIORITY="high"
 NOTIFY_JOURNAL_LINES="40"
 NOTIFY_DURABLE_LOG_LINES="120"
 NOTIFY_FAILURE_LOG_KEEP_FILES="100"
+# Optional ntfy access token for protected topics.
+NOTIFY_NTFY_TOKEN=""
+# Attach the full log to each alert (the readable description is always the message).
+NOTIFY_NTFY_ATTACH_DETAILS="1"
+
+# Resource watchdog (runs only while a backup runs). Percentages refer to the
+# backup's MemoryMax unless they name the server.
+WATCHDOG_INTERVAL_SECONDS="5"
+WATCHDOG_CONTAIN_PERCENT="80"
+WATCHDOG_CONTAIN_RELEASE_PERCENT="60"
+WATCHDOG_KILL_PERCENT="90"
+WATCHDOG_KILL_SAMPLES="2"
+WATCHDOG_SWAP_CONTAIN_PERCENT="80"
+WATCHDOG_SWAP_KILL_PERCENT="95"
+WATCHDOG_SYSTEM_MIN_AVAILABLE_PERCENT="10"
+WATCHDOG_SYSTEM_CRITICAL_AVAILABLE_PERCENT="4"
+WATCHDOG_SYSTEM_PSI_FULL_LIMIT="20"
+WATCHDOG_FREEZE_MAX_SECONDS="600"
+WATCHDOG_KILL_GRACE_SECONDS="30"
+WATCHDOG_TASKS_WARN_PERCENT="90"
+# Adaptive profile stepping (FILE_BACKUP_PROFILE_MODE="adaptive").
+WATCHDOG_ADAPTIVE_STEP_DOWN_AVAILABLE_PERCENT="20"
+WATCHDOG_ADAPTIVE_STEP_DOWN_PSI_FULL="10"
+WATCHDOG_ADAPTIVE_STEP_UP_AVAILABLE_PERCENT="30"
+WATCHDOG_ADAPTIVE_STEP_UP_SECONDS="300"
+WATCHDOG_ADAPTIVE_COOLDOWN_SECONDS="120"
 
 INSTALL_SYSTEMD_UNITS="1"
 ENABLE_TIMERS_AFTER_INSTALL="0"

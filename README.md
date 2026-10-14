@@ -92,7 +92,9 @@ It keeps `file-backup.timer` disabled unless deployment, dry-run reporting, expl
 - supports multiple file sources and per-project excludes
 - stores symlinks as restorable `.rclonelink` records without following their targets
 - isolates immediate child projects when configured, with preserved prior remote versions
-- retries changing files and only skips explicitly classified volatile paths with bounded reporting
+- keeps recently modified and actively changing files away from rclone, retries them next run, and warns about files that never settle
+- runs under a selectable resource profile (`slow`, `moderate`, `fast`) enforced by systemd and a low-cost resource watchdog that contains, pauses, or stops a backup before it can push the server out of memory
+- sends ntfy alerts with a plain-language explanation and the full log attached
 - emits periodic journal heartbeat lines during long listing and sync phases
 
 ### Database backup
@@ -131,6 +133,7 @@ User mode defaults:
 - [Configuration](docs/CONFIGURATION.md)
 - [Operations](docs/OPERATIONS.md)
 - [Notifications](docs/NOTIFICATIONS.md)
+- [Resource profiles, watchdog, and changing files](docs/RESOURCES.md)
 - [Google Drive Notes](docs/GOOGLE_DRIVE.md)
 - [Contributing](CONTRIBUTING.md)
 
@@ -141,6 +144,7 @@ User mode defaults:
 - `systemd/` unit templates
 - `docs/` detailed documentation
 - `setup.sh` installer and refresh entry point
+- `production-deploy.sh` routine deployment for an installed host (never disables the timer; rolls back on failure)
 
 ## Security Note
 

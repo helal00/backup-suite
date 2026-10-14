@@ -28,7 +28,7 @@ any_exclude_file_contains() {
     local expected="$1"
     shift
     while [ "$#" -gt 0 ]; do
-        if [ "$1" = "--exclude-from" ] && [ "$#" -gt 1 ] && grep -Fxq "$expected" "$2"; then
+        if [ "$1" = "--exclude-from" ] && [ "$#" -gt 1 ] && grep -Fxq -e "$expected" -e "/$expected" "$2"; then
             return 0
         fi
         shift

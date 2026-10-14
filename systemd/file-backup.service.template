@@ -2,6 +2,8 @@
 Description=Backup Suite file backup
 After=network-online.target
 Wants=network-online.target
+# The resource watchdog runs only while this backup runs.
+Wants=backup-suite-watchdog@file-backup.service
 OnFailure=backup-suite-notify@%n.service
 
 [Service]
@@ -13,6 +15,7 @@ EnvironmentFile=-/run/backup-suite/file-backup.env
 RuntimeDirectory=backup-suite
 ExecStart=__INSTALL_DIR__/bin/file-backup-service.sh __LOCK_FILE__
 SuccessExitStatus=SIGTERM 75
+OOMPolicy=stop
 Restart=no
 TimeoutStartSec=infinity
 TimeoutStopSec=2min
@@ -28,6 +31,7 @@ Nice=15
 IOSchedulingClass=idle
 MemoryHigh=512M
 MemoryMax=1G
+MemorySwapMax=256M
 TasksMax=64
 StandardOutput=journal
 StandardError=journal

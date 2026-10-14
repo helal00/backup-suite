@@ -21,7 +21,15 @@ How it works:
 - the notifier reads recent `journalctl` lines for the failed unit
 - every backup/monitor run is also appended to a bounded durable log under the configured state directory (`logs/`)
 - the notifier records a timestamped local failure snapshot under the state directory (`failures/`)
-- the notifier sends those details to your configured `ntfy` topic
+- the notifier matches the newest run's log against known causes (files changing during upload, Google Drive rate limit or full storage, expired rclone login, network/DNS failure, local disk full, permissions, missing source, OOM kill, runtime limit, watchdog stop)
+- it sends a short, plain-language message: what happened, the likely cause with a fix, what was protected, the failed projects, and the key error lines
+- the full journal and durable-log excerpt is attached as a `.log` file
+
+ntfy turns any message body over 4096 bytes into a file attachment, which is why older alerts arrived as an attachment only. Messages are now kept under `NOTIFY_NTFY_MESSAGE_MAX_BYTES` (default 3500) and the details travel as a separate attachment. If the server rejects attachments, the message is resent on its own.
+
+The resource watchdog and the changing-file tracker send their own explained alerts; see [RESOURCES.md](RESOURCES.md). To see the format, send a test: `sudo /opt/backup-suite/bin/notify-test.sh`.
+
+Optional settings: `NOTIFY_NTFY_TOKEN` (access token for protected topics) and `NOTIFY_NTFY_ATTACH_DETAILS="0"` (message only, no attachment).
 
 System-mode defaults retain the local history under `/var/lib/backup-suite/logs/` and `/var/lib/backup-suite/failures/`. Logs rotate at `BACKUP_SUITE_LOG_MAX_BYTES`, retain `BACKUP_SUITE_LOG_KEEP_FILES` files per process, and retain the newest `NOTIFY_FAILURE_LOG_KEEP_FILES` failure snapshots. An ntfy message includes both the recent journal and durable-log tail plus the local snapshot path.
 

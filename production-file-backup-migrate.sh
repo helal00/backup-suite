@@ -136,6 +136,10 @@ required_source_files=(
     "$SOURCE_DIR/bin/database-size-check.sh"
     "$SOURCE_DIR/bin/notify-failure.sh"
     "$SOURCE_DIR/bin/systemd-fork-run.sh"
+    "$SOURCE_DIR/bin/notify-lib.sh"
+    "$SOURCE_DIR/bin/backup-watchdog.sh"
+    "$SOURCE_DIR/bin/backup-profile.sh"
+    "$SOURCE_DIR/systemd/backup-suite-watchdog@.service.template"
     "$SOURCE_DIR/systemd/file-backup.service.template"
     "$SOURCE_DIR/systemd/file-backup.timer.template"
     "$SOURCE_DIR/examples/project-policies/crypto-wallets-api.backup-excludes"
@@ -353,7 +357,20 @@ if grep -Eq '__[A-Z0-9_]+__' "$rendered_unit"; then
 fi
 install -m 644 -o 0 -g 0 "$rendered_unit" "$FILE_BACKUP_UNIT"
 rm -f "$rendered_unit"
-systemd-analyze verify "$FILE_BACKUP_UNIT"
+
+rendered_watchdog_unit=$(mktemp)
+sed \
+    -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
+    -e "s|__CONFIG_DIR__|$CONFIG_DIR|g" \
+    -e 's|__USER_GROUP_DIRECTIVES__||g' \
+    -e 's|__WATCHDOG_PRIVILEGED_DIRECTIVES__|Nice=-5\nOOMScoreAdjust=-900|g' \
+    "$SOURCE_DIR/systemd/backup-suite-watchdog@.service.template" > "$rendered_watchdog_unit"
+if grep -Eq '__[A-Z0-9_]+__' "$rendered_watchdog_unit"; then
+    die "Unresolved placeholder remains in rendered backup-suite-watchdog@.service"
+fi
+install -m 644 -o 0 -g 0 "$rendered_watchdog_unit" "$UNIT_DIR/backup-suite-watchdog@.service"
+rm -f "$rendered_watchdog_unit"
+systemd-analyze verify "$FILE_BACKUP_UNIT" "$UNIT_DIR/backup-suite-watchdog@file-backup.service"
 
 rendered_timer=$(mktemp)
 configured_file_schedule=$(bash -c '. "$1"; printf "%s" "${FILE_BACKUP_ONCALENDAR:-*:0/30}"' _ "$(readlink -f "$GLOBAL_CONFIG")")
@@ -366,6 +383,16 @@ install -m 644 -o 0 -g 0 "$rendered_timer" "$UNIT_DIR/file-backup.timer"
 rm -f "$rendered_timer"
 systemd-analyze verify "$UNIT_DIR/file-backup.timer"
 systemctl daemon-reload
+BACKUP_SUITE_CONFIG_DIR="$CONFIG_DIR" "$INSTALL_DIR/bin/backup-profile.sh" apply
+configured_profile=$(bash -c '. "$1"; printf "%s" "${FILE_BACKUP_PROFILE:-custom}"' _ "$(readlink -f "$GLOBAL_CONFIG")")
+profile_values=$(BACKUP_SUITE_CONFIG_DIR="$CONFIG_DIR" bash -c '
+    . "$1/bin/common.sh"
+    load_global_config
+    resolve_file_backup_profile "$2"
+    printf "%s %s %s %s %s\n" "$PROFILE_CPU_WEIGHT" "$PROFILE_IO_WEIGHT" "$(size_to_bytes "$PROFILE_MEMORY_HIGH")" "$(size_to_bytes "$PROFILE_MEMORY_MAX")" "$PROFILE_TASKS_MAX"
+' _ "$INSTALL_DIR" "$configured_profile")
+read -r expected_cpu_weight expected_io_weight expected_memory_high expected_memory_max expected_tasks_max <<< "$profile_values"
+log "Resource profile in effect: $configured_profile"
 
 assert_service_property() {
     local property_name="$1"
@@ -382,11 +409,11 @@ assert_service_property KillMode control-group
 assert_service_property CPUAccounting yes
 assert_service_property MemoryAccounting yes
 assert_service_property IOAccounting yes
-assert_service_property CPUWeight 10
-assert_service_property IOWeight 10
-assert_service_property MemoryHigh 536870912
-assert_service_property MemoryMax 1073741824
-assert_service_property TasksMax 64
+assert_service_property CPUWeight "$expected_cpu_weight"
+assert_service_property IOWeight "$expected_io_weight"
+assert_service_property MemoryHigh "$expected_memory_high"
+assert_service_property MemoryMax "$expected_memory_max"
+assert_service_property TasksMax "$expected_tasks_max"
 assert_service_property RuntimeMaxUSec 6h
 assert_service_property TimeoutStopUSec 2min
 service_exec_start=$(systemctl show "$SERVICE_UNIT" -p ExecStart --value)

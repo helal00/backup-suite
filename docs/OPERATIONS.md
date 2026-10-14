@@ -111,18 +111,21 @@ The file backup can also pause itself when configured processes are active.
 
 Manual file-backup runs are serialized by an explicit state lock. The systemd unit also holds a nonblocking lock under the persistent state directory, returns overlap status without starting a second worker, and has a bounded runtime. It runs in the foreground as `Type=exec`, so `file-backup.sh`, every rclone process, and their descendants remain in the `file-backup.service` cgroup while `RuntimeMaxSec` remains effective.
 
-The file-backup service is limited independently of the rest of the host:
+The file-backup service is limited independently of the rest of the host. The CPU, memory, swap, task, and I/O limits come from the selected resource profile (`backup-profile.sh show`; see [RESOURCES.md](RESOURCES.md)). The unit template carries the `moderate` values, and the profile drop-in `file-backup.service.d/50-backup-profile.conf` overrides them:
 
 - `CPUQuota=50%`, `CPUWeight=10`, `Nice=15`
 - `IOWeight=10`, `IOSchedulingClass=idle`
-- `MemoryHigh=512M`, `MemoryMax=1G`, `TasksMax=64`
+- `MemoryHigh=512M`, `MemoryMax=1G`, `MemorySwapMax=256M`, `TasksMax=64`
+- `OOMPolicy=stop`, and `backup-suite-watchdog@file-backup.service` runs alongside every backup
 - `CPUAccounting=true`, `MemoryAccounting=true`, `IOAccounting=true`
 - `RuntimeMaxSec=6h`, `TimeoutStopSec=2min`, `KillMode=control-group`
 - `Restart=no`; the `OnFailure` notification unit also has `Restart=no`
 
 The timer uses `Persistent=true` and a 15-minute randomized delay. A missed scheduled run is recovered after boot, but concurrent and immediate failure-triggered runs are prevented by systemd state plus the persistent locks.
 
-Default rclone file-backup concurrency is `transfers=2`, `checkers=4`, and `buffer-size=16M`.
+Rclone concurrency also comes from the profile (`moderate`: `transfers=2`, `checkers=4`, `buffer-size=16M`, `tpslimit=10`).
+
+Deploy code changes to an installed host with `sudo ./production-deploy.sh`. It waits for a running backup (or stops it with `--stop-running`), keeps a copy of the previous installation, and only stops, never disables, the timer. On any failure it restores the previous version and restarts the timer.
 
 Relevant global config settings:
 
@@ -240,6 +243,7 @@ Installed system services:
 - `database-backup.timer`
 - `database-size-check.service`
 - `database-size-check.timer`
+- `backup-suite-watchdog@file-backup.service` (started by `file-backup.service`, exits with it)
 
 Check timers:
 
@@ -269,6 +273,7 @@ Check logs:
 journalctl -t backup-file -n 200 --no-pager
 journalctl -t backup-db -n 200 --no-pager
 journalctl -t backup-db-monitor -n 200 --no-pager
+journalctl -t backup-watchdog -n 200 --no-pager
 ```
 
 ## Monitoring Running Jobs
@@ -305,6 +310,13 @@ Bounded durable history is also kept below the configured state directory:
 /var/lib/backup-suite/logs/backup-db.log
 /var/lib/backup-suite/logs/backup-db-monitor.log
 /var/lib/backup-suite/failures/
+```
+
+Live resource use of a running backup and per-run resource history:
+
+```text
+/var/lib/backup-suite/watchdog/file-backup.service.status
+/var/lib/backup-suite/watchdog/history.tsv
 ```
 
 The `failures/` records are created before ntfy delivery, so a network or notification failure does not erase the local diagnostic record.

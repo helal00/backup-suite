@@ -279,6 +279,12 @@ render_unit() {
     local output_file="$2"
     local lock_file="$3"
     local rendered_unit
+    local watchdog_directives=""
+
+    if [ "$EFFECTIVE_INSTALL_MODE" = "system" ]; then
+        # Keep the watchdog responsive and alive when the server is under pressure.
+        watchdog_directives='Nice=-5\nOOMScoreAdjust=-900'
+    fi
 
     rendered_unit=$(sed \
         -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
@@ -290,6 +296,7 @@ render_unit() {
         -e "s|__FILE_BACKUP_RANDOMIZED_DELAY_SEC__|${FILE_BACKUP_RANDOMIZED_DELAY_SEC:-15m}|g" \
         -e "s|__DB_BACKUP_ONCALENDAR__|$DB_BACKUP_ONCALENDAR|g" \
         -e "s|__DB_MONITOR_ONCALENDAR__|$DB_MONITOR_ONCALENDAR|g" \
+        -e "s|__WATCHDOG_PRIVILEGED_DIRECTIVES__|$watchdog_directives|g" \
         "$template_file")
 
     if [ -e "$output_file" ] || [ -L "$output_file" ]; then
@@ -394,6 +401,10 @@ deploy_file "$READ_SOURCE_DIR/bin/file-backup.sh" "$INSTALL_DIR/bin/file-backup.
 deploy_file "$READ_SOURCE_DIR/bin/database-backup.sh" "$INSTALL_DIR/bin/database-backup.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
 deploy_file "$READ_SOURCE_DIR/bin/database-size-check.sh" "$INSTALL_DIR/bin/database-size-check.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
 deploy_file "$READ_SOURCE_DIR/bin/notify-failure.sh" "$INSTALL_DIR/bin/notify-failure.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
+deploy_file "$READ_SOURCE_DIR/bin/notify-lib.sh" "$INSTALL_DIR/bin/notify-lib.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
+deploy_file "$READ_SOURCE_DIR/bin/notify-test.sh" "$INSTALL_DIR/bin/notify-test.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
+deploy_file "$READ_SOURCE_DIR/bin/backup-watchdog.sh" "$INSTALL_DIR/bin/backup-watchdog.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
+deploy_file "$READ_SOURCE_DIR/bin/backup-profile.sh" "$INSTALL_DIR/bin/backup-profile.sh" 755 scripts CONFIRMED_SCRIPTS "installed script"
 deploy_file "$READ_SOURCE_DIR/README.md" "$INSTALL_DIR/README.md" 644 scripts CONFIRMED_SCRIPTS "installed documentation"
 
 deploy_symlink "$DEPLOYED_CONFIG_SOURCE_DIR/global.conf" "$CONFIG_DIR/global.conf" config CONFIRMED_CONFIG "runtime config"
@@ -446,9 +457,12 @@ if is_enabled_value_local "${INSTALL_SYSTEMD_UNITS:-1}"; then
     render_unit "$READ_SOURCE_DIR/systemd/database-size-check.service.template" "$SYSTEMD_UNIT_DIR/database-size-check.service" "$monitor_lock"
     render_unit "$READ_SOURCE_DIR/systemd/database-size-check.timer.template" "$SYSTEMD_UNIT_DIR/database-size-check.timer" "$monitor_lock"
     render_unit "$READ_SOURCE_DIR/systemd/backup-suite-notify@.service.template" "$SYSTEMD_UNIT_DIR/backup-suite-notify@.service" ""
+    render_unit "$READ_SOURCE_DIR/systemd/backup-suite-watchdog@.service.template" "$SYSTEMD_UNIT_DIR/backup-suite-watchdog@.service" ""
 
-    run_cmd chmod 644 "$SYSTEMD_UNIT_DIR/file-backup.service" "$SYSTEMD_UNIT_DIR/file-backup.timer" "$SYSTEMD_UNIT_DIR/database-backup.service" "$SYSTEMD_UNIT_DIR/database-backup.timer" "$SYSTEMD_UNIT_DIR/database-size-check.service" "$SYSTEMD_UNIT_DIR/database-size-check.timer" "$SYSTEMD_UNIT_DIR/backup-suite-notify@.service"
+    run_cmd chmod 644 "$SYSTEMD_UNIT_DIR/file-backup.service" "$SYSTEMD_UNIT_DIR/file-backup.timer" "$SYSTEMD_UNIT_DIR/database-backup.service" "$SYSTEMD_UNIT_DIR/database-backup.timer" "$SYSTEMD_UNIT_DIR/database-size-check.service" "$SYSTEMD_UNIT_DIR/database-size-check.timer" "$SYSTEMD_UNIT_DIR/backup-suite-notify@.service" "$SYSTEMD_UNIT_DIR/backup-suite-watchdog@.service"
     run_cmd "${SYSTEMCTL_COMMAND[@]}" daemon-reload
+    # Writes the file-backup resource-profile drop-in and reloads systemd.
+    run_cmd env BACKUP_SUITE_CONFIG_DIR="$CONFIG_DIR" "$INSTALL_DIR/bin/backup-profile.sh" apply
 
     if is_enabled_value_local "${ENABLE_TIMERS_AFTER_INSTALL:-0}"; then
         run_cmd "${SYSTEMCTL_COMMAND[@]}" enable --now file-backup.timer
@@ -458,4 +472,5 @@ if is_enabled_value_local "${INSTALL_SYSTEMD_UNITS:-1}"; then
 fi
 
 echo "Backup Suite setup completed."
+echo "Choose how much of the server file backups may use: $INSTALL_DIR/bin/backup-profile.sh choose"
 echo "Review the canonical source under $CANONICAL_SOURCE_DIR and runtime config links under $CONFIG_DIR before enabling timers on a live system."

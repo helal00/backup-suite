@@ -5,11 +5,15 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/common.sh"
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/notify-lib.sh"
 
 BACKUP_SUITE_RUNTIME_SCOPE="file-backup"
 parse_standard_runtime_args "$@"
 setup_journal_logging "backup-file"
 load_global_config
+resolve_profile_ladder
+resolve_file_backup_profile "$(current_adaptive_profile)"
 setup_durable_logging "backup-file"
 acquire_backup_lock "file-backup" "Backup Suite file backup"
 
@@ -28,6 +32,8 @@ run_outcome="success"
 synced_count=0
 skipped_count=0
 skipped_changed_count=0
+deferred_active_count=0
+stale_deferral_entries=()
 failed_count=0
 migration_required_count=0
 migration_report_count=0
@@ -39,6 +45,39 @@ file_progress_args=()
 file_heartbeat_interval_seconds="${FILE_HEARTBEAT_INTERVAL_SECONDS:-60}"
 file_stability_interval_seconds="${FILE_STABILITY_INTERVAL_SECONDS:-10}"
 file_changed_detail_limit="${FILE_CHANGED_DETAIL_LIMIT:-20}"
+file_active_tracking_enabled="${FILE_ACTIVE_TRACKING_ENABLED:-1}"
+file_active_window_seconds="${FILE_ACTIVE_WINDOW_SECONDS:-120}"
+file_active_max_deferrals="${FILE_ACTIVE_MAX_DEFERRALS:-12}"
+file_rclone_tuning_args=()
+active_profile_name=""
+
+select_project_profile() {
+    # In adaptive mode the watchdog may step the profile down or up while the
+    # run is in progress; each project starts rclone with the current level.
+    local wanted_profile
+
+    wanted_profile=$(current_adaptive_profile)
+    [ "$wanted_profile" = "$active_profile_name" ] && return 0
+    resolve_file_backup_profile "$wanted_profile"
+    file_rclone_tuning_args=(
+        --transfers "$PROFILE_RCLONE_TRANSFERS"
+        --checkers "$PROFILE_RCLONE_CHECKERS"
+        --buffer-size "$PROFILE_RCLONE_BUFFER_SIZE"
+        --tpslimit "$PROFILE_RCLONE_TPSLIMIT"
+    )
+    if [ -n "$PROFILE_RCLONE_BWLIMIT" ]; then
+        file_rclone_tuning_args+=(--bwlimit "$PROFILE_RCLONE_BWLIMIT")
+    fi
+    if [ -n "$active_profile_name" ]; then
+        echo "Resource profile changed by the watchdog: ${active_profile_name} -> ${PROFILE_NAME}; rclone uses ${PROFILE_RCLONE_TRANSFERS} transfers from the next project."
+    else
+        echo "Resource profile: ${PROFILE_NAME} (mode ${PROFILE_MODE}; levels $(IFS='>'; printf '%s' "${PROFILE_LADDER[*]}"))"
+    fi
+    active_profile_name="$PROFILE_NAME"
+}
+
+[[ "$file_active_window_seconds" =~ ^[0-9]+$ ]] || fail "FILE_ACTIVE_WINDOW_SECONDS must be a non-negative integer"
+[[ "$file_active_max_deferrals" =~ ^[0-9]+$ ]] && [ "$file_active_max_deferrals" -gt 0 ] || fail "FILE_ACTIVE_MAX_DEFERRALS must be a positive integer"
 
 if [ -n "${FILE_RCLONE_EXTRA_FLAGS:-}" ]; then
     read -r -a file_extra_args <<< "$FILE_RCLONE_EXTRA_FLAGS"
@@ -55,7 +94,7 @@ finish() {
     local run_finished_at
 
     run_finished_at=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-    echo "Run summary: outcome=${run_outcome} synced=${synced_count} skipped=${skipped_count} skipped_changed=${skipped_changed_count} failed=${failed_count} migration_required=${migration_required_count} migration_reports=${migration_report_count} cleanup_failed=${cleanup_failed}"
+    echo "Run summary: outcome=${run_outcome} profile=${PROFILE_NAME} synced=${synced_count} skipped=${skipped_count} skipped_changed=${skipped_changed_count} deferred_active=${deferred_active_count} failed=${failed_count} migration_required=${migration_required_count} migration_reports=${migration_report_count} cleanup_failed=${cleanup_failed}"
     if [ ${#failed_entries[@]} -gt 0 ]; then
         echo "Failed file sources: ${failed_entries[*]}"
     fi
@@ -202,7 +241,10 @@ path_matches_pattern_file() {
     return 1
 }
 
-classify_changed_volatile_paths() {
+classify_changed_paths() {
+    # Writes the source paths that changed between two snapshots. With active
+    # tracking enabled every changed path is deferred; otherwise only paths that
+    # match an explicit volatile classification are.
     local before_snapshot="$1"
     local after_snapshot="$2"
     local volatile_pattern_file="$3"
@@ -220,6 +262,11 @@ classify_changed_volatile_paths() {
     cut -d '|' -f 1 "$changed_lines_file" | sort -u > "$candidates_file"
 
     : > "$output_file"
+    if is_enabled_value "$file_active_tracking_enabled"; then
+        cat "$candidates_file" > "$output_file"
+        return 0
+    fi
+    [ -n "$volatile_pattern_file" ] || return 0
     while IFS= read -r candidate_path; do
         [ -n "$candidate_path" ] || continue
         match_path="${candidate_path%.rclonelink}"
@@ -227,6 +274,118 @@ classify_changed_volatile_paths() {
             printf '%s\n' "$candidate_path" >> "$output_file"
         fi
     done < "$candidates_file"
+}
+
+detect_active_files() {
+    # Lists files modified within the active window. They are probably still
+    # being written, so copying them now could upload a half-written file.
+    local source_path="$1"
+    local output_file="$2"
+    shift 2
+
+    "$RCLONE_BIN" lsf "$source_path" \
+        --config "$RCLONE_CONFIG_PATH" \
+        --recursive \
+        --files-only \
+        --format p \
+        --links \
+        --max-age "${file_active_window_seconds}s" \
+        "$@" | LC_ALL=C sort -u > "$output_file"
+}
+
+write_path_filter_file() {
+    # Converts source-relative paths into exact, root-anchored rclone filters so
+    # a deferred path never matches a same-named file elsewhere in the tree.
+    local raw_paths_file="$1"
+    local filter_file="$2"
+
+    sed -e 's/[][*?{}\\]/\\&/g' -e 's|^|/|' "$raw_paths_file" > "$filter_file"
+}
+
+log_bounded_paths() {
+    local prefix="$1"
+    local paths_file="$2"
+    local total
+    local shown=0
+    local listed_path
+
+    total=$(wc -l < "$paths_file")
+    while IFS= read -r listed_path; do
+        [ "$shown" -lt "$file_changed_detail_limit" ] || break
+        echo "$prefix: $listed_path"
+        shown=$((shown + 1))
+    done < "$paths_file"
+    if [ "$total" -gt "$file_changed_detail_limit" ]; then
+        echo "$prefix detail truncated: shown=${file_changed_detail_limit} total=${total}"
+    fi
+}
+
+record_project_deferrals() {
+    # Tracks how many consecutive runs each path has been deferred. A path that
+    # never settles would otherwise silently never reach the backup.
+    local project_label="$1"
+    local state_key="$2"
+    local deferred_paths_file="$3"
+    local state_dir
+    local state_file
+    local new_state
+    local previous_state="/dev/null"
+    local deferral_count
+    local deferred_path
+
+    state_dir=$(join_path "$STATE_DIR" "active-files")
+    state_file=$(join_path "$state_dir" "${state_key}.tsv")
+    mkdir -p "$state_dir"
+    chmod 750 "$state_dir" 2>/dev/null || true
+
+    if [ ! -s "$deferred_paths_file" ]; then
+        rm -f "$state_file"
+        return 0
+    fi
+
+    [ -f "$state_file" ] && previous_state="$state_file"
+    new_state=$(mktemp)
+    temp_runtime_files+=("$new_state")
+    awk -F '\t' -v OFS='\t' '
+        FILENAME == ARGV[1] { if (NF >= 2) previous[$2] = $1; next }
+        $0 != "" { print previous[$0] + 1, $0 }
+    ' "$previous_state" "$deferred_paths_file" > "$new_state"
+
+    while IFS=$'\t' read -r deferral_count deferred_path; do
+        if [ "$deferral_count" -ge "$file_active_max_deferrals" ] && [ $(( (deferral_count - file_active_max_deferrals) % file_active_max_deferrals )) -eq 0 ]; then
+            echo "WARNING: '$deferred_path' in '$project_label' has changed during $deferral_count consecutive runs and has not been backed up in that time."
+            stale_deferral_entries+=("$project_label: $deferred_path ($deferral_count runs)")
+        fi
+    done < "$new_state"
+
+    cp "$new_state" "$state_file"
+    chmod 640 "$state_file" 2>/dev/null || true
+}
+
+notify_stale_deferrals() {
+    local message
+    local entry
+    local entry_lines=""
+
+    [ "${#stale_deferral_entries[@]}" -gt 0 ] || return 0
+    for entry in "${stale_deferral_entries[@]:0:20}"; do
+        entry_lines+="- $entry"$'\n'
+    done
+    if [ "${#stale_deferral_entries[@]}" -gt 20 ]; then
+        entry_lines+="- ... and $(( ${#stale_deferral_entries[@]} - 20 )) more (see the durable log)"$'\n'
+    fi
+    message=$(cat <<MSG
+Some files have changed during every backup run for a long time, so the backup keeps skipping them and their remote copy is getting old:
+
+${entry_lines}
+Why: Backup Suite does not upload files that are being written (modified within the last ${file_active_window_seconds}s, or seen changing during the upload), because a half-written copy could be worse than the previous one. The previous remote version of each file is kept.
+
+What to do: if a file is a log or cache, add it to .backup-excludes in that project. If it must be backed up, stop or pause its writer briefly, or list it in .backup-volatile so the decision is explicit.
+
+Host: $(hostname) | Profile: $PROFILE_NAME
+MSG
+)
+    ntfy_publish "${NOTIFY_NTFY_TITLE_PREFIX:-Backup Suite}: files repeatedly skipped while changing on $(hostname)" default "hourglass,backup" "$message" || true
 }
 
 migration_key_for_destination() {
@@ -280,10 +439,7 @@ write_link_migration_report() {
         --links \
         --dry-run \
         --backup-dir "$archive_path/migration-dry-run" \
-        --transfers "${FILE_RCLONE_TRANSFERS:-2}" \
-        --checkers "${FILE_RCLONE_CHECKERS:-4}" \
-        --buffer-size "${FILE_RCLONE_BUFFER_SIZE:-16M}" \
-        --tpslimit "${FILE_RCLONE_TPSLIMIT:-10}" \
+        "${file_rclone_tuning_args[@]}" \
         "${filter_args[@]}" \
         "${file_extra_args[@]}" \
         "${file_progress_args[@]}" >> "$report_tmp" 2>&1; then
@@ -357,10 +513,7 @@ run_sync_attempt() {
         --create-empty-src-dirs \
         --links \
         --backup-dir "$attempt_archive_path" \
-        --transfers "${FILE_RCLONE_TRANSFERS:-2}" \
-        --checkers "${FILE_RCLONE_CHECKERS:-4}" \
-        --buffer-size "${FILE_RCLONE_BUFFER_SIZE:-16M}" \
-        --tpslimit "${FILE_RCLONE_TPSLIMIT:-10}" \
+        "${file_rclone_tuning_args[@]}" \
         --retries 1 \
         "${sync_args[@]}" 2>&1 | tee "$log_file"
 }
@@ -400,8 +553,11 @@ process_project() {
     local retry_snapshot
     local changed_volatile_file
     local changed_count
-    local detail_count
-    local changed_path
+    local active_paths_file
+    local active_filter_file
+    local active_count
+    local deferred_paths_file
+    local deferred_filter_file
     local migration_applies=0
     local source_filter_args=()
     local source_sync_args=("${file_extra_args[@]}" "${file_progress_args[@]}")
@@ -426,6 +582,7 @@ process_project() {
         return 1
     fi
 
+    select_project_profile
     destination_path=$(join_path "$remote_base" "$destination_relative")
     archive_path=$(join_path "$remote_base" "${FILE_ARCHIVE_FOLDER_NAME:-deleted_files}" "$archive_timestamp" "$destination_relative")
     migration_key=$(migration_key_for_destination "$destination_path")
@@ -506,7 +663,11 @@ process_project() {
     after_snapshot=$(mktemp)
     retry_snapshot=$(mktemp)
     changed_volatile_file=$(mktemp)
-    temp_runtime_files+=("$attempt_one_log" "$attempt_two_log" "$attempt_three_log" "$before_snapshot" "$after_snapshot" "$retry_snapshot" "$changed_volatile_file")
+    active_paths_file=$(mktemp)
+    active_filter_file=$(mktemp)
+    deferred_paths_file=$(mktemp)
+    deferred_filter_file=$(mktemp)
+    temp_runtime_files+=("$attempt_one_log" "$attempt_two_log" "$attempt_three_log" "$before_snapshot" "$after_snapshot" "$retry_snapshot" "$changed_volatile_file" "$active_paths_file" "$active_filter_file" "$deferred_paths_file" "$deferred_filter_file")
 
     if [ "$migration_applies" -eq 1 ]; then
         if ! preserve_confirmed_migration_candidates "$source_path" "$destination_path" "$archive_path" "${source_filter_args[@]}"; then
@@ -517,11 +678,27 @@ process_project() {
         fi
     fi
 
-    if run_sync_attempt "$source_path" "$destination_path" "$archive_path/attempt-1" "$attempt_one_log" "" "${source_sync_args[@]}"; then
+    : > "$active_paths_file"
+    if is_enabled_value "$file_active_tracking_enabled" && [ "$file_active_window_seconds" -gt 0 ]; then
+        if ! detect_active_files "$source_path" "$active_paths_file" "${source_filter_args[@]}"; then
+            echo "Could not scan '$source_path' for recently changed files; continuing without deferrals."
+            : > "$active_paths_file"
+        fi
+    fi
+    write_path_filter_file "$active_paths_file" "$active_filter_file"
+    if [ -s "$active_paths_file" ]; then
+        active_count=$(wc -l < "$active_paths_file")
+        deferred_active_count=$((deferred_active_count + active_count))
+        echo "Deferring ${active_count} path(s) modified within the last ${file_active_window_seconds}s in '$project_label'; their previous remote versions stay in place until they settle."
+        log_bounded_paths "Deferred active path" "$active_paths_file"
+    fi
+
+    if run_sync_attempt "$source_path" "$destination_path" "$archive_path/attempt-1" "$attempt_one_log" "$active_filter_file" "${source_sync_args[@]}"; then
         synced_count=$((synced_count + 1))
         if [ "$migration_applies" -eq 1 ]; then
             mark_migration_complete "$migration_marker_file" "$source_path" "$destination_path"
         fi
+        record_project_deferrals "$project_label" "$migration_key" "$active_paths_file"
         echo "File sync completed for '$source_path'"
         return 0
     fi
@@ -530,20 +707,23 @@ process_project() {
     if ! snapshot_source_files "$source_path" "$before_snapshot" "${source_filter_args[@]}"; then
         failed_count=$((failed_count + 1))
         failed_entries+=("${project_label}:stability-snapshot")
+        record_project_deferrals "$project_label" "$migration_key" "$active_paths_file"
         return 1
     fi
     sleep "$file_stability_interval_seconds"
     if ! snapshot_source_files "$source_path" "$after_snapshot" "${source_filter_args[@]}"; then
         failed_count=$((failed_count + 1))
         failed_entries+=("${project_label}:stability-snapshot")
+        record_project_deferrals "$project_label" "$migration_key" "$active_paths_file"
         return 1
     fi
 
-    if run_sync_attempt "$source_path" "$destination_path" "$archive_path/attempt-2" "$attempt_two_log" "" "${source_sync_args[@]}"; then
+    if run_sync_attempt "$source_path" "$destination_path" "$archive_path/attempt-2" "$attempt_two_log" "$active_filter_file" "${source_sync_args[@]}"; then
         synced_count=$((synced_count + 1))
         if [ "$migration_applies" -eq 1 ]; then
             mark_migration_complete "$migration_marker_file" "$source_path" "$destination_path"
         fi
+        record_project_deferrals "$project_label" "$migration_key" "$active_paths_file"
         echo "File sync completed on stability retry for '$source_path'"
         return 0
     fi
@@ -551,40 +731,32 @@ process_project() {
     if ! snapshot_source_files "$source_path" "$retry_snapshot" "${source_filter_args[@]}"; then
         failed_count=$((failed_count + 1))
         failed_entries+=("${project_label}:stability-snapshot")
+        record_project_deferrals "$project_label" "$migration_key" "$active_paths_file"
         return 1
     fi
 
-    if [ -n "$volatile_pattern_file" ]; then
-        classify_changed_volatile_paths "$before_snapshot" "$retry_snapshot" "$volatile_pattern_file" "$changed_volatile_file"
-    else
-        : > "$changed_volatile_file"
-    fi
+    classify_changed_paths "$before_snapshot" "$retry_snapshot" "$volatile_pattern_file" "$changed_volatile_file"
+    LC_ALL=C sort -u "$active_paths_file" "$changed_volatile_file" > "$deferred_paths_file"
 
     if [ -s "$changed_volatile_file" ]; then
         changed_count=$(wc -l < "$changed_volatile_file")
-        echo "Retrying '$source_path' while preserving ${changed_count} explicitly classified changing path(s) for the next run."
-        detail_count=0
-        while IFS= read -r changed_path; do
-            if [ "$detail_count" -lt "$file_changed_detail_limit" ]; then
-                echo "Skipped changed path: $changed_path"
-            fi
-            detail_count=$((detail_count + 1))
-        done < "$changed_volatile_file"
-        if [ "$changed_count" -gt "$file_changed_detail_limit" ]; then
-            echo "Skipped changed path detail truncated: shown=${file_changed_detail_limit} total=${changed_count}"
-        fi
+        echo "Retrying '$source_path' while deferring ${changed_count} path(s) that changed during the previous attempts."
+        log_bounded_paths "Skipped changed path" "$changed_volatile_file"
+        write_path_filter_file "$deferred_paths_file" "$deferred_filter_file"
 
-        if run_sync_attempt "$source_path" "$destination_path" "$archive_path/attempt-3" "$attempt_three_log" "$changed_volatile_file" "${source_sync_args[@]}"; then
+        if run_sync_attempt "$source_path" "$destination_path" "$archive_path/attempt-3" "$attempt_three_log" "$deferred_filter_file" "${source_sync_args[@]}"; then
             skipped_changed_count=$((skipped_changed_count + changed_count))
             synced_count=$((synced_count + 1))
             if [ "$migration_applies" -eq 1 ]; then
                 mark_migration_complete "$migration_marker_file" "$source_path" "$destination_path"
             fi
-            echo "File sync completed with explicitly classified changing paths preserved remotely for retry on the next run."
+            record_project_deferrals "$project_label" "$migration_key" "$deferred_paths_file"
+            echo "File sync completed with changing paths preserved remotely for retry on the next run."
             return 0
         fi
     fi
 
+    record_project_deferrals "$project_label" "$migration_key" "$deferred_paths_file"
     failed_count=$((failed_count + 1))
     failed_entries+=("$project_label")
     echo "File sync failed for '$source_path'; remote deletions remain protected and prior versions are retained under '$archive_path'."
@@ -592,6 +764,7 @@ process_project() {
 }
 
 echo "File backup started at ${run_started_at}"
+select_project_profile
 echo "Using source config: $FILE_SOURCE_CONFIG_PATH"
 echo "Remote base: $remote_base"
 
@@ -757,14 +930,16 @@ else
     echo "Skipping archive retention cleanup because one or more isolated projects failed."
 fi
 
+notify_stale_deferrals
+
 if [ "$failed_count" -gt 0 ] || [ "$cleanup_failed" -ne 0 ]; then
     run_outcome="completed-with-errors"
     exit 1
 fi
 
-if [ "$skipped_changed_count" -gt 0 ]; then
+if [ "$skipped_changed_count" -gt 0 ] || [ "$deferred_active_count" -gt 0 ]; then
     run_outcome="completed-with-skips"
-    echo "File backup completed with explicitly classified changing paths preserved for retry."
+    echo "File backup completed; changing paths were deferred and keep their previous remote versions until the next run."
 else
     run_outcome="completed-successfully"
     echo "File backup completed successfully."

@@ -74,6 +74,9 @@ FILE_RCLONE_TPSLIMIT="10"
 FILE_RCLONE_EXTRA_FLAGS=""
 FILE_STABILITY_INTERVAL_SECONDS="0"
 FILE_CHANGED_DETAIL_LIMIT="2"
+# Fixture files are created moments before each run; tests that exercise the
+# recently-modified deferral window enable it explicitly.
+FILE_ACTIVE_WINDOW_SECONDS="0"
 EOF
 }
 
@@ -446,6 +449,554 @@ test_production_migration_runner_guards() {
     "$runner" --help >/dev/null
 }
 
+write_notify_config() {
+    local test_root="$1"
+    cat >> "$test_root/config/global.conf" <<'EOF'
+NOTIFY_FAILURES_ENABLED="1"
+NOTIFY_NTFY_TOPIC_URL="https://ntfy.invalid/test-topic"
+NOTIFY_NTFY_TITLE_PREFIX="Backup Suite Test"
+NOTIFY_NTFY_PRIORITY="high"
+NOTIFY_JOURNAL_LINES="5"
+NOTIFY_DURABLE_LOG_LINES="20"
+NOTIFY_FAILURE_LOG_KEEP_FILES="3"
+EOF
+}
+
+install_fake_tools() {
+    local test_root="$1"
+    mkdir -p "$test_root/bin"
+    ln -sf "$ROOT_DIR/tests/fixtures/fake-curl.sh" "$test_root/bin/curl"
+    ln -sf "$ROOT_DIR/tests/fixtures/fake-systemctl.sh" "$test_root/bin/systemctl"
+}
+
+curl_message_header() {
+    # Prints the Message header (or --data-binary body) of the first request.
+    awk '
+        /^arg: Message: / { sub(/^arg: Message: /, ""); print; exit }
+        previous == "arg: --data-binary" { sub(/^arg: /, ""); print; exit }
+        { previous = $0 }
+    ' "$1"
+}
+
+test_profiles_and_dropin() {
+    local test_root
+    local dropin
+    local output_file
+    test_root=$(mktemp -d)
+    output_file="$test_root/output.log"
+    write_test_config "$test_root" rclone 'fake:'
+    install_fake_tools "$test_root"
+    mkdir -p "$test_root/cgroup/system.slice/file-backup.service"
+    printf '50000 100000\n' > "$test_root/cgroup/system.slice/file-backup.service/cpu.max"
+
+    run_profile() {
+        env -u XDG_CONFIG_HOME -u XDG_STATE_HOME \
+            HOME="$test_root/home" \
+            PATH="$test_root/bin:$PATH" \
+            FAKE_SYSTEMCTL_LOG="$test_root/systemctl.log" \
+            BACKUP_SUITE_CONFIG_DIR="$test_root/config" \
+            BACKUP_SUITE_CGROUP_ROOT="$test_root/cgroup" \
+            "$ROOT_DIR/bin/backup-profile.sh" "$@"
+    }
+
+    run_profile print-dropin slow > "$test_root/slow.conf"
+    for directive in 'CPUQuota=25%' 'MemoryHigh=256M' 'MemoryMax=512M' 'MemorySwapMax=128M' 'TasksMax=32' 'IOSchedulingClass=idle' 'Nice=19'; do
+        assert_contains "$test_root/slow.conf" "$directive"
+    done
+    run_profile print-dropin fast > "$test_root/fast.conf"
+    assert_contains "$test_root/fast.conf" 'CPUQuota=100%'
+    assert_contains "$test_root/fast.conf" 'MemoryMax=2G'
+    [ "$(run_profile current)" = "fixed custom" ] || fail_test 'configs without FILE_BACKUP_PROFILE must keep the custom (pre-profile) behavior'
+
+    run_profile show > "$output_file"
+    assert_contains "$output_file" 'slow'
+    assert_contains "$output_file" 'moderate'
+    assert_contains "$output_file" 'fast'
+    assert_contains "$output_file" 'Memory   : throttled above 512M, hard limit 1G'
+
+    run_profile set fast > "$output_file"
+    assert_contains "$test_root/config/global.conf" 'FILE_BACKUP_PROFILE="fast"'
+    dropin="$test_root/home/.config/systemd/user/file-backup.service.d/50-backup-profile.conf"
+    assert_file "$dropin"
+    assert_contains "$dropin" 'CPUQuota=100%'
+    assert_contains "$test_root/systemctl.log" 'daemon-reload'
+
+    FAKE_SYSTEMCTL_IS_ACTIVE_STATUS=0 FAKE_SYSTEMCTL_CONTROL_GROUP=/system.slice/file-backup.service run_profile set slow > "$output_file"
+    assert_contains "$output_file" 'Applied CPU, memory, swap, and task limits to the running backup.'
+    [ "$(cat "$test_root/cgroup/system.slice/file-backup.service/cpu.max")" = "25000 100000" ] || fail_test 'live CPU quota was not applied'
+    [ "$(cat "$test_root/cgroup/system.slice/file-backup.service/memory.max")" = "536870912" ] || fail_test 'live memory limit was not applied'
+
+    if run_profile set turbo > "$output_file" 2>&1; then
+        fail_test 'an unknown profile must be rejected'
+    fi
+    assert_contains "$test_root/config/global.conf" 'FILE_BACKUP_PROFILE="slow"'
+    rm -rf "$test_root"
+}
+
+test_profile_drives_rclone_flags() {
+    local test_root
+    test_root=$(mktemp -d)
+    mkdir -p "$test_root/projects/good" "$test_root/fake"
+    printf 'good\n' > "$test_root/projects/good/file.txt"
+    write_test_config "$test_root" "$ROOT_DIR/tests/fixtures/fake-rclone.sh" 'fake:'
+    printf '\nFILE_BACKUP_PROFILE="slow"\n' >> "$test_root/config/global.conf"
+    printf '1|good|%s|fixed|good|.nosync|single\n' "$test_root/projects/good" > "$test_root/config/file-sources.conf"
+
+    FAKE_RCLONE_SCENARIO=isolation FAKE_RCLONE_STATE="$test_root/fake" run_backup "$test_root" > "$test_root/output.log" 2>&1
+
+    assert_contains "$test_root/fake/commands.log" '--transfers 1'
+    assert_contains "$test_root/fake/commands.log" '--checkers 2'
+    assert_contains "$test_root/fake/commands.log" '--buffer-size 8M'
+    assert_contains "$test_root/fake/commands.log" '--tpslimit 4'
+    assert_contains "$test_root/fake/commands.log" '--bwlimit 4M'
+    assert_contains "$test_root/output.log" 'profile=slow'
+    rm -rf "$test_root"
+}
+
+test_active_file_deferral() {
+    local test_root
+    local output_file
+    local state_file
+    test_root=$(mktemp -d)
+    output_file="$test_root/output.log"
+    mkdir -p "$test_root/source/sub" "$test_root/remote"
+    printf 'stable\n' > "$test_root/source/stable.txt"
+    printf 'settled root copy\n' > "$test_root/source/same.log"
+    printf 'being written\n' > "$test_root/source/sub/same.log"
+    touch -d '-1 hour' "$test_root/source/stable.txt" "$test_root/source/same.log"
+
+    write_test_config "$test_root" rclone 'backup:'
+    write_notify_config "$test_root"
+    install_fake_tools "$test_root"
+    cat > "$test_root/config/rclone.conf" <<EOF
+[backup]
+type = alias
+remote = $test_root/remote
+EOF
+    cat >> "$test_root/config/global.conf" <<'EOF'
+FILE_ACTIVE_WINDOW_SECONDS="120"
+FILE_ACTIVE_MAX_DEFERRALS="2"
+EOF
+    printf '1|active|%s|fixed|active|.nosync|single\n' "$test_root/source" > "$test_root/config/file-sources.conf"
+
+    run_active_backup() {
+        PATH="$test_root/bin:$PATH" FAKE_CURL_LOG="$test_root/curl.log" run_backup "$test_root" > "$output_file" 2>&1
+    }
+
+    run_active_backup
+    assert_file "$test_root/remote/active/stable.txt"
+    assert_file "$test_root/remote/active/same.log"
+    [ ! -e "$test_root/remote/active/sub/same.log" ] || fail_test 'a file modified within the active window was copied'
+    assert_contains "$output_file" 'Deferred active path: sub/same.log'
+    assert_contains "$output_file" 'deferred_active=1'
+    assert_contains "$output_file" 'outcome=completed-with-skips'
+    state_file=$(find "$test_root/state/active-files" -type f -name '*.tsv' -print -quit)
+    assert_file "$state_file"
+    [ "$(cat "$state_file")" = $'1\tsub/same.log' ] || fail_test 'deferral count was not recorded'
+    [ ! -e "$test_root/curl.log" ] || fail_test 'a single deferral must not notify'
+
+    run_active_backup
+    [ "$(cat "$state_file")" = $'2\tsub/same.log' ] || fail_test 'consecutive deferral count did not increase'
+    assert_contains "$output_file" 'has changed during 2 consecutive runs'
+    assert_file "$test_root/curl.log"
+    assert_contains "$test_root/curl.log" 'files repeatedly skipped while changing'
+
+    touch -d '-1 hour' "$test_root/source/sub/same.log"
+    run_active_backup
+    assert_file "$test_root/remote/active/sub/same.log"
+    assert_contains "$output_file" 'outcome=completed-successfully'
+    [ ! -e "$state_file" ] || fail_test 'deferral state was not cleared after the file settled'
+    rm -rf "$test_root"
+}
+
+test_failure_notification_description() {
+    local test_root
+    local output_file
+    local message
+    local failure_record
+    test_root=$(mktemp -d)
+    output_file="$test_root/output.log"
+    mkdir -p "$test_root/state/logs"
+    write_test_config "$test_root" rclone 'fake:'
+    write_notify_config "$test_root"
+    install_fake_tools "$test_root"
+    {
+        echo 'File backup started at 2026-10-13 10:00:00 UTC'
+        echo 'Old run line that mentions no space left on device'
+        echo 'File backup started at 2026-10-14 10:00:00 UTC'
+        for index in $(seq 1 400); do
+            echo "2026/10/14 10:00:00 ERROR : project/file-$index.json: Failed to copy: googleapi: Error 403: Rate Limit Exceeded, rateLimitExceeded"
+        done
+        echo 'Failed file sources: workspace-projects/example'
+        echo 'Run summary: outcome=completed-with-errors profile=moderate synced=3 skipped=0 skipped_changed=0 deferred_active=0 failed=1'
+    } > "$test_root/state/logs/backup-file.log"
+
+    HOME="$test_root/home" PATH="$test_root/bin:$PATH" FAKE_CURL_LOG="$test_root/curl.log" FAKE_SYSTEMCTL_LOG="$test_root/systemctl.log" \
+        BACKUP_SUITE_CONFIG_DIR="$test_root/config" \
+        "$ROOT_DIR/bin/notify-failure.sh" file-backup.service > "$output_file" 2>&1
+
+    assert_contains "$test_root/curl.log" 'arg: PUT'
+    assert_contains "$test_root/curl.log" 'arg: Filename: '
+    assert_contains "$test_root/curl.log" 'arg: Title: Backup Suite Test failure on'
+    message=$(curl_message_header "$test_root/curl.log")
+    [ -n "$message" ] || fail_test 'no readable message was sent with the attachment'
+    [ "${#message}" -lt 4096 ] || fail_test "ntfy message is ${#message} bytes; ntfy would turn it into an attachment"
+    [[ "$message" == *"rate limit was exceeded"* ]] || fail_test 'the rate-limit cause was not explained'
+    [[ "$message" == *"Failed projects: workspace-projects/example"* ]] || fail_test 'failed projects missing from the message'
+    [[ "$message" != *"local disk ran out of space"* ]] || fail_test 'an older run was used to explain this failure'
+    failure_record=$(find "$test_root/state/failures" -type f -name '*file-backup.service.log' -print -quit)
+    assert_file "$failure_record"
+    assert_contains "$failure_record" 'Failed unit: file-backup.service'
+    assert_contains "$failure_record" 'Recent durable run log:'
+
+    rm -f "$test_root/curl.log"
+    HOME="$test_root/home" PATH="$test_root/bin:$PATH" FAKE_CURL_LOG="$test_root/curl.log" FAKE_CURL_FAIL_PUT=1 FAKE_SYSTEMCTL_LOG="$test_root/systemctl.log" \
+        BACKUP_SUITE_CONFIG_DIR="$test_root/config" \
+        "$ROOT_DIR/bin/notify-failure.sh" file-backup.service > "$output_file" 2>&1
+    [ "$(grep -c '^curl invoked' "$test_root/curl.log")" -eq 2 ] || fail_test 'a failed attachment upload must fall back to one plain message'
+    assert_contains "$test_root/curl.log" 'arg: --data-binary'
+    assert_contains "$output_file" 'resending as a plain message'
+    rm -rf "$test_root"
+}
+
+make_fake_cgroup() {
+    local cgroup_dir="$1"
+    mkdir -p "$cgroup_dir"
+    printf '1000000000\n' > "$cgroup_dir/memory.max"
+    printf '500000000\n' > "$cgroup_dir/memory.high"
+    printf '100000000\n' > "$cgroup_dir/memory.current"
+    printf 'anon 50000000\nfile 50000000\n' > "$cgroup_dir/memory.stat"
+    printf 'low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n' > "$cgroup_dir/memory.events"
+    printf '0\n' > "$cgroup_dir/memory.swap.current"
+    printf '268435456\n' > "$cgroup_dir/memory.swap.max"
+    printf '0\n' > "$cgroup_dir/memory.peak"
+    printf '5\n' > "$cgroup_dir/pids.current"
+    printf '64\n' > "$cgroup_dir/pids.max"
+    printf 'usage_usec 1000\n' > "$cgroup_dir/cpu.stat"
+    printf '50000 100000\n' > "$cgroup_dir/cpu.max"
+    : > "$cgroup_dir/io.stat"
+    printf 'populated 1\nfrozen 0\n' > "$cgroup_dir/cgroup.events"
+    printf '0\n' > "$cgroup_dir/cgroup.freeze"
+    : > "$cgroup_dir/cgroup.kill"
+    : > "$cgroup_dir/memory.reclaim"
+}
+
+write_fake_meminfo() {
+    local proc_dir="$1"
+    local available_kb="$2"
+    mkdir -p "$proc_dir/pressure"
+    printf 'MemTotal:       10000000 kB\nMemAvailable:   %s kB\nSwapTotal:       2000000 kB\nSwapFree:        2000000 kB\n' "$available_kb" > "$proc_dir/meminfo.tmp"
+    mv "$proc_dir/meminfo.tmp" "$proc_dir/meminfo"
+    printf 'some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n' > "$proc_dir/pressure/memory"
+}
+
+watchdog_fixture() {
+    local test_root="$1"
+    write_test_config "$test_root" rclone 'fake:'
+    write_notify_config "$test_root"
+    install_fake_tools "$test_root"
+    make_fake_cgroup "$test_root/cgroup"
+    write_fake_meminfo "$test_root/proc" 6000000
+    : > "$test_root/systemctl.log"
+}
+
+run_watchdog() {
+    local test_root="$1"
+    shift
+    env "$@" \
+        HOME="$test_root/home" \
+        PATH="$test_root/bin:$PATH" \
+        FAKE_CURL_LOG="$test_root/curl.log" \
+        FAKE_SYSTEMCTL_LOG="$test_root/systemctl.log" \
+        BACKUP_SUITE_CONFIG_DIR="$test_root/config" \
+        WATCHDOG_CGROUP_DIR="$test_root/cgroup" \
+        WATCHDOG_PROC_DIR="$test_root/proc" \
+        WATCHDOG_INTERVAL_SECONDS=0.1 \
+        timeout 30 "$ROOT_DIR/bin/backup-watchdog.sh" file-backup.service > "$test_root/watchdog.log" 2>&1
+}
+
+end_fake_unit_after() {
+    local delay="$1"
+    local cgroup_dir="$2"
+    ( sleep "$delay"; printf 'populated 0\nfrozen 0\n' > "$cgroup_dir/cgroup.events" ) &
+}
+
+test_watchdog_contains_memory_surge() {
+    local test_root
+    test_root=$(mktemp -d)
+    watchdog_fixture "$test_root"
+    printf '850000000\n' > "$test_root/cgroup/memory.current"
+    printf 'anon 200000000\nfile 650000000\n' > "$test_root/cgroup/memory.stat"
+    ( sleep 1; printf '100000000\n' > "$test_root/cgroup/memory.current" ) &
+    end_fake_unit_after 3 "$test_root/cgroup"
+
+    run_watchdog "$test_root"
+    wait
+
+    [ -n "$(cat "$test_root/cgroup/memory.reclaim")" ] || fail_test 'cache reclaim was not requested'
+    [ "$(cat "$test_root/cgroup/cpu.max")" = "50000 100000" ] || fail_test 'CPU quota was not restored after containment'
+    assert_contains "$test_root/watchdog.log" 'WATCHDOG EVENT [contained]'
+    assert_contains "$test_root/watchdog.log" 'containment released and CPU quota restored'
+    assert_contains "$test_root/curl.log" 'backup memory surge contained'
+    assert_contains "$test_root/curl.log" 'Halved its CPU quota from 50% to 25%'
+    assert_contains "$test_root/state/watchdog/history.tsv" 'contained,released'
+    assert_not_contains "$test_root/systemctl.log" 'stop'
+    rm -rf "$test_root"
+}
+
+test_watchdog_stops_before_oom() {
+    local test_root
+    test_root=$(mktemp -d)
+    watchdog_fixture "$test_root"
+    printf '960000000\n' > "$test_root/cgroup/memory.current"
+    printf 'anon 950000000\nfile 10000000\n' > "$test_root/cgroup/memory.stat"
+
+    run_watchdog "$test_root"
+
+    assert_contains "$test_root/systemctl.log" 'stop --no-block file-backup.service'
+    [ -z "$(cat "$test_root/cgroup/cgroup.kill")" ] || fail_test 'graceful stop should not need a force kill'
+    assert_contains "$test_root/curl.log" 'backup stopped before OOM'
+    assert_contains "$test_root/curl.log" 'Stopped the backup gracefully'
+    assert_file "$test_root/state/watchdog/file-backup.service.last-action"
+    assert_contains "$test_root/state/watchdog/history.tsv" 'memory-limit'
+    rm -rf "$test_root"
+}
+
+test_watchdog_force_kills_hung_stop() {
+    local test_root
+    test_root=$(mktemp -d)
+    watchdog_fixture "$test_root"
+    printf 'anon 950000000\nfile 10000000\n' > "$test_root/cgroup/memory.stat"
+
+    run_watchdog "$test_root" FAKE_SYSTEMCTL_STOP_UNPOPULATES=0 WATCHDOG_KILL_GRACE_SECONDS=1
+
+    [ "$(cat "$test_root/cgroup/cgroup.kill")" = "1" ] || fail_test 'hung backup was not force-killed'
+    assert_contains "$test_root/curl.log" 'force-killed (SIGKILL)'
+    assert_contains "$test_root/state/watchdog/file-backup.service.last-action" 'forced_kill=1'
+    rm -rf "$test_root"
+}
+
+test_watchdog_pauses_for_server_pressure() {
+    local test_root
+    test_root=$(mktemp -d)
+    watchdog_fixture "$test_root"
+    write_fake_meminfo "$test_root/proc" 500000
+    ( sleep 1; write_fake_meminfo "$test_root/proc" 6000000 ) &
+    end_fake_unit_after 3 "$test_root/cgroup"
+
+    run_watchdog "$test_root"
+    wait
+
+    assert_contains "$test_root/curl.log" 'backup paused: server memory pressure'
+    assert_contains "$test_root/watchdog.log" 'resuming the backup'
+    [ "$(cat "$test_root/cgroup/cgroup.freeze")" = "0" ] || fail_test 'backup was left frozen'
+    assert_contains "$test_root/state/watchdog/history.tsv" 'server-pressure,resumed'
+    assert_contains "$test_root/curl.log" 'backup finished after watchdog intervention'
+    assert_not_contains "$test_root/systemctl.log" 'stop'
+    rm -rf "$test_root"
+}
+
+test_watchdog_stops_for_critical_server_memory() {
+    local test_root
+    test_root=$(mktemp -d)
+    watchdog_fixture "$test_root"
+    write_fake_meminfo "$test_root/proc" 300000
+
+    run_watchdog "$test_root"
+
+    assert_contains "$test_root/systemctl.log" 'stop --no-block file-backup.service'
+    assert_contains "$test_root/curl.log" 'backup stopped to protect the server'
+    rm -rf "$test_root"
+}
+
+test_watchdog_unit_and_deploy_guards() {
+    local test_root
+    local deploy="$ROOT_DIR/production-deploy.sh"
+    test_root=$(mktemp -d)
+    sed \
+        -e "s|__INSTALL_DIR__|$ROOT_DIR|g" \
+        -e 's|__CONFIG_DIR__|/etc/backup-suite|g' \
+        -e 's|__USER_GROUP_DIRECTIVES__||g' \
+        -e 's|__WATCHDOG_PRIVILEGED_DIRECTIVES__|Nice=-5\nOOMScoreAdjust=-900|g' \
+        "$ROOT_DIR/systemd/backup-suite-watchdog@.service.template" > "$test_root/backup-suite-watchdog@.service"
+    for directive in 'ExecStart='"$ROOT_DIR"'/bin/backup-watchdog.sh %i.service' 'After=%i.service' 'Restart=no' 'OOMScoreAdjust=-900' 'MemoryMax=64M'; do
+        assert_contains "$test_root/backup-suite-watchdog@.service" "$directive"
+    done
+    systemd-analyze verify "$test_root/backup-suite-watchdog@file-backup.service" >/dev/null
+    assert_contains "$ROOT_DIR/systemd/file-backup.service.template" 'Wants=backup-suite-watchdog@file-backup.service'
+    assert_contains "$ROOT_DIR/systemd/file-backup.service.template" 'OOMPolicy=stop'
+    assert_contains "$ROOT_DIR/systemd/file-backup.service.template" 'MemorySwapMax=256M'
+
+    assert_not_contains "$deploy" 'systemctl disable'
+    assert_contains "$deploy" 'systemctl stop "$TIMER_UNIT"'
+    assert_contains "$deploy" 'restore_previous_installation'
+    assert_contains "$deploy" 'systemctl start "$TIMER_UNIT"'
+    assert_contains "$deploy" '--stop-running'
+    assert_contains "$deploy" 'backup-watchdog.sh" "$SERVICE_UNIT" --self-test'
+    assert_contains "$deploy" 'backup-profile.sh" set "$REQUESTED_PROFILE"'
+    assert_contains "$deploy" 'backup-profile.sh" adaptive "$REQUESTED_PROFILE" "$REQUESTED_FLOOR"'
+    assert_contains "$ROOT_DIR/setup.sh" 'backup-suite-watchdog@.service.template'
+    assert_contains "$ROOT_DIR/production-file-backup-migrate.sh" 'backup-suite-watchdog@.service.template'
+    "$deploy" --help >/dev/null
+    rm -rf "$test_root"
+}
+
+profile_cli() {
+    local test_root="$1"
+    shift
+    env -u XDG_CONFIG_HOME -u XDG_STATE_HOME \
+        HOME="$test_root/home" \
+        PATH="$test_root/bin:$PATH" \
+        FAKE_SYSTEMCTL_LOG="$test_root/systemctl.log" \
+        BACKUP_SUITE_CONFIG_DIR="$test_root/config" \
+        BACKUP_SUITE_PROC_DIR="$test_root/proc" \
+        BACKUP_SUITE_CPU_COUNT=4 \
+        "$ROOT_DIR/bin/backup-profile.sh" "$@"
+}
+
+test_profile_auto_limits_and_overrides() {
+    local test_root
+    test_root=$(mktemp -d)
+    write_test_config "$test_root" rclone 'fake:'
+    install_fake_tools "$test_root"
+    mkdir -p "$test_root/proc"
+    printf 'MemTotal:        8388608 kB\nMemAvailable:    4000000 kB\n' > "$test_root/proc/meminfo"
+
+    profile_cli "$test_root" limits auto > "$test_root/output.log"
+    assert_contains "$test_root/config/global.conf" 'FILE_PROFILE_LIMITS_MODE="auto"'
+    profile_cli "$test_root" print-dropin moderate > "$test_root/moderate.conf"
+    for directive in 'MemoryMax=819M' 'MemoryHigh=409M' 'MemorySwapMax=204M' 'CPUQuota=24%'; do
+        assert_contains "$test_root/moderate.conf" "$directive"
+    done
+
+    profile_cli "$test_root" override slow MEMORY_MAX 384M > "$test_root/output.log"
+    assert_contains "$test_root/config/global.conf" 'FILE_PROFILE_SLOW_MEMORY_MAX="384M"'
+    profile_cli "$test_root" print-dropin slow > "$test_root/slow.conf"
+    assert_contains "$test_root/slow.conf" 'MemoryMax=384M'
+    assert_contains "$test_root/slow.conf" 'MemoryHigh=204M'
+    profile_cli "$test_root" show > "$test_root/show.log"
+    assert_contains "$test_root/show.log" 'auto-scaled to this host; your overrides: MEMORY_MAX'
+
+    if profile_cli "$test_root" override slow MEMORY_MAX 'big$x' > "$test_root/output.log" 2>&1; then
+        fail_test 'unsafe override values must be rejected'
+    fi
+    if profile_cli "$test_root" override slow NOT_A_KEY 1 > "$test_root/output.log" 2>&1; then
+        fail_test 'unknown override keys must be rejected'
+    fi
+    if profile_cli "$test_root" override slow MEMORY_MAX lots > "$test_root/output.log" 2>&1; then
+        fail_test 'invalid sizes must be rejected'
+    fi
+    assert_not_contains "$test_root/config/global.conf" 'FILE_PROFILE_SLOW_MEMORY_MAX="lots"'
+
+    profile_cli "$test_root" override slow MEMORY_MAX --unset > "$test_root/output.log"
+    assert_not_contains "$test_root/config/global.conf" 'FILE_PROFILE_SLOW_MEMORY_MAX'
+    profile_cli "$test_root" limits fixed > "$test_root/output.log"
+    profile_cli "$test_root" print-dropin moderate > "$test_root/moderate.conf"
+    assert_contains "$test_root/moderate.conf" 'MemoryMax=1G'
+    rm -rf "$test_root"
+}
+
+test_adaptive_profile_cli() {
+    local test_root
+    local dropin
+    test_root=$(mktemp -d)
+    write_test_config "$test_root" rclone 'fake:'
+    install_fake_tools "$test_root"
+    dropin="$test_root/home/.config/systemd/user/file-backup.service.d/50-backup-profile.conf"
+
+    profile_cli "$test_root" adaptive moderate slow > "$test_root/output.log"
+    assert_contains "$test_root/config/global.conf" 'FILE_BACKUP_PROFILE="moderate"'
+    assert_contains "$test_root/config/global.conf" 'FILE_BACKUP_PROFILE_MODE="adaptive"'
+    assert_contains "$test_root/config/global.conf" 'FILE_BACKUP_PROFILE_FLOOR="slow"'
+    assert_contains "$dropin" 'CPUQuota=50%'
+    [ "$(profile_cli "$test_root" current)" = "adaptive moderate>slow (now: moderate)" ] || fail_test 'adaptive setup was not reported'
+
+    mkdir -p "$test_root/state/watchdog"
+    printf 'level=slow\n' > "$test_root/state/watchdog/adaptive-profile.state"
+    [ "$(profile_cli "$test_root" current)" = "adaptive moderate>slow (now: slow)" ] || fail_test 'current adaptive level was not read'
+
+    if profile_cli "$test_root" adaptive slow moderate > "$test_root/output.log" 2>&1; then
+        fail_test 'a floor faster than the top profile must be rejected'
+    fi
+    if profile_cli "$test_root" adaptive moderate moderate > "$test_root/output.log" 2>&1; then
+        fail_test 'adaptive mode needs at least two levels'
+    fi
+
+    printf '5\n' | profile_cli "$test_root" choose > "$test_root/output.log"
+    [ "$(profile_cli "$test_root" current)" = "adaptive fast>moderate>slow (now: fast)" ] || fail_test 'three-step adaptive setup was not chosen'
+    assert_contains "$dropin" 'CPUQuota=100%'
+
+    profile_cli "$test_root" set moderate > "$test_root/output.log"
+    [ "$(profile_cli "$test_root" current)" = "fixed moderate" ] || fail_test 'set must switch back to a fixed profile'
+    [ ! -e "$test_root/state/watchdog/adaptive-profile.state" ] || fail_test 'switching to fixed must clear the adaptive level'
+    rm -rf "$test_root"
+}
+
+test_watchdog_adaptive_steps_down_and_up() {
+    local test_root
+    test_root=$(mktemp -d)
+    watchdog_fixture "$test_root"
+    cat >> "$test_root/config/global.conf" <<'EOF'
+FILE_BACKUP_PROFILE="moderate"
+FILE_BACKUP_PROFILE_MODE="adaptive"
+FILE_BACKUP_PROFILE_FLOOR="slow"
+WATCHDOG_ADAPTIVE_COOLDOWN_SECONDS="0"
+WATCHDOG_ADAPTIVE_STEP_UP_SECONDS="1"
+EOF
+    printf '850000000\n' > "$test_root/cgroup/memory.current"
+    printf 'anon 200000000\nfile 650000000\n' > "$test_root/cgroup/memory.stat"
+    ( sleep 1; printf '100000000\n' > "$test_root/cgroup/memory.current" ) &
+    end_fake_unit_after 4 "$test_root/cgroup"
+
+    run_watchdog "$test_root"
+    wait
+
+    assert_contains "$test_root/curl.log" 'backup stepped down from moderate to slow'
+    assert_contains "$test_root/curl.log" 'hard limit stays 953 MiB until usage drops below 512 MiB'
+    assert_contains "$test_root/watchdog.log" 'applied the slow hard limit of 512 MiB'
+    assert_contains "$test_root/curl.log" 'backup stepped back up from slow to moderate'
+    assert_contains "$test_root/state/watchdog/history.tsv" 'step-down'
+    assert_contains "$test_root/state/watchdog/history.tsv" 'step-up'
+    [ "$(cat "$test_root/cgroup/cpu.max")" = "50000 100000" ] || fail_test 'moderate CPU quota was not restored on step-up'
+    [ "$(cat "$test_root/cgroup/memory.max")" = "1073741824" ] || fail_test 'moderate memory limit was not restored on step-up'
+    assert_contains "$test_root/state/watchdog/adaptive-profile.state" 'level=moderate'
+    assert_not_contains "$test_root/systemctl.log" 'stop'
+    rm -rf "$test_root"
+}
+
+test_adaptive_level_carries_into_next_run() {
+    local test_root
+    test_root=$(mktemp -d)
+    watchdog_fixture "$test_root"
+    cat >> "$test_root/config/global.conf" <<'EOF'
+FILE_BACKUP_PROFILE="moderate"
+FILE_BACKUP_PROFILE_MODE="adaptive"
+FILE_BACKUP_PROFILE_FLOOR="slow"
+WATCHDOG_ADAPTIVE_STEP_UP_SECONDS="100"
+EOF
+    mkdir -p "$test_root/state/watchdog"
+    printf 'level=slow\n' > "$test_root/state/watchdog/adaptive-profile.state"
+    end_fake_unit_after 1 "$test_root/cgroup"
+
+    run_watchdog "$test_root"
+    wait
+
+    assert_contains "$test_root/watchdog.log" "continuing at 'slow' from the previous run"
+    [ "$(cat "$test_root/cgroup/cpu.max")" = "25000 100000" ] || fail_test 'the saved slow level was not applied at start'
+    [ "$(cat "$test_root/cgroup/memory.max")" = "536870912" ] || fail_test 'the slow memory limit was not applied at start'
+    [ ! -e "$test_root/curl.log" ] || fail_test 'continuing at a saved level must not notify'
+
+    mkdir -p "$test_root/projects/good" "$test_root/fake"
+    printf 'good\n' > "$test_root/projects/good/file.txt"
+    sed -i "s|^USER_RCLONE_BIN=.*|USER_RCLONE_BIN=\"$ROOT_DIR/tests/fixtures/fake-rclone.sh\"|" "$test_root/config/global.conf"
+    printf '1|good|%s|fixed|good|.nosync|single\n' "$test_root/projects/good" > "$test_root/config/file-sources.conf"
+    FAKE_RCLONE_SCENARIO=isolation FAKE_RCLONE_STATE="$test_root/fake" run_backup "$test_root" > "$test_root/backup.log" 2>&1
+    assert_contains "$test_root/fake/commands.log" '--transfers 1'
+    assert_contains "$test_root/fake/commands.log" '--bwlimit 4M'
+    assert_contains "$test_root/backup.log" 'Resource profile: slow (mode adaptive; levels moderate>slow)'
+    rm -rf "$test_root"
+}
+
 run_test() {
     local name="$1"
     shift
@@ -465,7 +1016,7 @@ if [ "${1:-}" = "--single" ]; then
     exit $?
 fi
 
-chmod 755 "$ROOT_DIR/tests/fixtures/fake-rclone.sh" "$ROOT_DIR/tests/fixtures/fake-curl.sh"
+chmod 755 "$ROOT_DIR/tests/fixtures/fake-rclone.sh" "$ROOT_DIR/tests/fixtures/fake-curl.sh" "$ROOT_DIR/tests/fixtures/fake-systemctl.sh"
 
 run_test 'symlink round-trip restore' test_symlink_round_trip
 run_test 'safe link migration gate and restore' test_link_migration_gate_and_restore
@@ -478,6 +1029,20 @@ run_test 'global AgentW cache policy retains canonical metadata' test_global_age
 run_test 'resource unit generation and link flags' test_resource_unit_and_link_flags
 run_test 'crypto wallet durable/volatile policy' test_crypto_wallet_policy
 run_test 'production migration runner safety gates' test_production_migration_runner_guards
+run_test 'resource profiles and systemd drop-in' test_profiles_and_dropin
+run_test 'profile drives rclone tuning flags' test_profile_drives_rclone_flags
+run_test 'recently modified files are deferred and tracked' test_active_file_deferral
+run_test 'ntfy failure message explains the cause' test_failure_notification_description
+run_test 'watchdog contains a memory surge' test_watchdog_contains_memory_surge
+run_test 'watchdog stops a backup before OOM' test_watchdog_stops_before_oom
+run_test 'watchdog force-kills a hung stop' test_watchdog_force_kills_hung_stop
+run_test 'watchdog pauses for server memory pressure' test_watchdog_pauses_for_server_pressure
+run_test 'watchdog stops for critical server memory' test_watchdog_stops_for_critical_server_memory
+run_test 'watchdog unit and deploy safety guards' test_watchdog_unit_and_deploy_guards
+run_test 'auto-scaled limits and per-profile overrides' test_profile_auto_limits_and_overrides
+run_test 'adaptive profile commands' test_adaptive_profile_cli
+run_test 'watchdog steps the profile down and back up' test_watchdog_adaptive_steps_down_and_up
+run_test 'adaptive level carries into the next run' test_adaptive_level_carries_into_next_run
 
 echo "Tests: passed=$PASS_COUNT failed=$FAIL_COUNT"
 [ "$FAIL_COUNT" -eq 0 ]
