@@ -147,9 +147,9 @@ downloadable files, and copy buttons.
 - **G-BRK-2** Who may connect: members of group `backup-suite-gui`. The
   deploy creates the group and adds the admins named with `--gui-admin
   <login>` (repeatable); the default is the user who ran the deploy through
-  sudo (`SUDO_USER`). Deploy prints the members. The broker reads the
-  connecting process's UID (`SO_PEERCRED`) and allows exactly the group's
-  members (root is always allowed for tests and the CLI).
+  sudo (`SUDO_USER`). Deploy prints the members. The broker takes the
+  connecting process's UID from its systemd instance name (section 11) and
+  allows exactly the group's members and root.
 - **G-BRK-3** **Trade-off (owner decision, stated):** any process running as
   an admin login can use these verbs, exactly as it can use the GUI. On
   black that login is `user`, which also runs the AI agent sessions. The
