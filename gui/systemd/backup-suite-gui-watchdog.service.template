@@ -10,6 +10,7 @@ Restart=on-failure
 RestartSec=10
 Nice=5
 MemoryMax=24M
+MemorySwapMax=8M
 TasksMax=8
 SyslogIdentifier=backup-suite-gui-watchdog
 

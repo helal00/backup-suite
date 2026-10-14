@@ -12,6 +12,10 @@ for argument in "$@"; do
     if [ "$previous" = "-X" ] && [ "$argument" = "PUT" ]; then
         is_put=1
     fi
+    if [ "$previous" = "-T" ] && [ -f "$argument" ]; then
+        # Keep attachment bodies so tests can read what the user would open.
+        { printf 'attachment-begin\n'; cat "$argument"; printf 'attachment-end\n'; } >> "${FAKE_CURL_LOG}.attachments"
+    fi
     previous="$argument"
 done
 printf 'end of request\n' >> "$FAKE_CURL_LOG"

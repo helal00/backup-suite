@@ -16,3 +16,5 @@ TimeoutStartSec=infinity
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=backup-db-monitor
+MemoryAccounting=true
+MemorySwapMax=64M

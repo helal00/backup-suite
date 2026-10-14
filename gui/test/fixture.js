@@ -41,8 +41,15 @@ function makeFixture() {
   for (const [name, target] of [["systemctl", "fake-systemctl.sh"], ["journalctl", "fake-journalctl.sh"], ["curl", "fake-curl.sh"]]) {
     fs.symlinkSync(path.join(REPO, "tests", "fixtures", target), path.join(binDir, name));
   }
+  // Injected server memory: tests never read the host's real /proc, so they
+  // pass the same way on a loaded server.
+  const procDir = path.join(root, "proc");
+  fs.mkdirSync(path.join(procDir, "pressure"), { recursive: true });
+  fs.writeFileSync(path.join(procDir, "meminfo"), "MemTotal:       10000000 kB\nMemAvailable:    6000000 kB\nSwapTotal:       2000000 kB\nSwapFree:        2000000 kB\n");
+  fs.writeFileSync(path.join(procDir, "pressure", "memory"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n");
   const env = {
     ...process.env,
+    BACKUP_SUITE_PROC_DIR: procDir,
     HOME: path.join(root, "home"),
     XDG_CONFIG_HOME: xdgConfig,
     XDG_STATE_HOME: path.join(root, "xdg-state"),

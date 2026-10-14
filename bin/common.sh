@@ -494,6 +494,9 @@ resolve_file_backup_profile() {
     size_to_bytes "$PROFILE_MEMORY_HIGH" >/dev/null
     size_to_bytes "$PROFILE_MEMORY_MAX" >/dev/null
     size_to_bytes "$PROFILE_MEMORY_SWAP_MAX" >/dev/null
+    # MemoryMax counts RAM only: with MemoryHigh and no swap cap, a runaway is
+    # pushed into swap without bound and thrashes instead of being stopped.
+    [ -n "$(size_to_bytes "$PROFILE_MEMORY_SWAP_MAX")" ] || fail "Profile MemorySwapMax must be a size such as 256M, not '${PROFILE_MEMORY_SWAP_MAX}' (an unlimited swap allowance lets a throttled backup thrash)"
     PROFILE_NAME="$requested"
 }
 

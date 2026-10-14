@@ -16,3 +16,7 @@ TimeoutStartSec=infinity
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=backup-db
+MemoryAccounting=true
+# No RAM limit (a large dump must not be killed), but a runaway may not push
+# the server into swap without bound either.
+MemorySwapMax=256M

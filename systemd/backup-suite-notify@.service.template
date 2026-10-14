@@ -13,3 +13,7 @@ TimeoutStartSec=120
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=backup-notify
+MemoryAccounting=true
+MemoryMax=128M
+MemorySwapMax=32M
+TasksMax=32

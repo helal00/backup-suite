@@ -25,8 +25,8 @@
     ["Sampling", ["WATCHDOG_INTERVAL_SECONDS"]],
     ["Containment", ["WATCHDOG_CONTAIN_PERCENT", "WATCHDOG_CONTAIN_RELEASE_PERCENT", "WATCHDOG_SWAP_CONTAIN_PERCENT", "WATCHDOG_TASKS_WARN_PERCENT"]],
     ["Stopping the backup", ["WATCHDOG_KILL_PERCENT", "WATCHDOG_KILL_SAMPLES", "WATCHDOG_SWAP_KILL_PERCENT", "WATCHDOG_KILL_GRACE_SECONDS"]],
-    ["Server protection", ["WATCHDOG_SYSTEM_MIN_AVAILABLE_PERCENT", "WATCHDOG_SYSTEM_CRITICAL_AVAILABLE_PERCENT", "WATCHDOG_SYSTEM_PSI_FULL_LIMIT", "WATCHDOG_FREEZE_MAX_SECONDS"]],
-    ["Adaptive steps", ["WATCHDOG_ADAPTIVE_STEP_DOWN_AVAILABLE_PERCENT", "WATCHDOG_ADAPTIVE_STEP_DOWN_PSI_FULL", "WATCHDOG_ADAPTIVE_STEP_UP_AVAILABLE_PERCENT", "WATCHDOG_ADAPTIVE_STEP_UP_SECONDS", "WATCHDOG_ADAPTIVE_COOLDOWN_SECONDS"]]
+    ["Server protection", ["WATCHDOG_SYSTEM_MIN_AVAILABLE_PERCENT", "WATCHDOG_SYSTEM_CRITICAL_AVAILABLE_PERCENT", "WATCHDOG_SYSTEM_PSI_FULL_LIMIT", "WATCHDOG_PSI_PAUSE_AVAILABLE_PERCENT", "WATCHDOG_PAUSE_MIN_FOOTPRINT_MB", "WATCHDOG_PRESSURE_SUSTAIN_SECONDS", "WATCHDOG_FREEZE_MAX_SECONDS", "WATCHDOG_RETRY_WAIT_SECONDS", "WATCHDOG_RETRY_CLEAR_SECONDS"]],
+    ["Adaptive steps", ["WATCHDOG_ADAPTIVE_STEP_DOWN_AVAILABLE_PERCENT", "WATCHDOG_ADAPTIVE_STEP_DOWN_PSI_FULL", "WATCHDOG_ADAPTIVE_STEP_UP_AVAILABLE_PERCENT", "WATCHDOG_ADAPTIVE_STEP_UP_SECONDS", "WATCHDOG_ADAPTIVE_COOLDOWN_SECONDS", "WATCHDOG_NOTIFY_PROFILE_STEPS"]]
   ];
   const NTFY_KEYS = ["NOTIFY_FAILURES_ENABLED", "NOTIFY_NTFY_TOPIC_URL", "NOTIFY_NTFY_TOKEN", "NOTIFY_NTFY_PRIORITY", "NOTIFY_NTFY_TITLE_PREFIX", "NOTIFY_NTFY_ATTACH_DETAILS", "NOTIFY_NTFY_MESSAGE_MAX_BYTES"];
   const SERVER_KEYS = ["FILE_BACKUP_RUNTIME_MAX_SEC", "FILE_RETENTION_DAYS", "FILE_ACTIVE_TRACKING_ENABLED", "FILE_ACTIVE_WINDOW_SECONDS", "FILE_ACTIVE_MAX_DEFERRALS"];
@@ -435,7 +435,11 @@
     const psi = numberOrNull(server.psi_full_avg10);
     if (psi !== null) {
       const psiLimit = numberOrNull(watchdog.threshold_psi_full) ?? 20;
-      nodes.push(gauge({ label: "Memory pressure (PSI full avg10)", value: psi, max: Math.max(psiLimit * 1.25, 1), warnAt: 50, badAt: 80, text: `${psi} (pause at ${psiLimit})`, marks: [{ at: 80, title: `Pause at ${psiLimit}` }] }));
+      const stallAvailable = numberOrNull(watchdog.threshold_psi_pause_available_percent) ?? 20;
+      nodes.push(gauge({ label: "Memory pressure (PSI full avg10)", value: psi, max: Math.max(psiLimit * 1.25, 1), warnAt: 50, badAt: 80, text: `${psi} (pauses at ${psiLimit} only below ${stallAvailable}% RAM available)`, marks: [{ at: 80, title: `Pause at ${psiLimit} while RAM available is below ${stallAvailable}%` }] }));
+    }
+    if (watchdog.server_pressure === "host-stall" && watchdog.server_pressure_note) {
+      nodes.push(h("p", { class: "gauge-note" }, `Memory stall not caused by the backup: ${watchdog.server_pressure_note}. The backup keeps running.`));
     }
     return nodes;
   }
@@ -1048,6 +1052,7 @@
     if (!(value("WATCHDOG_SYSTEM_CRITICAL_AVAILABLE_PERCENT") < value("WATCHDOG_SYSTEM_MIN_AVAILABLE_PERCENT"))) problems.push("The critical server RAM percent must be below the pause percent.");
     if (!(value("WATCHDOG_ADAPTIVE_STEP_UP_AVAILABLE_PERCENT") > value("WATCHDOG_ADAPTIVE_STEP_DOWN_AVAILABLE_PERCENT"))) problems.push("Adaptive step-up RAM percent must be above the step-down percent.");
     if (!(value("WATCHDOG_SWAP_CONTAIN_PERCENT") < value("WATCHDOG_SWAP_KILL_PERCENT"))) problems.push("Swap containment must be below the swap stop percent.");
+    if (!(value("WATCHDOG_PSI_PAUSE_AVAILABLE_PERCENT") >= value("WATCHDOG_SYSTEM_MIN_AVAILABLE_PERCENT"))) problems.push("The stall pause RAM percent must be at or above the shortage pause percent.");
     return problems;
   }
 

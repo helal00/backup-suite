@@ -128,7 +128,9 @@ case "$unit_result" in
 esac
 
 watchdog_action_file=$(join_path "$STATE_DIR" "watchdog" "${unit_name//[^A-Za-z0-9._-]/_}.last-action")
+watchdog_already_notified=0
 if [ -f "$watchdog_action_file" ] && [ -n "$(find "$watchdog_action_file" -mmin -15 -print 2>/dev/null)" ]; then
+    grep -qx 'notified=1' "$watchdog_action_file" && watchdog_already_notified=1
     add_explanation \
         "The resource watchdog stopped this backup: $(sed -n 's/^reason=//p' "$watchdog_action_file" | head -n 1)" \
         "See the watchdog's ntfy message for the measured values. Consider 'backup-profile.sh set slow' if this repeats."
@@ -253,6 +255,14 @@ if [ ${#stale_failure_logs[@]} -gt 0 ]; then
 fi
 
 BACKUP_EVENT_UNIT="$unit_name"
+if [ "$watchdog_already_notified" -eq 1 ]; then
+    # The watchdog stopped this run and already pushed one message explaining
+    # why; a second "failed" push for the same stop would only repeat it.
+    record_backup_event error run-failed "$title_prefix failure on $host_name: $unit_name" "$summary_message" "$unit_name"
+    echo "Failure recorded without a push: the resource watchdog already notified about this stop."
+    echo "Failure record retained at: $failure_log_path"
+    exit 0
+fi
 ntfy_publish "$title_prefix failure on $host_name: $unit_name" "$priority" "warning,backup" \
     "$summary_message" "$failure_log_path" "${failure_timestamp}-${failure_unit_name}.log" run-failed \
     || fail "Failure notification could not be delivered for unit: $unit_name"

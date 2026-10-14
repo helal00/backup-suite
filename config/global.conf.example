@@ -117,7 +117,18 @@ WATCHDOG_SWAP_KILL_PERCENT="95"
 WATCHDOG_SYSTEM_MIN_AVAILABLE_PERCENT="10"
 WATCHDOG_SYSTEM_CRITICAL_AVAILABLE_PERCENT="4"
 WATCHDOG_SYSTEM_PSI_FULL_LIMIT="20"
-WATCHDOG_FREEZE_MAX_SECONDS="600"
+# A memory stall (PSI) pauses the backup only while RAM is also short; a stall
+# caused by another service at its own memory limit never pauses it.
+WATCHDOG_PSI_PAUSE_AVAILABLE_PERCENT="20"
+# Never pause a backup holding less than this (non-reclaimable memory + swap).
+WATCHDOG_PAUSE_MIN_FOOTPRINT_MB="64"
+# Pressure must last this long before a pause or step-down.
+WATCHDOG_PRESSURE_SUSTAIN_SECONDS="30"
+WATCHDOG_FREEZE_MAX_SECONDS="900"
+# After a long pause the backup is stopped, then retried once memory has been
+# normal for WATCHDOG_RETRY_CLEAR_SECONDS (0 = leave it to the next timer run).
+WATCHDOG_RETRY_WAIT_SECONDS="1800"
+WATCHDOG_RETRY_CLEAR_SECONDS="60"
 WATCHDOG_KILL_GRACE_SECONDS="30"
 WATCHDOG_TASKS_WARN_PERCENT="90"
 # Adaptive profile stepping (FILE_BACKUP_PROFILE_MODE="adaptive").
@@ -126,6 +137,8 @@ WATCHDOG_ADAPTIVE_STEP_DOWN_PSI_FULL="10"
 WATCHDOG_ADAPTIVE_STEP_UP_AVAILABLE_PERCENT="30"
 WATCHDOG_ADAPTIVE_STEP_UP_SECONDS="300"
 WATCHDOG_ADAPTIVE_COOLDOWN_SECONDS="120"
+# Push step-down/step-up notices too (otherwise they are only listed as events).
+WATCHDOG_NOTIFY_PROFILE_STEPS="0"
 
 INSTALL_SYSTEMD_UNITS="1"
 ENABLE_TIMERS_AFTER_INSTALL="0"

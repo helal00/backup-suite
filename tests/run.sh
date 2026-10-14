@@ -6,6 +6,12 @@ ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 PASS_COUNT=0
 FAIL_COUNT=0
 
+# Test runs are heavy work: they yield CPU and disk to backups and services.
+if [ -z "${BACKUP_SUITE_TESTS_NO_NICE:-}" ]; then
+    renice -n 10 -p $$ > /dev/null 2>&1 || true
+    ionice -c 3 -p $$ > /dev/null 2>&1 || true
+fi
+
 fail_test() {
     echo "ASSERTION FAILED: $*" >&2
     return 1
@@ -377,6 +383,14 @@ test_resource_unit_and_link_flags() {
     if grep -Eq 'CPUQuota|MemoryMax|IOWeight' "$ROOT_DIR/systemd/database-backup.service.template" "$ROOT_DIR/systemd/database-size-check.service.template"; then
         fail_test 'file-backup resource controls leaked into unrelated service templates'
     fi
+    # Every shipped unit caps swap: MemoryMax counts RAM only (lesson of 2026-10-14).
+    for template in database-backup.service database-size-check.service backup-suite-notify@.service \
+        backup-suite-watchdog@.service backup-suite-control@.service; do
+        assert_contains "$ROOT_DIR/systemd/$template.template" 'MemorySwapMax='
+    done
+    assert_contains "$ROOT_DIR/systemd/file-backup.service.template" 'MemorySwapMax='
+    assert_contains "$ROOT_DIR/gui/systemd/backup-suite-gui.service.template" 'MemorySwapMax='
+    assert_contains "$ROOT_DIR/gui/systemd/backup-suite-gui-watchdog.service.template" 'MemorySwapMax='
     if grep -Eq -- '(^|[[:space:]])(-L|--copy-links)([[:space:]]|$)' "$ROOT_DIR/bin/file-backup.sh"; then
         fail_test 'file backup still contains copy-link behavior'
     fi
@@ -696,12 +710,42 @@ make_fake_cgroup() {
 }
 
 write_fake_meminfo() {
+    # write_fake_meminfo <proc-dir> <MemAvailable kB> [PSI full avg10] [SwapFree kB]
+    # Tests never read the host's real memory state: every sample is injected.
     local proc_dir="$1"
     local available_kb="$2"
+    local psi_full="${3:-0.00}"
+    local swap_free_kb="${4:-2000000}"
     mkdir -p "$proc_dir/pressure"
-    printf 'MemTotal:       10000000 kB\nMemAvailable:   %s kB\nSwapTotal:       2000000 kB\nSwapFree:        2000000 kB\n' "$available_kb" > "$proc_dir/meminfo.tmp"
+    printf 'MemTotal:       10000000 kB\nMemAvailable:   %s kB\nSwapTotal:       2000000 kB\nSwapFree:        %s kB\n' "$available_kb" "$swap_free_kb" > "$proc_dir/meminfo.tmp"
     mv "$proc_dir/meminfo.tmp" "$proc_dir/meminfo"
-    printf 'some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n' > "$proc_dir/pressure/memory"
+    printf 'some avg10=%s avg60=0.00 avg300=0.00 total=0\nfull avg10=%s avg60=0.00 avg300=0.00 total=0\n' "$psi_full" "$psi_full" > "$proc_dir/pressure/memory.tmp"
+    mv "$proc_dir/pressure/memory.tmp" "$proc_dir/pressure/memory"
+}
+
+make_fake_staller() {
+    # make_fake_staller <cgroup-root> <relative path> <full avg10> <current> <high|max> <swap> <high events>
+    local dir="$1/$2"
+    mkdir -p "$dir"
+    printf 'some avg10=%s avg60=0.00 avg300=0.00 total=0\nfull avg10=%s avg60=0.00 avg300=0.00 total=0\n' "$3" "$3" > "$dir/memory.pressure"
+    printf '%s\n' "$4" > "$dir/memory.current"
+    printf '%s\n' "$5" > "$dir/memory.high"
+    printf 'max\n' > "$dir/memory.max"
+    printf '%s\n' "$6" > "$dir/memory.swap.current"
+    printf 'low 0\nhigh %s\nmax 0\noom 0\noom_kill 0\n' "$7" > "$dir/memory.events"
+}
+
+write_incident_host() {
+    # The server as sampled at 19:39:41 UTC on 2026-10-14: 57% RAM available,
+    # swap full, PSI full avg10 67, caused by agentw-service.service stalling
+    # at its own 256M MemoryHigh with 1.6 GB in swap (memory.high events 219).
+    local test_root="$1"
+    write_fake_meminfo "$test_root/proc" 5700000 67.00 0
+    make_fake_staller "$test_root/cgroup-root" "user.slice/user-1000.slice/user@1000.service/app.slice/agentw-service.service" \
+        81.00 268000000 268435456 1717986918 219
+    make_fake_staller "$test_root/cgroup-root" "system.slice/mysql.service" 2.00 900000000 max 0 0
+    # The user manager aggregates its services; it is never blamed itself.
+    make_fake_staller "$test_root/cgroup-root" "user.slice/user-1000.slice/user@1000.service" 90.00 2000000000 max 1717986918 0
 }
 
 watchdog_fixture() {
@@ -710,6 +754,7 @@ watchdog_fixture() {
     write_notify_config "$test_root"
     install_fake_tools "$test_root"
     make_fake_cgroup "$test_root/cgroup"
+    mkdir -p "$test_root/cgroup-root"
     write_fake_meminfo "$test_root/proc" 6000000
     : > "$test_root/systemctl.log"
 }
@@ -725,6 +770,7 @@ run_watchdog() {
         BACKUP_SUITE_CONFIG_DIR="$test_root/config" \
         WATCHDOG_CGROUP_DIR="$test_root/cgroup" \
         WATCHDOG_PROC_DIR="$test_root/proc" \
+        BACKUP_SUITE_CGROUP_ROOT="$test_root/cgroup-root" \
         WATCHDOG_INTERVAL_SECONDS=0.1 \
         timeout 30 "$ROOT_DIR/bin/backup-watchdog.sh" file-backup.service > "$test_root/watchdog.log" 2>&1
 }
@@ -794,19 +840,199 @@ test_watchdog_pauses_for_server_pressure() {
     local test_root
     test_root=$(mktemp -d)
     watchdog_fixture "$test_root"
+    printf 'anon 200000000\nfile 50000000\n' > "$test_root/cgroup/memory.stat"
     write_fake_meminfo "$test_root/proc" 500000
-    ( sleep 1; write_fake_meminfo "$test_root/proc" 6000000 ) &
-    end_fake_unit_after 3 "$test_root/cgroup"
+    ( sleep 1.5; write_fake_meminfo "$test_root/proc" 6000000 ) &
+    end_fake_unit_after 3.5 "$test_root/cgroup"
 
-    run_watchdog "$test_root"
+    run_watchdog "$test_root" WATCHDOG_PRESSURE_SUSTAIN_SECONDS=1
     wait
 
-    assert_contains "$test_root/curl.log" 'backup paused: server memory pressure'
+    assert_contains "$test_root/curl.log" 'backup paused: server short of memory'
     assert_contains "$test_root/watchdog.log" 'resuming the backup'
     [ "$(cat "$test_root/cgroup/cgroup.freeze")" = "0" ] || fail_test 'backup was left frozen'
     assert_contains "$test_root/state/watchdog/history.tsv" 'server-pressure,resumed'
-    assert_contains "$test_root/curl.log" 'backup finished after watchdog intervention'
+    # One pressure episode: the pause notice, then one "recovered" once the run completes.
+    assert_contains "$test_root/curl.log" 'backups recovered'
+    [ "$(grep -c '^arg: Title: ' "$test_root/curl.log")" -eq 2 ] || fail_test 'expected exactly two pushes for one episode'
+    [ ! -e "$test_root/state/watchdog/file-backup.service.episode" ] || fail_test 'a completed run must close the episode'
     assert_not_contains "$test_root/systemctl.log" 'stop'
+    rm -rf "$test_root"
+}
+
+test_watchdog_short_pressure_spike_never_pauses() {
+    local test_root
+    test_root=$(mktemp -d)
+    watchdog_fixture "$test_root"
+    printf 'anon 200000000\nfile 50000000\n' > "$test_root/cgroup/memory.stat"
+    write_fake_meminfo "$test_root/proc" 500000
+    ( sleep 0.6; write_fake_meminfo "$test_root/proc" 6000000 ) &
+    end_fake_unit_after 1.5 "$test_root/cgroup"
+
+    run_watchdog "$test_root" WATCHDOG_PRESSURE_SUSTAIN_SECONDS=5
+    wait
+
+    assert_not_contains "$test_root/watchdog.log" 'WATCHDOG EVENT [server-pressure]'
+    [ ! -e "$test_root/curl.log" ] || fail_test 'a short spike must not notify'
+    rm -rf "$test_root"
+}
+
+write_adaptive_moderate_slow() {
+    cat >> "$1/config/global.conf" <<'CONF'
+FILE_BACKUP_PROFILE="moderate"
+FILE_BACKUP_PROFILE_MODE="adaptive"
+FILE_BACKUP_PROFILE_FLOOR="slow"
+WATCHDOG_ADAPTIVE_COOLDOWN_SECONDS="0"
+CONF
+}
+
+test_watchdog_incident_stall_without_shortage() {
+    # Replays 2026-10-14 19:39: 57% RAM available, swap full, server PSI full
+    # 67 from agentw-service.service at its own MemoryHigh. Even with a large
+    # backup and an adaptive ladder, nothing is paused or stepped down; the
+    # cause is reported by name, once.
+    local test_root
+    test_root=$(mktemp -d)
+    watchdog_fixture "$test_root"
+    write_adaptive_moderate_slow "$test_root"
+    printf '531628032\n' > "$test_root/cgroup/memory.current"
+    printf 'anon 300000000\nfile 231628032\n' > "$test_root/cgroup/memory.stat"
+    write_incident_host "$test_root"
+    end_fake_unit_after 2 "$test_root/cgroup"
+
+    run_watchdog "$test_root" WATCHDOG_PRESSURE_SUSTAIN_SECONDS=0
+    wait
+
+    [ "$(cat "$test_root/cgroup/cgroup.freeze")" = "0" ] || fail_test 'the backup was frozen for a stall it did not cause'
+    assert_not_contains "$test_root/watchdog.log" 'WATCHDOG EVENT [server-pressure]'
+    assert_not_contains "$test_root/watchdog.log" 'WATCHDOG EVENT [step-down]'
+    assert_contains "$test_root/watchdog.log" 'WATCHDOG EVENT [host-pressure] memory stall from agentw-service.service; backup continues'
+    [ "$(grep -c '^arg: Title: ' "$test_root/curl.log")" -eq 2 ] || fail_test 'expected the host notice and one recovered message'
+    assert_contains "$test_root/curl.log.attachments" 'Server memory: 5566 MiB available of 9765 MiB (57%), swap used 1953 MiB of 1953 MiB, memory stall (PSI full avg10) 67.'
+    assert_contains "$test_root/curl.log.attachments" '1. user.slice/user-1000.slice/user@1000.service/app.slice/agentw-service.service: stall 81, memory 255 MiB of its 256 MiB MemoryHigh, swap 1638 MiB, memory.high events 219 (at its own limit: it stalls itself)'
+    assert_contains "$test_root/curl.log.attachments" '2. system.slice/mysql.service: stall 2'
+    assert_contains "$test_root/curl.log.attachments" 'The stall comes from agentw-service.service, which is at its own memory limit (its stall 81, server 67).'
+    assert_not_contains "$test_root/curl.log.attachments" 'user@1000.service: stall'
+    assert_contains "$test_root/state/watchdog/file-backup.service.status" 'top_staller=agentw-service.service'
+    assert_contains "$test_root/state/watchdog/history.tsv" $'\tcompleted\tsuccess'
+    rm -rf "$test_root"
+}
+
+test_watchdog_tiny_backup_not_paused() {
+    # A real shortage (8% available, stall 67, nobody at its own limit), but
+    # the backup holds 2 MiB, as at 19:39: freezing it would free nothing.
+    # It keeps running and steps down to the floor instead.
+    local test_root
+    test_root=$(mktemp -d)
+    watchdog_fixture "$test_root"
+    write_adaptive_moderate_slow "$test_root"
+    printf '2097152\n' > "$test_root/cgroup/memory.current"
+    printf 'anon 2097152\nfile 0\n' > "$test_root/cgroup/memory.stat"
+    write_fake_meminfo "$test_root/proc" 800000 67.00 0
+    end_fake_unit_after 2 "$test_root/cgroup"
+
+    run_watchdog "$test_root" WATCHDOG_PRESSURE_SUSTAIN_SECONDS=0
+    wait
+
+    [ "$(cat "$test_root/cgroup/cgroup.freeze")" = "0" ] || fail_test 'a 2 MiB backup was frozen'
+    assert_contains "$test_root/watchdog.log" 'WATCHDOG EVENT [host-pressure] server short of memory; backup continues'
+    assert_contains "$test_root/watchdog.log" 'WATCHDOG EVENT [step-down] backup stepped down from moderate to slow'
+    assert_contains "$test_root/state/watchdog/adaptive-profile.state" 'level=slow'
+    # The step-down is routine: recorded for the GUI, not pushed.
+    assert_not_contains "$test_root/curl.log" 'stepped down'
+    assert_contains "$test_root/state/events.jsonl" 'backup stepped down from moderate to slow'
+    assert_not_contains "$test_root/systemctl.log" 'stop'
+    rm -rf "$test_root"
+}
+
+test_watchdog_thaws_before_stop_and_retries() {
+    # A paused backup that outlasts the pause limit is thawed before systemd
+    # stops it (a frozen process cannot handle SIGTERM), then retried once the
+    # shortage clears. The retried run completes and closes the episode.
+    local test_root
+    local dead_pid
+    test_root=$(mktemp -d)
+    watchdog_fixture "$test_root"
+    printf 'anon 200000000\nfile 50000000\n' > "$test_root/cgroup/memory.stat"
+    write_fake_meminfo "$test_root/proc" 500000 30.00
+    true & dead_pid=$!
+    wait "$dead_pid"
+    mkdir -p "$test_root/state/run"
+    printf 'state=running\noutcome=\npid=%s\nproject_index=3\n' "$dead_pid" > "$test_root/state/run/progress.env"
+    ( sleep 2.5; write_fake_meminfo "$test_root/proc" 6000000 ) &
+
+    run_watchdog "$test_root" WATCHDOG_PRESSURE_SUSTAIN_SECONDS=0 WATCHDOG_FREEZE_MAX_SECONDS=1 \
+        WATCHDOG_RETRY_WAIT_SECONDS=20 WATCHDOG_RETRY_CLEAR_SECONDS=1 \
+        FAKE_SYSTEMCTL_FREEZE_AT_STOP_LOG="$test_root/freeze-at-stop.log" \
+        FAKE_SYSTEMCTL_START_REPOPULATES=1 FAKE_SYSTEMCTL_NEW_RUN_SECONDS=1.5 \
+        FAKE_SYSTEMCTL_INVOCATION_FILE="$test_root/invocation"
+    wait
+
+    [ "$(cat "$test_root/freeze-at-stop.log")" = "freeze=0" ] || fail_test 'the backup was still frozen when systemd stopped it'
+    [ -z "$(cat "$test_root/cgroup/cgroup.kill")" ] || fail_test 'a thawed backup must stop without SIGKILL'
+    assert_contains "$test_root/curl.log" 'backup paused: server short of memory'
+    assert_contains "$test_root/curl.log" 'backup deferred: server short of memory'
+    assert_not_contains "$test_root/curl.log" 'Priority: urgent'
+    assert_contains "$test_root/systemctl.log" 'start --no-block file-backup.service'
+    assert_contains "$test_root/state/events.jsonl" 'backup retried after the memory shortage cleared'
+    assert_contains "$test_root/curl.log" 'backups recovered'
+    [ "$(grep -c '^arg: Title: ' "$test_root/curl.log")" -eq 3 ] || fail_test 'expected pause, deferred and recovered: three pushes'
+    assert_contains "$test_root/state/run/progress.env" 'state=interrupted'
+    assert_contains "$test_root/state/run/progress.env" 'outcome=pause-timeout'
+    assert_contains "$test_root/state/watchdog/history.tsv" 'pause-timeout'
+    [ "$(grep -c $'\tfile-backup.service\t' "$test_root/state/watchdog/history.tsv")" -eq 2 ] || fail_test 'the retried run needs its own history row'
+
+    # notify-failure.sh must not push a second message for a stop the watchdog explained.
+    HOME="$test_root/home" PATH="$test_root/bin:$PATH" FAKE_CURL_LOG="$test_root/curl-failure.log" FAKE_SYSTEMCTL_LOG="$test_root/systemctl.log" \
+        BACKUP_SUITE_CONFIG_DIR="$test_root/config" FAKE_SYSTEMCTL_RESULT=signal \
+        "$ROOT_DIR/bin/notify-failure.sh" file-backup.service > "$test_root/notify.log" 2>&1
+    assert_contains "$test_root/notify.log" 'Failure recorded without a push'
+    [ ! -e "$test_root/curl-failure.log" ] || fail_test 'a duplicate failure push was sent'
+    rm -rf "$test_root"
+}
+
+test_watchdog_never_kills_the_next_run() {
+    # 2026-10-14 19:01:20: systemd stopped the backup in 5 ms, then a queued
+    # timer start launched the next run in the same cgroup 23 ms later. The old
+    # watchdog took it for a hung stop and SIGKILLed it. Now it sees the new
+    # invocation, leaves it alone and watches it.
+    local test_root
+    test_root=$(mktemp -d)
+    watchdog_fixture "$test_root"
+    printf 'anon 950000000\nfile 10000000\n' > "$test_root/cgroup/memory.stat"
+    ( sleep 1.2; printf 'anon 50000000\nfile 10000000\n' > "$test_root/cgroup/memory.stat" ) &
+
+    run_watchdog "$test_root" FAKE_SYSTEMCTL_STOP_RESTARTS=1 FAKE_SYSTEMCTL_NEW_RUN_SECONDS=2.5 \
+        FAKE_SYSTEMCTL_RESTART_ONCE_FILE="$test_root/restart-once" \
+        FAKE_SYSTEMCTL_INVOCATION_FILE="$test_root/invocation" WATCHDOG_KILL_GRACE_SECONDS=3
+    wait
+
+    [ -z "$(cat "$test_root/cgroup/cgroup.kill")" ] || fail_test 'the next run was force-killed'
+    assert_contains "$test_root/curl.log" 'The timer started the next run right afterwards'
+    assert_not_contains "$test_root/curl.log" 'force-killed'
+    [ "$(grep -c '^Watchdog started for file-backup.service' "$test_root/watchdog.log")" -eq 2 ] || fail_test 'the next run was not watched'
+    rm -rf "$test_root"
+}
+
+test_watchdog_episode_reports_once() {
+    # A second run inside the same episode (19:34 after 19:01) records its
+    # pause without pushing it again.
+    local test_root
+    test_root=$(mktemp -d)
+    watchdog_fixture "$test_root"
+    mkdir -p "$test_root/state/watchdog"
+    printf 'opened_epoch=%s\nopened_at=2026-10-14T18:51:18Z\ncause=server memory shortage\npause=1\nnotified=1\n' "$(date -u +%s)" \
+        > "$test_root/state/watchdog/file-backup.service.episode"
+    printf 'anon 200000000\nfile 50000000\n' > "$test_root/cgroup/memory.stat"
+    write_fake_meminfo "$test_root/proc" 500000
+    end_fake_unit_after 1.5 "$test_root/cgroup"
+
+    run_watchdog "$test_root" WATCHDOG_PRESSURE_SUSTAIN_SECONDS=0
+    wait
+
+    assert_contains "$test_root/watchdog.log" 'WATCHDOG EVENT [server-pressure]'
+    assert_contains "$test_root/state/events.jsonl" 'backup paused: server short of memory'
+    assert_not_contains "$test_root/curl.log" 'backup paused'
     rm -rf "$test_root"
 }
 
@@ -910,6 +1136,18 @@ test_profile_auto_limits_and_overrides() {
     rm -rf "$test_root"
 }
 
+test_profile_requires_swap_cap() {
+    # MemoryHigh with an unlimited swap allowance lets a throttled backup thrash
+    # in swap for hours instead of reaching MemoryMax.
+    local output
+    if output=$(bash -c '. "$1/bin/common.sh"; FILE_CUSTOM_MEMORY_SWAP_MAX=infinity; resolve_file_backup_profile custom' _ "$ROOT_DIR" 2>&1); then
+        fail_test 'a profile with unlimited swap was accepted'
+    fi
+    [[ "$output" == *"MemorySwapMax must be a size"* ]] || fail_test "unexpected error: $output"
+    bash -c '. "$1/bin/common.sh"; for p in slow moderate fast; do resolve_file_backup_profile "$p"; done' _ "$ROOT_DIR" \
+        || fail_test 'built-in profiles must carry a swap cap'
+}
+
 test_adaptive_profile_cli() {
     local test_root
     local dropin
@@ -965,10 +1203,12 @@ EOF
     run_watchdog "$test_root"
     wait
 
-    assert_contains "$test_root/curl.log" 'backup stepped down from moderate to slow'
-    assert_contains "$test_root/curl.log" 'hard limit stays 953 MiB until usage drops below 512 MiB'
+    # Routine steps are recorded as events, not pushed (WATCHDOG_NOTIFY_PROFILE_STEPS=0).
+    assert_contains "$test_root/state/events.jsonl" 'backup stepped down from moderate to slow'
+    assert_contains "$test_root/state/events.jsonl" 'hard limit stays 953 MiB until usage drops below 512 MiB'
     assert_contains "$test_root/watchdog.log" 'applied the slow hard limit of 512 MiB'
-    assert_contains "$test_root/curl.log" 'backup stepped back up from slow to moderate'
+    assert_contains "$test_root/state/events.jsonl" 'backup stepped back up from slow to moderate'
+    assert_not_contains "$test_root/curl.log" 'stepped down'
     assert_contains "$test_root/state/watchdog/history.tsv" 'step-down'
     assert_contains "$test_root/state/watchdog/history.tsv" 'step-up'
     [ "$(cat "$test_root/cgroup/cpu.max")" = "50000 100000" ] || fail_test 'moderate CPU quota was not restored on step-up'
@@ -1035,6 +1275,7 @@ setup_control_root() {
     mkdir -p "$test_root/source/project-a/sub" "$test_root/state/logs" "$test_root/state/watchdog" "$test_root/state/failures" "$test_root/state/active-files"
     printf '1|workspace|%s/source|fixed|projects/workspace|.nosync|children\n' "$test_root" > "$test_root/config/file-sources.conf"
     printf 'cache/**\n*.tmp\n' > "$test_root/source/project-a/sub/.backup-excludes"
+    write_fake_meminfo "$test_root/proc" 6000000
     printf 'type = drive\ntoken = {"access_token":"rclone-secret-value"}\n' > "$test_root/config/rclone.conf"
     cat >> "$test_root/config/global.conf" <<'CONF'
 NOTIFY_NTFY_TOKEN="tk_secret_token_value"
@@ -1050,6 +1291,7 @@ control_call() {
         FAKE_CURL_LOG="$test_root/curl.log" FAKE_SYSTEMCTL_LOG="$test_root/systemctl.log" \
         FAKE_JOURNALCTL_LOG="$test_root/journalctl.log" \
         BACKUP_SUITE_CONFIG_DIR="$test_root/config" \
+        BACKUP_SUITE_PROC_DIR="$test_root/proc" \
         "$ROOT_DIR/bin/backup-control.sh" "$@"
 }
 
@@ -1355,11 +1597,18 @@ run_test 'watchdog contains a memory surge' test_watchdog_contains_memory_surge
 run_test 'watchdog stops a backup before OOM' test_watchdog_stops_before_oom
 run_test 'watchdog force-kills a hung stop' test_watchdog_force_kills_hung_stop
 run_test 'watchdog pauses for server memory pressure' test_watchdog_pauses_for_server_pressure
+run_test 'watchdog ignores a short pressure spike' test_watchdog_short_pressure_spike_never_pauses
+run_test 'watchdog replays the 19:39 stall without a shortage' test_watchdog_incident_stall_without_shortage
+run_test 'watchdog never pauses a tiny backup' test_watchdog_tiny_backup_not_paused
+run_test 'watchdog thaws before stop and retries after pressure clears' test_watchdog_thaws_before_stop_and_retries
+run_test 'watchdog never kills the next run' test_watchdog_never_kills_the_next_run
+run_test 'watchdog pushes each notice once per episode' test_watchdog_episode_reports_once
 run_test 'watchdog stops for critical server memory' test_watchdog_stops_for_critical_server_memory
 run_test 'watchdog unit and deploy safety guards' test_watchdog_unit_and_deploy_guards
 run_test 'help and option errors never touch systemd' test_help_never_touches_systemd
 run_test 'auto-scaled limits and per-profile overrides' test_profile_auto_limits_and_overrides
 run_test 'adaptive profile commands' test_adaptive_profile_cli
+run_test 'profiles always cap swap' test_profile_requires_swap_cap
 run_test 'watchdog steps the profile down and back up' test_watchdog_adaptive_steps_down_and_up
 run_test 'adaptive level carries into the next run' test_adaptive_level_carries_into_next_run
 run_test 'control script read verbs and refusals' test_control_read_verbs

@@ -104,7 +104,13 @@ CONFIG_KEYS = {
     "WATCHDOG_SYSTEM_MIN_AVAILABLE_PERCENT": (int_range(2, 50), "Pause the backup when server RAM available falls below this percent."),
     "WATCHDOG_SYSTEM_CRITICAL_AVAILABLE_PERCENT": (int_range(1, 40), "Stop the backup when server RAM available falls below this percent."),
     "WATCHDOG_SYSTEM_PSI_FULL_LIMIT": (int_range(1, 100), "Pause the backup when memory pressure (PSI full avg10) reaches this value."),
-    "WATCHDOG_FREEZE_MAX_SECONDS": (int_range(30, 7200), "Stop a paused backup after this many seconds."),
+    "WATCHDOG_FREEZE_MAX_SECONDS": (int_range(30, 7200), "Stop a paused backup after this many seconds (it is retried once the shortage clears)."),
+    "WATCHDOG_PSI_PAUSE_AVAILABLE_PERCENT": (int_range(2, 90), "A memory stall pauses the backup only while server RAM available is below this percent (a stall without a shortage never does)."),
+    "WATCHDOG_PAUSE_MIN_FOOTPRINT_MB": (int_range(0, 65536), "Never pause a backup holding less than this much non-reclaimable memory plus swap (MiB): pausing it would free nothing."),
+    "WATCHDOG_PRESSURE_SUSTAIN_SECONDS": (int_range(0, 3600), "Server pressure must last this long before a pause or step-down (a short spike never counts)."),
+    "WATCHDOG_RETRY_WAIT_SECONDS": (int_range(0, 14400), "After stopping a long-paused backup, wait up to this long for the shortage to clear and retry once (0: wait for the next timer run)."),
+    "WATCHDOG_RETRY_CLEAR_SECONDS": (int_range(10, 3600), "Server memory must be normal this long before that retry starts."),
+    "WATCHDOG_NOTIFY_PROFILE_STEPS": (("bool",), "Push adaptive step-down/step-up notices too (otherwise they only appear in Activity)."),
     "WATCHDOG_KILL_GRACE_SECONDS": (int_range(5, 600), "Seconds a stopping backup gets before every process is force-killed."),
     "WATCHDOG_TASKS_WARN_PERCENT": (int_range(10, 100), "Warn when the backup uses this percent of its task limit."),
     "WATCHDOG_ADAPTIVE_STEP_DOWN_AVAILABLE_PERCENT": (int_range(2, 90), "Adaptive mode: step down when server RAM available falls below this percent."),
@@ -128,7 +134,10 @@ CONFIG_DEFAULTS = {
     "WATCHDOG_CONTAIN_PERCENT": "80", "WATCHDOG_CONTAIN_RELEASE_PERCENT": "60", "WATCHDOG_KILL_PERCENT": "90",
     "WATCHDOG_KILL_SAMPLES": "2", "WATCHDOG_SWAP_CONTAIN_PERCENT": "80", "WATCHDOG_SWAP_KILL_PERCENT": "95",
     "WATCHDOG_SYSTEM_MIN_AVAILABLE_PERCENT": "10", "WATCHDOG_SYSTEM_CRITICAL_AVAILABLE_PERCENT": "4",
-    "WATCHDOG_SYSTEM_PSI_FULL_LIMIT": "20", "WATCHDOG_FREEZE_MAX_SECONDS": "600", "WATCHDOG_KILL_GRACE_SECONDS": "30",
+    "WATCHDOG_SYSTEM_PSI_FULL_LIMIT": "20", "WATCHDOG_FREEZE_MAX_SECONDS": "900",
+    "WATCHDOG_PSI_PAUSE_AVAILABLE_PERCENT": "20", "WATCHDOG_PAUSE_MIN_FOOTPRINT_MB": "64",
+    "WATCHDOG_PRESSURE_SUSTAIN_SECONDS": "30", "WATCHDOG_RETRY_WAIT_SECONDS": "1800", "WATCHDOG_RETRY_CLEAR_SECONDS": "60",
+    "WATCHDOG_NOTIFY_PROFILE_STEPS": "0", "WATCHDOG_KILL_GRACE_SECONDS": "30",
     "WATCHDOG_TASKS_WARN_PERCENT": "90", "WATCHDOG_ADAPTIVE_STEP_DOWN_AVAILABLE_PERCENT": "20",
     "WATCHDOG_ADAPTIVE_STEP_DOWN_PSI_FULL": "10", "WATCHDOG_ADAPTIVE_STEP_UP_AVAILABLE_PERCENT": "30",
     "WATCHDOG_ADAPTIVE_STEP_UP_SECONDS": "300", "WATCHDOG_ADAPTIVE_COOLDOWN_SECONDS": "120",
@@ -458,6 +467,8 @@ def verb_history(request):
         if len(fields) < len(HISTORY_COLUMNS) or fields[0] == "started":
             continue
         row = dict(zip(HISTORY_COLUMNS, fields))
+        # Column 16 (how systemd says the run ended) exists since the watchdog records it.
+        row["result"] = fields[len(HISTORY_COLUMNS)] if len(fields) > len(HISTORY_COLUMNS) else ""
         for key in ("duration_s", "peak_mem", "peak_anon", "peak_swap", "avg_cpu_pct", "peak_cpu_pct",
                     "peak_tasks", "io_read", "io_write"):
             try:
@@ -817,6 +828,8 @@ def merged_config_checks(values):
         invalid("Adaptive step-up RAM percent must be above the step-down percent.")
     if not number("WATCHDOG_SWAP_CONTAIN_PERCENT") < number("WATCHDOG_SWAP_KILL_PERCENT"):
         invalid("Swap containment percent must be below the swap stop percent.")
+    if not number("WATCHDOG_PSI_PAUSE_AVAILABLE_PERCENT") >= number("WATCHDOG_SYSTEM_MIN_AVAILABLE_PERCENT"):
+        invalid("The stall pause RAM percent must be at or above the shortage pause percent.")
 
 
 def verb_config_set(request):

@@ -40,9 +40,13 @@ previous behavior until a profile is chosen.
 
 The watchdog steps **down** one level when any of these is true: backup memory
 is at or above 80% of its limit, backup swap is at or above 80%, server RAM
-available is below 20%, or memory pressure (PSI full avg10) is at or above 10.
+available is below 20%, or memory pressure (PSI full avg10) is at or above 10
+while the backup holds at least 64 MiB and the stall is not caused by another
+service at its own memory limit (see below). The server conditions must last
+`WATCHDOG_PRESSURE_SUSTAIN_SECONDS` (30 s); a short spike never counts.
 It steps **up** one level after 300 s in which server RAM available stays at or
-above 30%, pressure stays low, and the backup stays below 60% of its limit.
+above 30%, pressure stays low (or comes only from such another service), and
+the backup stays below 60% of its limit.
 Level changes are at least 120 s apart. All of these are
 `WATCHDOG_ADAPTIVE_*` settings.
 
@@ -51,9 +55,10 @@ at once. rclone's transfers, checkers, and bandwidth follow from the next
 project. A lower hard memory limit is only applied once usage is comfortably
 below it, so a step-down never forces an OOM kill. The current level is saved
 in `/var/lib/backup-suite/watchdog/adaptive-profile.state`. The next run starts
-at that level and steps up when conditions allow. A step-down sends an ntfy
-message; a step-up sends a low-priority one. Containment, pause, and stop
-(below) still apply at the floor level.
+at that level and steps up when conditions allow. Steps are routine: they are
+listed in the GUI's Activity and the journal, and pushed through ntfy only with
+`WATCHDOG_NOTIFY_PROFILE_STEPS="1"`. Containment, pause, and stop (below) still
+apply at the floor level.
 
 ## Limits: built-in, auto, or your own
 
@@ -75,12 +80,42 @@ server is under pressure.
 | Backup memory at or above 80% of MemoryMax, or swap at or above 80% of its allowance | Reclaims the backup's cache memory and halves its CPU quota. Restores them once usage stays below 60%. | "backup memory surge contained" |
 | Non-reclaimable backup memory at or above 90% of MemoryMax for 2 samples | Stops the backup gracefully before the kernel OOM-kills it, then force-kills the cgroup if it has not exited after 30 s. | "backup stopped before OOM" |
 | Swap at or above 95% while RAM is at or above 80% | Stops the backup. | "backup stopped: memory and swap exhausted" |
-| Server RAM available below 10%, or memory PSI full avg10 at or above 20 | Freezes the backup (no CPU or I/O) and resumes it when the pressure clears. | "backup paused: server memory pressure" |
-| Pause longer than 10 minutes | Stops the backup to release its memory. | "backup stopped after a long pause" |
+| Server RAM available below 10% for 10 s, or memory PSI full avg10 at or above 20 for 30 s while RAM available is below 20% and the stall is not another service's own (see below); the backup holds at least 64 MiB of non-reclaimable memory and swap | Freezes the backup (no CPU or I/O) and resumes it when the shortage clears. | "backup paused: server short of memory" |
+| The same shortage, but the backup holds less than 64 MiB | Keeps it running (pausing would free nothing); in adaptive mode it steps down to the floor. | "server short of memory; backup continues" |
+| A memory stall without a shortage, or caused by another cgroup at its own memory limit | Keeps the backup running and names the cgroup that stalls. | "memory stall from &lt;service&gt;; backup continues" |
+| Pause longer than 15 minutes (`WATCHDOG_FREEZE_MAX_SECONDS`) | Thaws the backup, stops it gracefully, then retries it once server memory has been normal for 60 s (waiting up to 30 min; `WATCHDOG_RETRY_*`). | "backup deferred: server short of memory" |
 | Server RAM available below 4% | Stops the backup immediately to protect production services. | "backup stopped to protect the server" |
 | The kernel OOM-killed a backup process anyway | Records it; systemd stops the unit (`OOMPolicy=stop`). | "kernel OOM-killed a backup process" |
 | Tasks at or above 90% of TasksMax | Warns once. | "backup near its process limit" |
-| A run finishes after any containment or pause | Sends a summary of the run's resource use. | "backup finished after watchdog intervention" |
+| A run finishes after any containment | Sends a summary of the run's resource use. | "backup finished after watchdog intervention" |
+| The first run that completes after a pressure episode was reported | Closes the episode. | "backups recovered" |
+
+**Pressure episodes.** Pauses, deferrals and host-stall notices belong to one
+episode, which lasts until a run completes normally (at most 24 hours). Each
+kind of notice is pushed once per episode; repeats, for example when the next
+timer run pauses again, are only listed in Activity. If the watchdog stopped a
+run and already explained why, the failure notifier records the failure without
+pushing a second message.
+
+**Whose stall is it?** The server-wide memory stall (`/proc/pressure/memory`)
+also rises when a single service is throttled at its own `MemoryHigh`: that
+service stalls itself while the server still has plenty of RAM. On 2026-10-14
+`agentw-service.service` did exactly that (its own stall 81, the server's 67,
+57% of RAM available), and the old watchdog paused and then stopped two backups
+for it. While the server reports a stall, the watchdog now ranks the services
+and scopes by their own `memory.pressure` and checks whether the worst one sits
+at its `MemoryHigh` (or `MemoryMax`). If it does, the stall is attributed to it
+and the backup is neither paused nor stepped down. The attachment of every
+notice lists server RAM, swap and the three worst stallers with their memory,
+limit, swap and `memory.high` event count.
+
+**Stopping and the next run.** Before stopping a paused backup the watchdog
+thaws it, so its processes can handle SIGTERM and exit cleanly. If the timer
+starts the next run while the watchdog waits for the stop (as at 19:01:20 on
+2026-10-14), the watchdog sees the new invocation, never force-kills it, and
+starts watching it. A run that ends some other way is recorded with systemd's
+result (`success`, `signal`, `oom-kill`, `timeout`, `exit-code`) in the
+history; a killed run's progress file is marked `interrupted`.
 
 Stopping a backup is safe for the remote copy. rclone replaces or archives
 each remote file only when that file finishes, and deletions only happen at
@@ -92,8 +127,15 @@ The thresholds are `WATCHDOG_*` settings in `global.conf` (see
 Files:
 
 - `/var/lib/backup-suite/watchdog/file-backup.service.status`: live values, updated every 15 s while a backup runs
-- `/var/lib/backup-suite/watchdog/history.tsv`: one line per run with duration, peak RAM, non-reclaimable RAM and swap, average and peak CPU, peak tasks, disk I/O, events, and outcome (the newest 500 runs)
+- `/var/lib/backup-suite/watchdog/history.tsv`: one line per run with duration, peak RAM, non-reclaimable RAM and swap, average and peak CPU, peak tasks, disk I/O, events, outcome, and systemd's result (the newest 500 runs)
 - `/var/lib/backup-suite/watchdog/file-backup.service.last-action`: the most recent stop, which the failure notifier also reports
+- `/var/lib/backup-suite/watchdog/file-backup.service.episode`: the open pressure episode and which notices it has pushed
+
+Every unit Backup Suite ships caps swap with `MemorySwapMax`: `MemoryMax`
+counts RAM only, and a unit with `MemoryHigh` but unlimited swap is pushed
+into swap without bound instead of reaching its limit. The database units have
+no RAM limit (a large dump must not be killed) but cap swap too. A file backup
+profile without a swap cap is rejected.
 
 Check it with:
 
