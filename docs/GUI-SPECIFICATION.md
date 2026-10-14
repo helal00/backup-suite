@@ -138,7 +138,9 @@ downloadable files, and copy buttons.
   system mode only: `backup-suite-control.socket`
   (`ListenStream=/run/backup-suite/control.sock`, `SocketUser=root`,
   `SocketGroup=backup-suite-gui`, `SocketMode=0660`, `Accept=yes`,
-  `MaxConnections=8`) and `backup-suite-control@.service`
+  `MaxConnections=8`, `ExecStartPost=… install-gui-broker.sh --refresh-acl`,
+  which adds a `user:<login>:rw` ACL entry per group member, section 12) and
+  `backup-suite-control@.service`
   (`StandardInput=socket`, `StandardOutput=socket`, `StandardError=journal`,
   `ProtectSystem=strict`, `ReadWritePaths=/etc/backup-suite
   /var/lib/backup-suite /etc/systemd/system`, `PrivateTmp=yes`,
@@ -505,12 +507,14 @@ stop_on_tunnel_stop = false
   2. `gui/scripts/backup-suite-gui-server install`; `loginctl enable-linger
      <user>` once if linger is off;
   3. in Tunnel Manager's existing profile, import the bundle and press Start.
-- Note on group membership: the user's systemd manager keeps the groups it
-  started with. After the deploy adds the user to `backup-suite-gui`, the
-  GUI can reach the broker only after the user manager restarts (reboot, or
-  `sudo systemctl restart user@<uid>.service` when no session needs to be
-  kept). `install` and the GUI's "Backup Suite not found / permission
-  denied" page detect this and say exactly that.
+- Group membership and running GUIs: a user's systemd manager keeps the
+  groups it started with, and restarting it would stop that user's other
+  services (on black: agentw-gui and the AI sessions). So the socket unit's
+  `ExecStartPost` (`install-gui-broker.sh --refresh-acl`) gives every member
+  of `backup-suite-gui` a POSIX ACL entry `user:<login>:rw` on
+  `/run/backup-suite/control.sock`. A new admin can connect at once; the
+  group stays the single list of admins and the broker still checks it
+  (G-BRK-2).
 
 ## 13. Later phases (not v1)
 
@@ -543,7 +547,7 @@ Automated items run in `tests/run.sh` (bash, control script) and
 |---|---|---|---|
 | V1 | The GUI runs as the admin user (not root); no GUI code reads Backup Suite files directly (grep: all access via the control client) | G-ARC-1/2 | automated + manual |
 | V2 | Unknown verb, extra argument, out-of-range value, path traversal in `failures.read` → `invalid_request`, nothing changed | G-ARC-2, §5 | automated |
-| V3 | System mode: socket `root:backup-suite-gui 0660`; a connection from a UID outside the group is refused and logged | G-BRK-1/2 | automated + manual |
+| V3 | System mode: socket `root:backup-suite-gui 0660` with one ACL entry per member (`install-gui-broker.sh --check`); a connection from a UID outside the group is refused and logged | G-BRK-1/2 | automated + manual |
 | V4 | No reply of any verb contains the ntfy token, the unmasked topic, or `rclone.conf` content | G-SEC-1 | automated |
 | V5 | Each changing verb leaves one journal line and one `audit.jsonl` line with the caller UID | G-AUD-1 | automated |
 | V6 | Socket directory owned by someone else → GUI refuses to start; a wider own directory is tightened to 0700 | G-ARC-5 | automated |
