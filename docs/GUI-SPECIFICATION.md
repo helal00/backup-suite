@@ -1,444 +1,393 @@
 # Backup Suite GUI — Specification
 
-Status: **reviewed, approved for implementation** (revision 2, 2026-10-14).
-Nothing here is implemented yet. This document is the acceptance reference:
-every requirement has an ID (`G-…`), section 14 records the review decisions,
-and section 15 lists the checks that verify each requirement.
+Status: **approved for implementation** (revision 3, 2026-10-14).
+This document is the acceptance reference: every requirement has an ID
+(`G-…`), section 14 records the review decisions, and section 15 lists the
+checks that verify each requirement.
 
-Revision 2 applies the owner's answers to review items R1–R7 and the Tunnel
-Manager review
-`/home/user/php-projects-lv/agentw-commercial/.ai-metadata/handoffs/2026-10-14-backup-suite-gui-spec-review.md`
-(Tunnel Manager v0.1.38): the GUI runs as a dedicated account, the bundle's
-`backend_id` is editable, `cursor_store` is gone, the socket path is not
-hard-coded, and the GUI no longer depends on a login session.
+History:
+- Revision 1: first draft.
+- Revision 2: owner answers R1–R7 and the first Tunnel Manager review.
+- **Revision 3** follows the owner's final recommendation
+  (`/home/user/php-projects-lv/agentw-commercial/.ai-metadata/handoffs/2026-10-14-backup-suite-gui-recommendation-3.md`).
+  It supersedes the account decisions of revision 2. The GUI is an admin app
+  set up exactly like agentw-gui: a user unit of the admin login, a socket in
+  `$XDG_RUNTIME_DIR`, the owner's normal Tunnel Manager profile, and
+  `remote_service` `systemd-user`. One GUI covers both Backup Suite install
+  modes through two backends (G-ARC-3). The `backup-gui` account, its sshd
+  block, the key handoff and any capabilities endpoint are dropped. Kept from
+  the reviews: the editable `backend_id`, no `cursor_store`, no hard-coded
+  socket path, linger, and Host/Origin checks that accept any local port.
 
 ## 1. Goal
 
-A professional browser GUI for Backup Suite on this server, reached only
-through an SSH tunnel managed by Tunnel Manager (`tunnelm`). It shows what the
-backups are doing and how much of the server they use, and it gives the same
-controls as the command-line tools (`backup-profile.sh`, `systemctl`,
-`notify-test.sh`) without a shell. It looks and behaves like `agentw-gui`.
+A professional browser GUI for Backup Suite, reached only through an SSH
+tunnel managed by Tunnel Manager (`tunnelm`). It shows what the backups are
+doing and how much of the server they use, and it gives the same controls as
+the command-line tools (`backup-profile.sh`, `systemctl`, `notify-test.sh`)
+without a shell. It looks and behaves like `agentw-gui`.
 
 Out of scope for v1 (section 13): editing backup sources (v1.1), restoring
 files from Google Drive, editing database backup definitions, managing other
-servers, and multi-user accounts.
+servers, and multi-user accounts inside one GUI.
 
 ## 2. What this follows from agentw-gui and Tunnel Manager
 
 Read-only review of `/home/user/php-projects-lv/agentw-gui` (v0.1.3) and
-`/home/user/php-projects-lv/agentw-commercial/tunnel-manager`, 2026-10-14.
+`/home/user/php-projects-lv/agentw-commercial/tunnel-manager` (v0.1.38),
+2026-10-14.
 
 | agentw-gui behavior | Backup GUI requirement |
 |---|---|
-| Node server, no web framework, vanilla JS front end, one `public/` directory | Same stack. The server uses only Node's standard library (no `npm install` on the server) and runs on the system Node (`/usr/bin/node`, v18.19.1 on this host; Node ≥ 18 required). |
-| The supervised instance runs as a **dedicated system account** (`agentw-gui-supervised.service`, `User=agentw-gui`, `RuntimeDirectory` 0700, `StateDirectory`, `ProtectSystem=strict`, `ProtectHome=yes`, `NoNewPrivileges=yes`) | `backup-suite-gui.service`, a system unit with `User=backup-gui` and the same hardening (G-ARC-1). |
-| `listen-config.js`: listens on a **private Unix socket** by default (0600 in a 0700 dir); `tcp` (127.0.0.1) and `both` modes are opt-in with a warning | Identical modes, defaults and directory checks; socket `/run/backup-suite-gui/gui-4337.sock`. |
+| Node server, no web framework, vanilla JS front end, one `public/` directory | Same stack. The server uses only Node's standard library (no `npm install`) and runs on Node ≥ 18 (`/usr/bin/node` is v18.19.1 on this host; the installer records the absolute path of the `node` it was started with). |
+| Runs as the admin login's **systemd user service** `agentw-gui-4317.service`, with linger, resource drop-ins and its own watchdog unit | `backup-suite-gui-4337.service` user unit of the admin login, linger, the same drop-in and watchdog pattern (G-ARC-1). |
+| `listen-config.js`: a **private Unix socket** by default (`$XDG_RUNTIME_DIR/agentw-gui/gui-<port>.sock`, 0600 in a 0700 dir); `tcp` (127.0.0.1) and `both` opt-in with a warning | Identical modes, defaults and checks: `$XDG_RUNTIME_DIR/backup-suite-gui/gui-4337.sock` (G-ARC-5). |
 | `GET /api/health` returns `app: "agentw-gui"`, build, listen report | `GET /api/health` returns `app` and `app_id` = `backup-suite-gui`; Tunnel Manager checks it with `expect_app_id`. |
-| Tunnel Manager bundle (`format = "tunnel-manager-tunnel"`, `version = 1`) generated by the server from current settings and offered in the **Ways to connect** dialog, with Windows `.cmd`, macOS/Linux `.sh`, Android `.txt` launchers and the manual `ssh -N -L` line | Same dialog, same four launchers, same bundle generator, with this app's names and ports, plus a command-line generator for the first import (G-CON-4). |
-| Bundle sections: `[tunnel.local]` preferred port + range + `reuse_if_health_matches`, `[tunnel.health]`, `[tunnel.launch.browser] mode = "webview"`, `[tunnel.events]` 5 s poll, `[tunnel.notifications]`, `[tunnel.remote_service]` | Same sections, except: `[tunnel.file_bridge]` is left out (this GUI edits no local copies); `[tunnel.remote_service]` is `enabled = false` because systemd keeps the system unit running and the forwarding-only account cannot run `systemctl` (G-CON-2). |
-| App events: `POST /api/events` with `action: "consume" \| "ack"` and `delivery_mode: "per-consumer-v1"` keyed by the Tunnel Manager installation ID; first consume returns `baseline: true`; 180 s delivery TTL from `created_at`; `GET /api/events` is a non-consuming list | Same contract and same rules (G-EVT-*). |
+| Tunnel Manager bundle (`format = "tunnel-manager-tunnel"`, `version = 1`) generated from current settings in the **Ways to connect** dialog, with Windows `.cmd`, macOS/Linux `.sh`, Android `.txt` launchers and the manual `ssh -N -L` line | Same dialog, launchers and generator, with this app's names and ports, plus a command-line generator for the first import (G-CON-4). |
+| Bundle sections `[tunnel.local]`, `[tunnel.health]`, `[tunnel.launch.browser] mode = "webview"`, `[tunnel.events]`, `[tunnel.notifications]`, `[tunnel.remote_service] provider = "systemd-user"`, `policy = "start-if-stopped"` | Same sections and values; `[tunnel.file_bridge]` is left out (this GUI edits no local copies), and there is no `cursor_store` (G-CON-2). |
+| App events: `POST /api/events` with `action: "consume" \| "ack"` and `delivery_mode: "per-consumer-v1"`; first consume `baseline: true`; 180 s TTL from `created_at`; `GET /api/events` non-consuming | Same contract and rules (G-EVT-*). |
 | Notifications settings: Tunnel Manager delivery, browser delivery, "Prefer Tunnel Manager notifications when active", per-category switches, "Enable browser notifications" → "Test browser notification" | Same controls with backup categories (G-NOT-*). |
-| Top bar: reload, ⚙ Settings, Admin, Updates, ⇩ Ways to connect, Reset Panels, runtime label, brand + version at the right; overflow `>>` menu on narrow screens | Same bar, with this app's buttons (G-UI-2). |
-| Panels with a titlebar, a `?` help button that opens a floating help panel, dock / maximize / minimize; responsive panel switcher buttons on phones | Same panel chrome and help pattern (G-UI-3, G-UI-6). |
-| Settings dialog with tabs, `fieldset.settings-option-group` + `legend`, `label.inline-check` checkboxes, number inputs with min/max, help text under fields, Cancel / **Save Settings** | Same dialog pattern (G-SET-*). |
-| Confirm dialog (`Please confirm`) before anything destructive; reminders/bell with an Activity tab | Same confirm dialog; Activity tab lists this GUI's events (G-UI-5). |
-| Look: warm paper palette (`--bg #f4efe5`, `--panel #fffaf0`, `--accent #1a6b5b`, `--danger #9f3b2f`, radius 8 px, Segoe UI / system-ui, Cascadia Code / Consolas) | Same tokens copied into this app's stylesheet, plus a complete dark set (G-UI-1). |
-| PWA manifest, 192/512 icons, small service worker so Chrome/Edge can "Install app" | Same (G-UI-8). |
+| Top bar: reload, ⚙ Settings, Admin, ⇩ Ways to connect, Reset Panels, runtime label, brand + version; overflow `>>` on narrow screens | Same bar with this app's buttons; the runtime label shows the install mode (G-UI-2). |
+| Panels with a titlebar, `?` help button with a floating help panel, maximize; responsive panel switcher on phones | Same (G-UI-3, G-UI-6). |
+| Settings dialog with tabs, `fieldset` + `legend`, inline checkboxes, bounded number fields, help text, Cancel / **Save Settings** | Same (G-SET-*). |
+| Confirm dialog (`Please confirm`); bell with an Activity tab | Same (G-UI-5, G-ACT-1). |
+| Look: warm paper palette (`--bg #f4efe5`, `--panel #fffaf0`, `--accent #1a6b5b`, `--danger #9f3b2f`, radius 8 px, Segoe UI / system-ui, Cascadia Code / Consolas) | Same tokens plus a complete dark set (G-UI-1). |
+| PWA manifest, icons, small service worker | Same (G-UI-8). |
 
-Input and output options are the same kinds as agentw-gui's (confirmed by the
-owner, R1): for input, tabbed settings, fieldsets, checkboxes, bounded number
-fields, and a confirmation before every server change; for output, live
-panels, Tunnel Manager native notices, browser notices, the bell's Activity
-list, downloadable files, and copy buttons.
+Input and output options are the same kinds as agentw-gui's (owner, R1): for
+input, tabbed settings, fieldsets, checkboxes, bounded number fields, and a
+confirmation before every server change; for output, live panels, Tunnel
+Manager native notices, browser notices, the bell's Activity list,
+downloadable files, and copy buttons.
 
-## 3. Architecture and accounts
+## 3. Architecture
 
 ```
- Your PC                              Server (black)
- ┌──────────────────┐  SSH as         ┌──────────────────────────────────────────────┐
- │ Tunnel Manager   │  backup-gui     │ backup-suite-gui.service  (User=backup-gui)  │
- │  profile         │  (forwarding-   │  Node server, no root, no rclone, no secrets │
- │  backup-gui@host │═══only key)════▶│  /run/backup-suite-gui/gui-4337.sock  0600   │
- │  WebView window  │  -L to socket   │        │ one JSON request per connection     │
- │  native notices  │                 │        ▼                                     │
- └──────────────────┘                 │ /run/backup-suite/control.sock  0660         │
-                                      │  root:backup-suite-gui (members: backup-gui) │
-                                      │        │ backup-suite-control.socket         │
-                                      │        ▼ one instance per call               │
-                                      │ backup-suite-control@.service (root)         │
-                                      │  bin/backup-control.sh: fixed list of verbs  │
-                                      │  → systemctl, backup-profile.sh, state files │
-                                      └──────────────────────────────────────────────┘
- AI agent sessions run as "user": they can reach neither socket.
+ Your PC                         Server
+ ┌──────────────────┐  SSH -L    ┌──────────────────────────────────────────────────────┐
+ │ Tunnel Manager   │  (owner's  │ backup-suite-gui-4337.service  (user unit of admin)  │
+ │  normal profile  │═══profile)▶│  Node server, $XDG_RUNTIME_DIR/backup-suite-gui/     │
+ │  WebView window  │  socket    │  gui-4337.sock (0600 in 0700 dir)                    │
+ │  native notices  │            │        │ one JSON request, one JSON reply            │
+ └──────────────────┘            │        ├── user mode:  spawn bin/backup-control.sh   │
+                                 │        │              as the user (systemctl --user)  │
+                                 │        └── system mode: /run/backup-suite/control.sock│
+                                 │             root:backup-suite-gui 0660 → socket-     │
+                                 │             activated backup-suite-control@.service  │
+                                 │             runs bin/backup-control.sh as root        │
+                                 └──────────────────────────────────────────────────────┘
 ```
 
-- **G-ARC-1** The GUI runs as the dedicated system account **`backup-gui`**,
-  never as root and never as `user`. The AI agent sessions on this server run
-  as `user`, so `user` must not be able to reach the GUI or the broker. Unit
-  `backup-suite-gui.service` (system unit): `User=backup-gui`,
-  `Group=backup-gui`, `SupplementaryGroups=backup-suite-gui`,
-  `RuntimeDirectory=backup-suite-gui`, `RuntimeDirectoryMode=0700`,
-  `StateDirectory=backup-suite-gui`, `StateDirectoryMode=0700`, `UMask=0077`,
-  `Restart=always`, `RestartSec=3`, `NoNewPrivileges=yes`, `PrivateTmp=yes`,
-  `PrivateDevices=yes`, `ProtectSystem=strict`, `ProtectHome=yes`,
-  `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`,
-  `ProtectControlGroups=yes`, `RestrictSUIDSGID=yes`, `LockPersonality=yes`,
-  `WantedBy=multi-user.target`. Being a system unit, it runs with nobody
-  logged in and needs no linger.
-- **G-ARC-2** The `backup-gui` account: system user, no password, shell
-  `/usr/sbin/nologin`, home `/var/lib/backup-gui` holding only
-  `.ssh/authorized_keys` (root-owned file, mode 0644; the directory 0755 root,
-  so the GUI process cannot change its own keys). Each key line starts with
-  `restrict,port-forwarding`. sshd block, installed as
-  `/etc/ssh/sshd_config.d/60-backup-gui.conf`:
+- **G-ARC-1** The GUI runs as the login user who administers Backup Suite:
+  a systemd **user** unit `backup-suite-gui-4337.service` with
+  `Restart=on-failure`, `WorkingDirectory` = the GUI directory, the resource
+  drop-in of G-RES-1, and linger enabled for that user so it runs with nobody
+  logged in. It never runs as root and never needs sudo.
+- **G-ARC-2** The GUI never reads Backup Suite's config or state files
+  itself and never runs `rclone` or `systemctl`. Every read and every change
+  goes through **`bin/backup-control.sh`**, which holds the verb
+  implementations once (section 5). It reads one JSON request on stdin and
+  writes one JSON reply on stdout. Paths and `systemctl` scope come from the
+  Backup Suite library (`resolve_effective_config`), so the script itself is
+  the same in both modes.
+- **G-ARC-3** Two backends, chosen by the install mode:
+  - **direct (user mode)**: Backup Suite was installed by the user without
+    sudo (`~/.config/backup-suite`, `~/.local/state/backup-suite`,
+    `systemctl --user` units). The GUI starts
+    `<user install dir>/bin/backup-control.sh` as a child process as
+    itself. No root, no socket, no group. It can do nothing the user cannot
+    already do in a terminal.
+  - **broker (system mode)**: Backup Suite was installed with sudo
+    (`/etc/backup-suite`, `/var/lib/backup-suite`, system units). The GUI
+    connects to `/run/backup-suite/control.sock`; systemd starts one
+    `backup-suite-control@.service` instance per connection, which runs
+    `/opt/backup-suite/bin/backup-control.sh` as root with the request on
+    stdin.
+- **G-ARC-4** Mode detection: setting `backend` = `auto` (default),
+  `user` or `system`. In `auto`, the GUI picks **user** when
+  `${XDG_CONFIG_HOME:-~/.config}/backup-suite/global.conf` exists, else
+  **system** when `/run/backup-suite/control.sock` exists, else shows a
+  "Backup Suite not found" page with both install commands. When both exist,
+  `auto` picks system and Settings offers the switch. The top bar shows the
+  mode: "system mode · black" or "user mode · user@black".
+- **G-ARC-5** Listener, exactly agentw-gui's `listen-config.js`: mode
+  `socket` (default) at `${XDG_RUNTIME_DIR:-~/.local/state}/backup-suite-gui/gui-4337.sock`
+  (0600 in a 0700 directory owned by the user; a wider directory owned by
+  the user is tightened to 0700, any other owner stops the start); `tcp`
+  (127.0.0.1:4337) and `both` are opt-in with the warning "This GUI is
+  reachable by every local account on the server." The socket path may be
+  overridden by `BACKUP_SUITE_GUI_SOCKET`. No public listener ever exists.
+- **G-ARC-6** Several users on one server each install their own Backup
+  Suite (user mode) and their own GUI. Their sockets live in their own
+  runtime directories and never collide; only tcp mode needs a different
+  port per user (Settings → Tunnel Manager → port).
+- **G-ARC-7** Browser checks on the HTTP API: `Host` must be
+  `127.0.0.1`, `localhost` or `[::1]`, with **any** port (Tunnel Manager
+  chooses the local port); otherwise 403. Every changing request (`POST`,
+  `PUT`, `DELETE`) must carry an `Origin` whose host and port equal the
+  request's own `Host`, and the per-page CSRF token from `GET /api/session`.
+  Tunnel Manager's event endpoint (`POST /api/events`) needs no CSRF token
+  (Tunnel Manager sends no `Origin`), but still passes the `Host` check.
+- **G-ARC-8** Instance name and ports: remote "port" 4337 (the instance
+  name, and the TCP port in tcp mode), preferred local port 14337, range
+  14337–14437 (owner, R5). agentw-gui uses 4317/14317.
 
-  ```
-  Match User backup-gui
-      PasswordAuthentication no
-      KbdInteractiveAuthentication no
-      AuthenticationMethods publickey
-      AllowTcpForwarding local
-      AllowStreamLocalForwarding local
-      PermitTTY no
-      X11Forwarding no
-      AllowAgentForwarding no
-      PermitTunnel no
-      GatewayPorts no
-      ForceCommand /usr/sbin/nologin
-  ```
+### 3.1 System mode: the root broker
 
-  Setup validates the file with `sshd -t` before reloading sshd, and removes it
-  again if validation fails.
-- **G-ARC-3** The GUI never reads `/etc/backup-suite` or
-  `/var/lib/backup-suite` directly and never runs `rclone`, `sudo`, or
-  `systemctl`. Everything that needs root goes through the **control
-  broker**: a systemd socket-activated root helper, `bin/backup-control.sh`,
-  that accepts exactly the verbs in section 5 (owner decision R2: broker, not
-  sudo rules).
-- **G-ARC-4** Broker socket: `/run/backup-suite/control.sock`,
-  `SocketUser=root`, `SocketGroup=backup-suite-gui`, `SocketMode=0660`,
-  `Accept=yes`, `MaxConnections=8`. **Only `backup-gui` is a member of
-  `backup-suite-gui`.** Setup and deploy never add `user` or any other
-  account, and the deploy check fails if the group has any other member.
-- **G-ARC-5** Broker service hardening: `ProtectSystem=strict`,
-  `ReadWritePaths=/etc/backup-suite /var/lib/backup-suite
-  /etc/systemd/system/file-backup.service.d`, `PrivateTmp=yes`,
+- **G-BRK-1** Units, installed by `setup.sh` / `production-deploy.sh` in
+  system mode only: `backup-suite-control.socket`
+  (`ListenStream=/run/backup-suite/control.sock`, `SocketUser=root`,
+  `SocketGroup=backup-suite-gui`, `SocketMode=0660`, `Accept=yes`,
+  `MaxConnections=8`) and `backup-suite-control@.service`
+  (`StandardInput=socket`, `StandardOutput=socket`, `StandardError=journal`,
+  `ProtectSystem=strict`, `ReadWritePaths=/etc/backup-suite
+  /var/lib/backup-suite /etc/systemd/system`, `PrivateTmp=yes`,
   `ProtectHome=read-only`, `NoNewPrivileges=yes`, `MemoryMax=64M`,
-  `TasksMax=32`, `RuntimeMaxSec=120`, `StandardInput=socket`.
-- **G-ARC-6** The broker never returns secrets: `rclone.conf`, MySQL
-  profiles, `NOTIFY_NTFY_TOKEN`, and passwords are never read into a reply.
-  The ntfy topic URL is returned masked (`https://ntfy.sh/ab…yz`).
-- **G-ARC-7** Every broker call that changes something writes one audit line
-  to the journal (`-t backup-suite-control`) with the verb, the arguments
-  (secrets replaced by `[set]`), the result, and the GUI session ID, and
-  appends it to `/var/lib/backup-suite/gui/audit.jsonl` (newest 2000 kept).
-  The broker records the connecting process's UID from the socket
-  (`SO_PEERCRED`, read by a small helper) and refuses any UID other than
-  `backup-gui`'s.
-- **G-ARC-8** Listener (same as agentw-gui `listen-config.js`): mode
-  `socket` (default) on `/run/backup-suite-gui/gui-4337.sock` (0600 in the
-  0700 runtime directory owned by `backup-gui`); `tcp` (127.0.0.1:4337) and
-  `both` are opt-in and show the warning "This GUI is reachable by every local
-  account on the server, including the AI agent sessions." A directory or
-  socket with any other owner or wider mode stops the start with a clear
-  message. No public listener ever exists.
-- **G-ARC-9** Browser-side protection for the HTTP API: every request must
-  carry `Host: 127.0.0.1:<port>` or `localhost:<port>` (blocks DNS
-  rebinding), and every changing request (`POST`, `PUT`, `DELETE`) must carry
-  the per-page CSRF token from `GET /api/session` and a same-origin `Origin`
-  header. Tunnel Manager's event endpoint (`POST /api/events`) is exempt from
-  the CSRF token but still checks `Host`.
-- **G-ARC-10** Instance name and ports: remote "port" 4337 (the instance
-  name, and the TCP port when tcp mode is on), preferred local port 14337,
-  range 14337–14437 (owner decision R5). agentw-gui uses 4317/14317, so they
-  never collide.
+  `TasksMax=32`, `RuntimeMaxSec=120`).
+- **G-BRK-2** Who may connect: members of group `backup-suite-gui`. The
+  deploy creates the group and adds the admins named with `--gui-admin
+  <login>` (repeatable); the default is the user who ran the deploy through
+  sudo (`SUDO_USER`). Deploy prints the members. The broker reads the
+  connecting process's UID (`SO_PEERCRED`) and allows exactly the group's
+  members (root is always allowed for tests and the CLI).
+- **G-BRK-3** **Trade-off (owner decision, stated):** any process running as
+  an admin login can use these verbs, exactly as it can use the GUI. On
+  black that login is `user`, which also runs the AI agent sessions. The
+  verbs are a fixed list; none returns secrets, none writes the sources
+  file, and the audit log (G-AUD-1) records every change with the caller's
+  UID. On a server where that login already has passwordless sudo, this
+  adds no ability it did not have.
+
+### 3.2 Common to both modes
+
+- **G-AUD-1** Every verb that changes something writes one audit line to
+  the journal (`logger -t backup-suite-control`) and appends it to
+  `<STATE_DIR>/gui/audit.jsonl` (newest 2000 kept): time, mode, caller UID
+  and login, GUI session ID, verb, arguments (secrets replaced by `[set]`),
+  result.
+- **G-SEC-1** No reply ever contains secrets: `rclone.conf`, MySQL
+  profiles, `NOTIFY_NTFY_TOKEN`, passwords. The ntfy topic URL is returned
+  masked (`https://ntfy.sh/ab…yz`).
+- **G-SEC-2** Two changing verbs never run at once: `flock
+  <STATE_DIR>/gui/control.lock` for every changing verb.
+- **G-SEC-3** Timeouts: reads 10 s, changes 60 s; a timeout is reported and
+  never retried automatically.
 
 ## 4. Resource budget (the GUI must not become a load itself)
 
-- **G-RES-1** Unit limits: `MemoryHigh=96M`, `MemoryMax=160M`,
+- **G-RES-1** User unit drop-in: `MemoryHigh=96M`, `MemoryMax=160M`,
   `TasksMax=64`, `CPUQuota=50%`, `Nice=10`. Healthy target: under 60 MB RSS
   while idle.
-- **G-RES-2** With no browser connected, the server polls nothing except
-  what Tunnel Manager's event poll asks for; broker calls happen only on
-  demand.
+- **G-RES-2** With no browser connected, the GUI runs no control verbs
+  except what Tunnel Manager's event poll needs (`events.since`, at most
+  once per 5 s, and only if `events.jsonl` changed: the GUI compares its
+  size and mtime through the verb's cheap `stat` mode).
 - **G-RES-3** With clients connected, live status is read **once** per
-  interval (default 5 s, settable 2–60 s) and fanned out to every tab over one
-  Server-Sent Events stream (`GET /api/stream`), like agentw-gui's coalesced
-  observations. Tabs never poll on their own.
-- **G-RES-4** Large reads are bounded: log tails ≤ 2000 lines and ≤ 1 MiB per
-  reply, history ≤ 500 rows, failure records ≤ 1 MiB each; the broker
-  truncates and says so.
+  interval (default 5 s, settable 2–60 s) and fanned out to every tab over
+  one Server-Sent Events stream (`GET /api/stream`). Tabs never poll on
+  their own.
+- **G-RES-4** Large reads are bounded: log slices ≤ 2000 lines and ≤ 1 MiB,
+  history ≤ 500 rows, failure records ≤ 1 MiB; replies say `truncated: true`.
 - **G-RES-5** A small watchdog (same pattern as `agentw-gui-watchdog`) stops
   the GUI unit if it stays above 140 MB for 15 s or above 56 tasks, and
-  records why. The backup itself is never touched by the GUI watchdog.
+  records why. It never touches the backup.
 
-## 5. Control broker verbs
+## 5. Control verbs (`bin/backup-control.sh`)
 
-Request: one JSON line ≤ 64 KiB, e.g. `{"verb":"profile.set","args":{"mode":"adaptive","top":"moderate","floor":"slow"},"session":"…","expect_sha":"…"}`.
-Reply: one JSON object `{ok, data | error:{code,message}}`. Unknown verbs and
-arguments outside the listed values fail with `invalid_request` and change nothing.
+Request: one JSON line ≤ 64 KiB on stdin, for example
+`{"verb":"profile.set","args":{"mode":"adaptive","top":"moderate","floor":"slow"},"session":"…"}`.
+Reply: one JSON object on stdout, `{"ok":true,"data":…}` or
+`{"ok":false,"error":{"code":"…","message":"…"}}`. Unknown verbs or
+arguments outside the listed values fail with `invalid_request` and change
+nothing. Unit names below are the Backup Suite units in the current mode's
+scope (`systemctl` or `systemctl --user`).
 
-| Verb | Root work it does | Mutates |
+| Verb | Work | Changes |
 |---|---|---|
-| `status` | `systemctl show` (fixed properties) for `file-backup.service/.timer`, `database-backup.service/.timer`, `database-size-check.service/.timer`, `backup-suite-watchdog@file-backup.service`; reads `watchdog/file-backup.service.status`, `adaptive-profile.state`, run progress (G-RUN-3), `/proc/meminfo` | no |
-| `history` `{limit}` | reads `watchdog/history.tsv` (15 columns) | no |
-| `runlog` `{run: "latest"\|started_utc, lines}` | slices `logs/backup-file.log` between "File backup started at" markers | no |
-| `journal` `{unit, lines}` | `journalctl -u <allowed unit>` / `-t backup-watchdog`, bounded | no |
-| `failures.list` / `failures.read {name}` | lists / reads `failures/*.log` (name must match `^[0-9TZ]+-[A-Za-z0-9._-]+\.log$`) | no |
-| `deferrals` | reads `active-files/*.tsv` | no |
-| `sources.get` | `file-sources.conf` parsed into rows plus its raw text and SHA-256 | no |
-| `excludes.list` | for each enabled source, the `.backup-excludes` files found by the same discovery as `file-backup.sh` (path, size, first 200 lines; at most 200 files) | no |
-| `profile.show` | `backup-profile.sh show --json` (new flag, section 11) | no |
-| `profile.set` `{mode: fixed, profile}` / `{mode: adaptive, top, floor}` | `backup-profile.sh set` / `adaptive` | yes |
-| `profile.limits` `{mode: fixed\|auto}` | `backup-profile.sh limits` | yes |
-| `profile.override` `{profile, key, value\|unset}` | `backup-profile.sh override` (key from `FILE_PROFILE_OVERRIDE_KEYS`, value validated per key) | yes |
-| `profile.preview` `{…same as set}` | `backup-profile.sh print-dropin` for the proposed setup | no |
-| `config.get` | the allowlisted keys of `global.conf` (G-SET-2), secrets masked | no |
-| `config.set` `{changes:{KEY:value}, expect_sha}` | edits only allowlisted keys (same awk + `cat >` method as `backup-profile.sh`, keeps symlink/inode), timestamped copy in `gui/config-backups/` first; 409 `config_conflict` if the file's SHA-256 ≠ `expect_sha` | yes |
-| `backup.start` `{what: files\|databases}` | `systemctl start --no-block file-backup.service` / `database-backup.service` | yes |
-| `backup.stop` | `systemctl stop --no-block file-backup.service` | yes |
-| `timer.set` `{timer, enabled}` | `systemctl enable --now` / `disable --now` for the three timers | yes |
+| `status` | fixed `systemctl show` properties for `file-backup.service/.timer`, `database-backup.service/.timer`, `database-size-check.service/.timer`, `backup-suite-watchdog@file-backup.service`; the watchdog status file, adaptive state, run progress (G-RUN-3), server memory | no |
+| `history {limit}` | `watchdog/history.tsv` (15 columns) | no |
+| `runlog {run: "latest"\|started_utc, lines}` | the run's slice of `logs/backup-file.log` | no |
+| `journal {source, lines}` | `journalctl` for one allowed unit or `-t backup-watchdog`, bounded | no |
+| `failures.list` / `failures.read {name}` | `failures/*.log` (name must match `^[0-9TZ]+-[A-Za-z0-9._-]+\.log$`) | no |
+| `deferrals` | `active-files/*.tsv` | no |
+| `sources.get` | `file-sources.conf` rows, raw text and SHA-256 | no |
+| `excludes.list` | the `.backup-excludes` files of enabled sources (path, size, first 200 lines; ≤ 200 files) | no |
+| `profile.show` | `backup-profile.sh show --json` | no |
+| `profile.preview {…as set}` | `backup-profile.sh print-dropin` for the proposed setup | no |
+| `profile.set {mode: fixed, profile}` / `{mode: adaptive, top, floor}` | `backup-profile.sh set` / `adaptive` | yes |
+| `profile.limits {mode: fixed\|auto}` | `backup-profile.sh limits` | yes |
+| `profile.override {profile, key, value \| unset: true}` | `backup-profile.sh override` | yes |
+| `config.get` | allowlisted `global.conf` keys (G-SET-2), secrets masked, plus the file's SHA-256 | no |
+| `config.set {changes, expect_sha}` | allowlisted keys only; timestamped copy in `gui/config-backups/` first; keeps symlink and inode; `config_conflict` when the SHA-256 differs | yes |
+| `backup.start {what: files\|databases}` | `start --no-block` of the service | yes |
+| `backup.stop` | `stop --no-block file-backup.service` | yes |
+| `timer.set {timer, enabled}` | `enable --now` / `disable --now` of one of the three timers | yes |
 | `notify.test` | `notify-test.sh` | sends |
-| `events.since` `{seq}` | reads `events.jsonl` (G-EVT-1) | no |
-| `audit` `{limit}` | reads `gui/audit.jsonl` | no |
+| `events.since {seq}` / `events.stat` | `events.jsonl` after `seq` / its size and mtime | no |
+| `audit {limit}` | `gui/audit.jsonl` | no |
 
-There is **no `sources.set` verb in v1** (owner decision R3). Sources decide
-what gets backed up, so editing them waits for v1.1, after the broker, the
-audit log and the file backups have been proven in production.
-
-- **G-BRK-1** Each verb has a timeout (reads 10 s, writes 60 s); a timeout is
-  reported, never retried automatically.
-- **G-BRK-2** Profile changes are allowed while a backup runs and apply as
-  `backup-profile.sh apply` does (live cgroup limits, never lowering
-  `memory.max` below use + 64 MiB).
-- **G-BRK-3** Two write calls never run at once: the broker takes
-  `flock /var/lib/backup-suite/gui/broker.lock` for writes.
+There is **no verb that writes `file-sources.conf` in v1** (owner, R3).
 
 ## 6. Screens
 
-Layout: top bar; a left navigation column (the agentw-gui project-list
-column); a main panel; and a right **Details** panel for logs and
-explanations that can be docked, maximized or closed. On phones a bottom
-panel switcher replaces the columns, as in agentw-gui.
+Layout: top bar; a left navigation column; a main panel; and a right
+**Details** panel for logs and explanations that can be maximized or closed.
+On phones a panel switcher replaces the columns, as in agentw-gui.
 
 ### 6.1 Overview (default)
 
-- **G-OV-1** Status card for file backups: Idle / Running / Paused by
-  watchdog / Stopping / Failed (last run). When running: started at, elapsed
-  time, current project and "project N of M" (G-RUN-3), counts so far
-  (synced, skipped, deferred, failed).
-- **G-OV-2** Resource gauges, live, from the watchdog status file: backup
-  memory against MemoryHigh and MemoryMax (two marks on one bar), non-reclaimable
-  memory, swap against its limit, CPU % against the CPU quota, tasks against
-  TasksMax, disk read/write this run; server RAM available % and memory
-  pressure (PSI full avg10) with the watchdog's thresholds drawn on the bars.
-  Colors: green below "contain" (80 %), amber up to "kill" (90 %), red above.
+- **G-OV-1** File backup status: Idle / Running / Paused by watchdog /
+  Stopping / Failed (last run). When running: started at, elapsed, current
+  project and "project N of M" (G-RUN-3), counts so far.
+- **G-OV-2** Live gauges from the watchdog status: backup memory against
+  MemoryHigh and MemoryMax, non-reclaimable memory, swap, CPU against the
+  quota, tasks, disk read/write this run; server RAM available and memory
+  pressure, with the watchdog thresholds drawn on the bars. Green below
+  contain (80 %), amber to kill (90 %), red above; each gauge also shows the
+  number and a word.
 - **G-OV-3** Profile card: "Fixed: moderate" or "Adaptive moderate ↔ slow —
-  now slow", the reason for the last step and when it happened, plus a
-  "Change…" button that opens 6.4.
-- **G-OV-4** Schedule card: each timer's enabled/active state, last run,
-  next run, with an amber warning when `file-backup.timer` is disabled or
-  inactive ("Scheduled file backups are OFF").
-- **G-OV-5** Last run card: outcome, duration, peak memory, average CPU,
-  events (contained, paused, stepped down, stopped), with "Open run" (6.2).
-- **G-OV-6** Database backups card: last run result and time for
+  now slow", with a "Change…" button (6.4).
+- **G-OV-4** Schedule card: each timer's state, last and next run; an amber
+  warning when `file-backup.timer` is disabled or inactive.
+- **G-OV-5** Last run card: outcome, duration, peaks, watchdog events, "Open
+  run".
+- **G-OV-6** Database backups card: last result and time of
   `database-backup.service` and `database-size-check.service`.
-- **G-OV-7** Action buttons: **Start file backup now**, **Stop file
-  backup**, **Start database backup now**, **Send test notification**. Each
-  opens the confirm dialog stating exactly what happens (e.g. "Stops the
-  running backup. Finished projects stay backed up; the current project is
-  redone next run. Nothing on Google Drive is deleted.").
-- **G-OV-8** A live mini-chart (inline SVG, no chart library) of backup
-  memory and CPU over the last 30 minutes, kept in the server's memory
-  (360 points × 5 s) and sent to new tabs on connect.
+- **G-OV-7** Actions: **Start file backup now**, **Stop file backup**,
+  **Start database backup now**, **Send test notification**, each behind a
+  confirm dialog that says exactly what happens.
+- **G-OV-8** Live mini-chart (inline SVG) of backup memory and CPU for the
+  last 30 minutes, kept in server memory (360 × 5 s) and sent to new tabs.
 
 ### 6.2 Runs
 
-- **G-RUN-1** Table from `history.tsv`, newest first: started, duration,
-  profile, outcome, peak RAM, peak non-reclaimable, peak swap, avg/peak CPU,
-  peak tasks, disk read/write, watchdog events. Sortable; filter by outcome
+- **G-RUN-1** `history.tsv` table, newest first, sortable, filter by outcome
   and by "had watchdog events".
-- **G-RUN-2** Run detail in the Details panel: the run's own durable log
-  slice (`runlog`) with search, a "Key errors" summary (the same
-  classification as `notify-failure.sh`), the failure record if one exists,
-  and Download (plain `.log`) and Copy buttons.
-- **G-RUN-3** Progress: `file-backup.sh` writes
-  `/var/lib/backup-suite/run/progress.env` at the start of the run and
-  before each project (run start, projects total, index, current label,
-  counts, profile). Backend change, section 11.
-- **G-RUN-4** Failure records list (`failures.list`) with the same reader.
+- **G-RUN-2** Run detail in the Details panel: the run's log slice with
+  search, key errors, the failure record if any, Download and Copy.
+- **G-RUN-3** Progress: `file-backup.sh` writes `<STATE_DIR>/run/progress.env`
+  at the start and before each project (started, total, index, label,
+  counts, profile).
+- **G-RUN-4** Failure records list with the same reader.
 
 ### 6.3 Projects and changing files
 
-- **G-PRJ-1** Per-project table built from the latest run log: label, source,
-  destination, last result (synced / skipped changed / deferred / failed /
-  migration required), and the time of the last successful sync.
-- **G-PRJ-2** Changing files: every deferred path from `active-files/*.tsv`
-  with project, consecutive deferral count, first and last seen; rows at or
-  above `FILE_ACTIVE_MAX_DEFERRALS` are highlighted with the advice text
-  from `docs/RESOURCES.md` ("exclude it or stop its writer briefly").
+- **G-PRJ-1** Per-project table from the latest run log: label, source,
+  destination, last result.
+- **G-PRJ-2** Changing files from `active-files/*.tsv`, highlighted at or
+  above `FILE_ACTIVE_MAX_DEFERRALS`, with the advice from `docs/RESOURCES.md`.
 
 ### 6.4 Profiles and limits
 
-- **G-PRF-1** The five choices of `backup-profile.sh choose`, as cards:
-  Fixed slow, Fixed moderate, Fixed fast, **Adaptive moderate ↔ slow**
-  (marked "recommended / current"), Adaptive fast ↔ moderate ↔ slow.
-- **G-PRF-2** For each profile, the resolved limits exactly as
-  `backup-profile.sh show` prints them (CPU % of one core and of the host,
-  nice, MemoryHigh/Max, swap, tasks, I/O class/weight, transfers, checkers,
-  buffer, API calls/s, bandwidth, source of each limit: built-in / auto /
-  override), plus "Observed: last run peak … RAM, avg … CPU, … min".
-- **G-PRF-3** Limits mode switch: Fixed (built-in table) or Auto (scaled to
-  this host: 5/10/20 % RAM, 3/6/12 % CPU), showing the resulting numbers
-  before saving.
-- **G-PRF-4** Per-profile overrides: an editable grid (profile × key) with
-  unit-aware inputs (`512M`, `25%`, integers), the default shown as a
-  placeholder, and a reset (unset) button per cell.
-- **G-PRF-5** Before saving, the Details panel shows the systemd drop-in
-  that will be written (`profile.preview`) and what applies now versus from
-  the next run or project. Save → confirm → `profile.*` → re-read and show the
-  applied state.
+- **G-PRF-1** The five choices of `backup-profile.sh choose` as cards.
+- **G-PRF-2** Each profile's resolved limits as `backup-profile.sh show`
+  prints them, with the source of each value and the observed usage.
+- **G-PRF-3** Limits mode switch (fixed / auto) with the resulting numbers.
+- **G-PRF-4** Per-profile override grid with unit-aware inputs and unset.
+- **G-PRF-5** Preview of the drop-in before saving; confirm; re-read and show
+  the applied state.
 
 ### 6.5 Watchdog
 
-- **G-WD-1** Live watchdog state, the last action (`last-action` file), and
-  the watchdog journal (`journal -t backup-watchdog`).
-- **G-WD-2** Editable thresholds, grouped as in `docs/RESOURCES.md`:
-  sampling (interval), containment (contain/release %), stop (kill %,
-  samples, swap %, kill grace), server protection (minimum and critical
-  available %, PSI full, maximum pause), adaptive steps (step-down
-  available %, PSI, step-up available %, step-up seconds, cooldown). Every
-  field shows its default and allowed range and why it exists; a change
-  takes effect from the next backup run (the watchdog reads its config when
-  it starts). The page says that.
-- **G-WD-3** Validation keeps the order sane: release < contain < kill ≤ 99;
-  critical < minimum available; step-up available > step-down available.
+- **G-WD-1** Live watchdog state, last action, watchdog journal.
+- **G-WD-2** Thresholds grouped as in `docs/RESOURCES.md`, each with its
+  default, range and purpose; "applies from the next backup run".
+- **G-WD-3** Validation: release < contain < kill ≤ 99; critical < minimum
+  available; step-up available > step-down available.
 
 ### 6.6 Notifications (ntfy)
 
-- **G-NTF-1** Shows whether failure notifications are on, the masked topic
-  URL, priority, title prefix, and whether a token is set (yes/no only).
-- **G-NTF-2** Edit: enabled, topic URL (validated `https://…`), priority,
-  title prefix, attach details (on/off), message size limit. The token can
-  be **replaced or cleared** but is never displayed.
-- **G-NTF-3** **Send test notification** (`notify.test`) and the result
-  ("sent with attachment" or the error).
+- **G-NTF-1** Enabled, masked topic, priority, title prefix, token set yes/no.
+- **G-NTF-2** Edit those; the token can be replaced or cleared, never shown.
+- **G-NTF-3** Send test notification and show the result.
 
 ### 6.7 Sources (read-only in v1)
 
-- **G-SRC-1** Table view of `file-sources.conf` (enabled, label, source
-  path, destination mode/value, stop file, isolation), with the raw text in a
-  read-only view, Copy and Download buttons, and the file's path and
-  last-modified time.
-- **G-SRC-2** No editing in v1 (owner decision R3). The panel says: "Sources
-  are read-only in this version. Edit
-  `/etc/backup-suite/file-sources.conf` on the server; editing here arrives
-  in v1.1." There is no save button and no broker verb that writes the file.
-- **G-SRC-3** Per-project exclude files (`.backup-excludes`), read-only, from
-  `excludes.list`: path, size, contents. Editing them stays in each project
-  (or in agentw-gui).
+- **G-SRC-1** Table of `file-sources.conf`, the raw text read-only, Copy,
+  Download, path and modified time.
+- **G-SRC-2** No editing in v1 (owner, R3); the panel says where to edit
+  and that editing arrives in v1.1. No save control, no writing verb.
+- **G-SRC-3** Per-project `.backup-excludes` files, read-only.
 
 ### 6.8 Activity and audit
 
-- **G-ACT-1** The bell lists this GUI's events (section 7), all severities,
-  newest first, with "new since you last looked", as agentw-gui's Activity tab.
-- **G-ACT-2** Audit view: every change made through the GUI or broker
-  (`audit`), with time, verb, arguments, result.
+- **G-ACT-1** The bell lists all events, newest first, "new since you last
+  looked".
+- **G-ACT-2** Audit view of `audit.jsonl`.
 
 ## 7. Events and notifications
 
-- **G-EVT-1** New append-only `/var/lib/backup-suite/events.jsonl`, one
-  object per line `{seq, id, created_at, severity, category, title,
-  message, unit}`, written by `ntfy_publish` in `bin/notify-lib.sh` (so every
-  ntfy alert also becomes an event) and by the broker for GUI actions.
-  The newest 1000 lines are kept.
+- **G-EVT-1** Append-only `<STATE_DIR>/events.jsonl`, one object per line
+  `{seq, id, created_at, severity, category, title, message, unit}`, written
+  by `ntfy_publish` in `bin/notify-lib.sh` (every ntfy alert, whether or not
+  ntfy is configured or reachable) and by `backup-control.sh` for changes
+  made through the GUI. Newest 1000 lines kept.
 - **G-EVT-2** Categories: `run-finished`, `run-failed`, `watchdog-contain`,
   `watchdog-pause`, `watchdog-stop`, `profile-step`, `changing-files`,
-  `schedule-off`, `gui-action`. Severity from ntfy priority:
+  `schedule-off`, `gui-action`, `test`. Severity from ntfy priority:
   urgent/high → error, default → warning, low/min → info.
-- **G-EVT-3** `POST /api/events` implements Tunnel Manager `per-consumer-v1`
-  exactly as the Node sample and agentw-gui do: requests carry
-  `{"action":"consume","consumer_id",…,"delivery_mode":"per-consumer-v1"}`
-  and every reply echoes `delivery_mode` and `consumer_id`; the first consume
-  returns `baseline: true` with no events; `{"action":"ack","consumer_id",
-  "event_ids"}` acknowledges, and `acknowledged: 0` is idempotent success;
-  events older than 180 s from `created_at` are never delivered; consumer
-  state is persisted under the GUI's state directory so a GUI restart replays
-  nothing.
-- **G-EVT-4** `GET /api/events?cursor=` lists events without consuming them.
-- **G-EVT-5** Event `actions` contain only `{kind: "url", target:
-  "/#runs/<id>"}`-style **relative** links into the GUI. Tunnel Manager
-  resolves them against the app's URL and refuses absolute or `//` targets;
-  the GUI never emits those and never emits commands.
-- **G-NOT-1** Settings → Notifications, as agentw-gui: Tunnel Manager
-  delivery, browser delivery, "Prefer Tunnel Manager notifications when
-  active", and one switch per category (G-EVT-2), plus the "Enable browser
-  notifications" / "Test browser notification" button.
-- **G-NOT-2** Tunnel Manager native notices show **warnings and errors
-  only** (owner decision R4): the bundle sets `minimum_severity = "warning"`.
-  "Run finished" and other info events still reach the bell and the Activity
-  list. The category switches let the owner change this later.
-- **G-NOT-3** ntfy stays the off-server alert channel; the GUI channels are
-  extra and can be switched off independently.
+- **G-EVT-3** `POST /api/events`, Tunnel Manager `per-consumer-v1`:
+  `consumer_id` required; every reply echoes `delivery_mode` and
+  `consumer_id`; first consume returns `baseline: true` and no events;
+  `action: "ack"` with `event_ids`, `acknowledged: 0` is success; events
+  older than 180 s from `created_at` are never delivered; consumer state is
+  persisted in the GUI's data directory so a restart replays nothing.
+- **G-EVT-4** `GET /api/events?cursor=` lists without consuming.
+- **G-EVT-5** Event `actions` are only relative `{kind: "url", target:
+  "/#runs/<id>"}` links; never absolute, never commands.
+- **G-NOT-1** Settings → Notifications as agentw-gui: Tunnel Manager
+  delivery, browser delivery, prefer Tunnel Manager when active, one switch
+  per category, Enable/Test browser notifications.
+- **G-NOT-2** Tunnel Manager native notices: warnings and errors only
+  (owner, R4; bundle `minimum_severity = "warning"`). Info events reach the
+  bell and Activity list.
+- **G-NOT-3** ntfy stays the off-server channel; GUI channels are extra.
 
 ## 8. Settings dialog
 
-Tabs (agentw-gui pattern, Cancel / Save Settings at the bottom):
+Tabs: **General** (refresh interval 2–60 s, chart window 10–120 min, time
+display UTC/local, theme system/light/dark, backend auto/user/system),
+**Notifications** (G-NOT-1), **Tunnel Manager** (listener mode, socket path,
+tcp port, Tunnel Manager backend `user@host`, local port preference),
+**GUI resource limits** (G-RES-1/5, after restart), **Server settings**
+(`config.set`, each change confirmed and audited).
 
-1. **General**: refresh interval (2–60 s), chart window (10–120 min), time
-   display (UTC / browser local), theme (system / light / dark).
-2. **Notifications**: G-NOT-1.
-3. **Tunnel Manager**: GUI listener (socket / tcp / both, the socket path,
-   the tcp warning, "Restart GUI to apply"), the SSH login and host used in
-   the generated bundle (G-CON-1), local port preference.
-4. **GUI resource limits**: G-RES-1/G-RES-5 values (apply after GUI
-   restart).
-5. **Server settings** (writes `global.conf` through `config.set`, each
-   change confirmed and audited): the allowlist below.
-
-- **G-SET-1** GUI-only settings live in `/var/lib/backup-suite-gui/config.json`
-  (the unit's `StateDirectory`).
+- **G-SET-1** GUI settings live in `${XDG_CONFIG_HOME:-~/.config}/backup-suite-gui/config.json`;
+  event consumer state and the chart buffer snapshot in
+  `${XDG_STATE_HOME:-~/.local/state}/backup-suite-gui/`.
 - **G-SET-2** `config.set` allowlist: `FILE_BACKUP_RUNTIME_MAX_SEC`,
   `FILE_RETENTION_DAYS`, `FILE_ACTIVE_TRACKING_ENABLED`,
   `FILE_ACTIVE_WINDOW_SECONDS`, `FILE_ACTIVE_MAX_DEFERRALS`, all
   `WATCHDOG_*` keys, `NOTIFY_FAILURES_ENABLED`, `NOTIFY_NTFY_TOPIC_URL`,
   `NOTIFY_NTFY_TOKEN` (write-only), `NOTIFY_NTFY_PRIORITY`,
   `NOTIFY_NTFY_TITLE_PREFIX`, `NOTIFY_NTFY_ATTACH_DETAILS`,
-  `NOTIFY_NTFY_MESSAGE_MAX_BYTES`. Profile keys only through `profile.*`.
-  Remote, rclone, source and MySQL settings are not editable from the GUI.
-- **G-SET-3** Every server setting shows its current value, its default from
+  `NOTIFY_NTFY_MESSAGE_MAX_BYTES`. Profile keys only through `profile.*`;
+  remote, rclone, source and MySQL settings are not editable.
+- **G-SET-3** Each server setting shows its value, its default from
   `config/global.conf.example`, and a one-line explanation.
 
 ## 9. Ways to connect (⇩ button)
 
-- **G-CON-1** Dialog as in agentw-gui: Tunnel Manager download link, the
-  generated bundle (shown and downloadable as
-  `backup-suite-gui-tunnel-manager.toml`), launchers for Windows (`.cmd`),
-  macOS and Linux (`.sh`), Android (`.txt`), and the manual line
-  `ssh -N -L 127.0.0.1:14337:/run/backup-suite-gui/gui-4337.sock backup-gui@<host>`
-  with Copy buttons. The dialog has an editable **Tunnel Manager backend**
-  field holding `backend_id`, with the hint "must be the user@host of your
-  Tunnel Manager profile for this server". Tunnel Manager compares it
-  textually with the profile's canonical `user@host` and refuses the import
-  on any difference (an alias such as `black` ≠ `137.74.7.68`). The login
-  part is always `backup-gui`; the host defaults to the saved value from
-  Settings → Tunnel Manager, else the server's primary IPv4 address. (The
-  host the browser used is always `127.0.0.1` through the tunnel, so it
-  cannot serve as the default.) The value is saved for next time.
-- **G-CON-2** Generated bundle (socket mode). `remote_socket` is the
-  listener's actual socket path at the time of the request (never a
-  constant), and there is no `cursor_store` line (Tunnel Manager ignores it
-  and keeps cursors per installation, backend and tunnel):
+- **G-CON-1** Dialog as agentw-gui: Tunnel Manager download link, the
+  bundle (shown, downloadable as `backup-suite-gui-tunnel-manager.toml`),
+  launchers for Windows, macOS, Linux and Android, the manual line
+  `ssh -N -L 127.0.0.1:14337:<socket> <login>@<host>`, Copy buttons. An
+  editable **Tunnel Manager backend** field holds `backend_id`, hint: "must
+  be the user@host of your Tunnel Manager profile for this server" (Tunnel
+  Manager compares it textually and refuses the import on any difference).
+  Default: the GUI's login and the saved host, else the server's primary
+  IPv4 address; the value is saved.
+- **G-CON-2** Generated bundle. `remote_socket` is the listener's actual
+  path at request time; `unit` is the actual unit name; no `cursor_store`:
 
 ```toml
 format = "tunnel-manager-tunnel"
 version = 1
-backend_id = "backup-gui@137.74.7.68"
+backend_id = "user@137.74.7.68"
 
 [tunnel]
 name = "backup-suite-gui"
-remote_socket = "/run/backup-suite-gui/gui-4337.sock"
+remote_socket = "/run/user/1000/backup-suite-gui/gui-4337.sock"
 
 [tunnel.local]
 bind_host = "127.0.0.1"
@@ -476,159 +425,143 @@ suppress_browser_duplicates = true
 include_detailed_app_messages = true
 
 [tunnel.remote_service]
-# systemd keeps backup-suite-gui.service running (Restart=always). The
-# backup-gui account is forwarding-only and cannot run systemctl.
-enabled = false
+enabled = true
+provider = "systemd-user"
+unit = "backup-suite-gui-4337.service"
+policy = "start-if-stopped"
+monitor_interval = "30s"
+command_timeout = "15s"
+start_timeout = "60s"
+restart_limit = 3
+restart_window = "10m"
+stop_on_tunnel_stop = false
 ```
 
-  In tcp mode `remote_socket` is replaced by `remote_host = "127.0.0.1"` and
-  `remote_port = 4337`.
-- **G-CON-3** The bundle and launchers are generated per request from the
-  current listener settings and the saved backend; they contain no
-  credentials, no `ssh_options`, no executable launch and no local actions.
-- **G-CON-4** First import (before any tunnel exists, so before the dialog
-  can be opened): `sudo /opt/backup-suite/gui/scripts/backup-suite-gui-server
-  bundle --backend backup-gui@<host>` prints the same bundle on the server,
-  using the same generator.
-- **G-CON-5** Tunnel Manager setup for the owner: a **new** Tunnel Manager
-  profile for `backup-gui@<host>` with its own managed key (not the existing
-  `User_Black` profile, which logs in as `user`). The key's public line is
-  installed by the operator into `/var/lib/backup-gui/.ssh/authorized_keys`
-  with the `restrict,port-forwarding` prefix.
+  (The path shown is an example from uid 1000; the generator uses the
+  running service's real path.) In tcp mode `remote_socket` becomes
+  `remote_host = "127.0.0.1"` and `remote_port = <tcp port>`.
+- **G-CON-3** Bundle and launchers are generated per request; they contain
+  no credentials, `ssh_options`, executable launch or local actions.
+- **G-CON-4** First import: `gui/scripts/backup-suite-gui-server bundle
+  [--backend user@host]` prints the same bundle on the server.
+- **G-CON-5** Tunnel Manager uses the owner's normal profile for the admin
+  login (on black: `User_Black`, login `user`).
 
 ## 10. Look and feel
 
-- **G-UI-1** Colors, fonts, radius, shadows, button styles copied from
-  agentw-gui `public/styles.css` `:root` tokens. Theme setting: system,
-  light, dark (owner decision R6). A complete dark set is defined under
+- **G-UI-1** agentw-gui's `:root` tokens; theme system / light / dark
+  (owner, R6), every token defined for both themes, dark under
   `@media (prefers-color-scheme: dark)` guarded by
-  `:root:not([data-theme="light"])` and again under `:root[data-theme="dark"]`;
-  every token has both values. Text, buttons, inputs, focus rings, gauges and
-  chart lines meet WCAG AA contrast (4.5:1 text, 3:1 large text and UI
-  parts) in both themes.
-- **G-UI-2** Top bar, left to right: ⟳ Reload, ⚙ Settings, **Actions**
-  (Start/Stop/Test menu), ⇩ Ways to connect, Reset Panels, runtime label
-  "local Linux · black", then a state chip (Idle / Running 42 % · moderate /
-  Paused) in the middle, and the brand "Backup-Suite-Gui" with its version
-  at the right. Narrow screens collapse extra buttons into `>>`.
-- **G-UI-3** Every panel has a titlebar with its name, a `?` help button
-  (floating help panel, text from `docs/RESOURCES.md` / `OPERATIONS.md`
-  sections), and maximize/restore; the Details panel can also dock left or
-  right or close.
-- **G-UI-4** Numbers use units humans read: MiB/GiB, `%` of limit, minutes;
-  times in UTC with the browser-local time on hover (setting can swap them).
-- **G-UI-5** Confirm dialog "Please confirm" before every server change,
-  naming the exact effect and whether it applies now or next run. Errors from
-  the broker are shown with their message and code, never swallowed.
-- **G-UI-6** Works from 390 px wide (agentw-gui's `--app-min-width`) with
-  the responsive panel switcher; no horizontal page scroll.
-- **G-UI-7** Keyboard reachable, visible focus rings, `aria-label` on icon
-  buttons; state never shown by color alone (each gauge also shows the
-  number and a word).
-- **G-UI-8** PWA manifest, 192/512 icons, a service worker that caches only
-  static assets (never API replies).
-- **G-UI-9** Connection loss (tunnel down) shows the agentw-gui-style
-  heartbeat warning and clears itself when the stream reconnects.
+  `:root:not([data-theme="light"])` and under `:root[data-theme="dark"]`;
+  WCAG AA (4.5:1 text, 3:1 UI parts) in both.
+- **G-UI-2** Top bar: ⟳ Reload, ⚙ Settings, **Actions**, ⇩ Ways to connect,
+  Reset Panels, the mode label ("system mode · black"), a state chip, and the
+  brand "Backup-Suite-Gui" with version; `>>` overflow on narrow screens.
+- **G-UI-3** Panel titlebars with `?` help (floating panel) and maximize.
+- **G-UI-4** Human units (MiB/GiB, % of limit, minutes); UTC with local time
+  on hover (swappable).
+- **G-UI-5** "Please confirm" before every change, naming the effect and
+  when it applies; errors shown with message and code.
+- **G-UI-6** Works from 390 px wide, no horizontal page scroll.
+- **G-UI-7** Keyboard reachable, visible focus, `aria-label` on icon
+  buttons, state never by color alone.
+- **G-UI-8** PWA manifest, icons, service worker caching static assets only.
+- **G-UI-9** Connection-loss banner that clears when the stream reconnects.
 
-## 11. Backend changes needed in Backup Suite
+## 11. Backend changes in Backup Suite
 
-1. `bin/backup-control.sh` (broker), its peer-UID helper, and
-   `systemd/backup-suite-control.socket` + `backup-suite-control@.service`
-   templates; setup creates group `backup-suite-gui` and
-   `/var/lib/backup-suite/gui/`.
-2. `backup-profile.sh show --json` (machine-readable profiles, ladder,
-   current level, observed usage).
-3. `file-backup.sh` writes `run/progress.env` (G-RUN-3).
-4. `notify-lib.sh` appends to `events.jsonl` (G-EVT-1) even when ntfy is
-   off or fails.
-5. `production-deploy.sh` installs and checks the broker and GUI units:
-   socket active, `status` verb answers, group `backup-suite-gui` has exactly
-   one member (`backup-gui`), `sshd -t` passes, the GUI health answers on its
-   socket.
-6. Tests for every broker verb: allowed values, refused values, wrong peer
-   UID, secrets never in replies, `config_conflict`, audit lines, and that no
-   verb writes `file-sources.conf`.
+1. `bin/backup-control.sh` (both modes). In system mode the broker unit
+   starts it as `backup-control.sh --peer %i`: with `Accept=yes` on a Unix
+   socket, systemd names each connection's instance `<n>-<peer pid>-<peer
+   uid>` (verified on this host, systemd 255), so the caller's UID comes from
+   systemd itself and no helper program is needed.
+2. `systemd/backup-suite-control.socket.template` and
+   `backup-suite-control@.service.template`; setup/deploy in system mode
+   create group `backup-suite-gui`, add the admins (`--gui-admin`, default
+   `SUDO_USER`), install and start the socket.
+3. `backup-profile.sh show --json`.
+4. `file-backup.sh` writes `run/progress.env`.
+5. `notify-lib.sh` appends to `events.jsonl`.
+6. `production-deploy.sh` checks: socket active, `status` answers as root,
+   group members printed.
+7. Tests: every verb in a fake system root and in user mode; refused values;
+   secrets never in replies; `config_conflict`; audit lines; no verb writes
+   `file-sources.conf`; peer-UID refusal.
 
 ## 12. GUI install and operation
 
-- `gui/` directory in this repository: `server.js`, `listen-config.js`,
-  `broker-client.js`, `events.js`, `bundle.js`, `launcher-templates.js`,
-  `public/`, `test/`, `scripts/backup-suite-gui-server`
-  (`status|bundle|install`), `scripts/backup-suite-gui-watchdog`,
-  `systemd/backup-suite-gui.service.template`.
-- Installed by `production-deploy.sh` (root) to `/opt/backup-suite/gui`,
-  owned by root and read-only to `backup-gui`. The deploy creates the
-  `backup-gui` account and its home, the group, the sshd drop-in (validated
-  with `sshd -t`), and enables `backup-suite-gui.service`.
-- Operator one-time steps, given as a to-do at implementation time:
-  1. run `production-deploy.sh` (creates the account, units and sshd block);
-  2. in Tunnel Manager, create a profile for `backup-gui@<host>` with a
-     managed key and copy its public key line;
-  3. install that line into `/var/lib/backup-gui/.ssh/authorized_keys`
-     with the `restrict,port-forwarding` prefix (a helper command prints the
-     exact `sudo` line);
-  4. import the bundle from `backup-suite-gui-server bundle` and press Start.
+- `gui/` in this repository: `server.js`, `lib/` (listen config, control
+  client, events, bundle, launchers, settings), `public/`, `test/`,
+  `scripts/backup-suite-gui-server` (`install|uninstall|start|stop|restart|status|bundle|service-run`),
+  `scripts/backup-suite-gui-watchdog`.
+- `backup-suite-gui-server install` (as the admin user, no sudo): writes the
+  user unit and its drop-in with the absolute Node path, enables and starts
+  it, enables the watchdog, prints the socket path, whether linger is on, and
+  the `bundle` hint.
+- Owner steps (to-do at implementation):
+  1. install or update Backup Suite as usual (system mode: `sudo
+     ./production-deploy.sh …`, which installs the broker and adds the
+     deploying user to `backup-suite-gui`);
+  2. `gui/scripts/backup-suite-gui-server install`; `loginctl enable-linger
+     <user>` once if linger is off;
+  3. in Tunnel Manager's existing profile, import the bundle and press Start.
+- Note on group membership: the user's systemd manager keeps the groups it
+  started with. After the deploy adds the user to `backup-suite-gui`, the
+  GUI can reach the broker only after the user manager restarts (reboot, or
+  `sudo systemctl restart user@<uid>.service` when no session needs to be
+  kept). `install` and the GUI's "Backup Suite not found / permission
+  denied" page detect this and say exactly that.
 
 ## 13. Later phases (not v1)
 
-- **v1.1** Edit `file-sources.conf` in the GUI: add, disable, change, with
-  validation identical to `file-backup.sh`'s parser, a unified diff before
-  saving, a timestamped backup copy, `expect_sha` conflict check, refused
-  while a file backup runs, and audited. Starts only after v1's broker,
-  audit and `config.set` backups have run cleanly in production.
-- Restore browser (owner decision R7): list Google Drive versions of a
-  project (current and archived `--backup-dir` copies) and restore a file or
-  folder to a staging directory, never in place.
-- Database backup management (restore points, size check thresholds).
-- Run a single project now; dry run with a change preview.
-- Several servers in one GUI (agentw-gui's server profiles).
+- **v1.1** Edit `file-sources.conf`: validation identical to
+  `file-backup.sh`, diff before saving, backup copy, `expect_sha`, refused
+  while a file backup runs, audited.
+- Restore browser (owner, R7): Google Drive versions, restore to a staging
+  directory, never in place.
+- Database backup management; run one project now; dry run; several servers.
 
 ## 14. Review decisions
 
-| ID | Question | Decision (owner, 2026-10-14) |
-|---|---|---|
-| R1 | Input and output options | Same kinds as agentw-gui (section 2, last paragraph). |
-| R2 | Root access | Socket-activated broker with a fixed verb list, not sudo rules; only the dedicated GUI account may reach it; `user` is never in `backup-suite-gui` (G-ARC-1, G-ARC-4). |
-| R3 | Editing `file-sources.conf` | Read-only in v1 (table, raw text, per-project excludes); editing in v1.1 (section 13). |
-| R4 | Tunnel Manager notices | Warnings and errors only; info events go to the bell and Activity list (G-NOT-2). |
-| R5 | Names and ports | `backup-suite-gui`, 4337 / 14337 (range 14337–14437); service and socket owned by `backup-gui`; Tunnel Manager logs in as `backup-gui`. |
-| R6 | Dark theme | In v1: system, light, dark, WCAG AA in both (G-UI-1). |
-| R7 | Restore from Google Drive | Later phase. |
-| TM-1 | Login user (Tunnel Manager review, must change) | Dedicated `backup-gui` account, forwarding-only sshd block, system unit with `Restart=always`, `remote_service` disabled (G-ARC-1, G-ARC-2, G-CON-2). |
-| TM-2 | `backend_id` must match the profile (must change) | Editable field with hint, saved, plus a server-side generator for the first import (G-CON-1, G-CON-4). |
-| TM-3 | `cursor_store` has no effect | Removed from the bundle (G-CON-2). |
-| TM-4 | No hard-coded uid in `remote_socket` | Socket under `/run/backup-suite-gui/` (system unit `RuntimeDirectory`); the bundle uses the listener's actual path (G-CON-2). |
-| TM-5 | Linger precondition | Not needed: a system unit runs with nobody logged in; V15 checks it. |
+| ID | Decision |
+|---|---|
+| R1 | Input/output options: the same kinds as agentw-gui. |
+| R2 | System mode uses a socket-activated root broker with a fixed verb list, not sudo rules. Revision 3: its group holds the admins named at deploy (default `SUDO_USER`); the trade-off is stated in G-BRK-3. |
+| R3 | Sources read-only in v1; editing in v1.1. |
+| R4 | Tunnel Manager notices: warnings and errors only. |
+| R5 | `backup-suite-gui`, 4337 / 14337 (14337–14437). Revision 3: owned by the admin login. |
+| R6 | Dark theme in v1 (system / light / dark, WCAG AA). |
+| R7 | Restore from Google Drive later. |
+| Rec-3 | Copy agentw-gui's setup: user unit, `$XDG_RUNTIME_DIR` socket, owner's normal Tunnel Manager profile, `remote_service` `systemd-user`; one GUI, two backends (direct / broker). Dropped: `backup-gui` account, sshd block, jail, key handoff, capabilities endpoint. Kept: editable `backend_id`, no `cursor_store`, no hard-coded socket path, linger, Host/Origin with any port. |
 
 ## 15. Verification checklist
 
-Each item names the requirement it proves. Automated items run in
-`tests/run.sh` (broker, bash) and `gui/test/` (`node --test`, no
-dependencies); manual items are done once through Tunnel Manager.
+Automated items run in `tests/run.sh` (bash, control script) and
+`gui/test/` (`node --test`, no dependencies).
 
 | # | Check | Proves | How |
 |---|---|---|---|
-| V1 | `ps -o user= -C node` shows the GUI as `backup-gui` (no root, no `user`); as `backup-gui`, reading `/etc/backup-suite/rclone.conf` fails | G-ARC-1, G-ARC-3 | manual |
-| V2 | Unknown verb, extra argument, out-of-range value, path traversal in `failures.read` → `invalid_request`, no change, no audit "ok" line | G-ARC-3, G-BRK | automated |
-| V3 | Broker socket is `root:backup-suite-gui 0660`; `getent group backup-suite-gui` lists only `backup-gui`; the deploy check fails when another member is added | G-ARC-4 | automated + manual |
-| V4 | No reply of any verb contains the ntfy token, the unmasked topic, or `rclone.conf` content (grep of all replies in the test run) | G-ARC-6 | automated |
-| V5 | Each write verb leaves one journal line and one `audit.jsonl` line; a connection from a UID other than `backup-gui` is refused and logged | G-ARC-7 | automated |
-| V6 | Socket dir with mode 0755 or another owner → GUI refuses to start with the message | G-ARC-8 | automated |
-| V7 | Idle RSS < 60 MB after 10 min with one tab open; no broker calls with no tab open (audit/journal count) | G-RES-1/2 | manual |
-| V8 | Three tabs open → one `status` call per interval (broker call counter) | G-RES-3 | automated |
-| V9 | `runlog` with `lines=100000` returns ≤ 2000 lines and `truncated: true` | G-RES-4 | automated |
-| V10 | `config.set` with a stale `expect_sha` → 409 `config_conflict`, file unchanged; success keeps the symlink/inode and leaves a backup copy | config.set | automated |
-| V11 | No broker verb and no HTTP endpoint changes `file-sources.conf` (its SHA-256 is unchanged after the full test run); the Sources panel has no save control | G-SRC-2 | automated |
-| V12 | Overview shows "Running", project N of M and live gauges during a real run; numbers match `file-backup.service.status` | G-OV-1/2, G-RUN-3 | manual |
-| V13 | Choosing "Adaptive moderate ↔ slow" in the GUI produces the same `global.conf` keys and drop-in as `backup-profile.sh adaptive moderate slow` | G-PRF-1/5 | automated |
-| V14 | Watchdog threshold form rejects release ≥ contain and critical ≥ minimum | G-WD-3 | automated |
-| V15 | Tunnel Manager: import the bundle into the `backup-gui@<host>` profile; with nobody logged in on the server, Start → health matches `backup-suite-gui` and the WebView opens; a bundle with a different `backend_id` is refused by Tunnel Manager | G-CON-1/2/5, G-ARC-10 | manual |
-| V16 | Events: first consume `baseline: true`; replies echo `delivery_mode` and `consumer_id`; a new event is delivered once per installation; ack is idempotent; an event older than 180 s is never delivered; a GUI restart replays nothing | G-EVT-3 | automated + manual |
-| V17 | `notify.test` → ntfy message with description + attachment; the event appears in the bell; Tunnel Manager shows a native notice for a warning event and none for an info event | G-NTF-3, G-EVT-1, G-NOT-2 | manual |
-| V18 | 390 px wide in Chrome device mode: no horizontal scroll; all actions reachable | G-UI-6 | manual |
-| V19 | Theme set to system, light and dark: all three apply; automated contrast check of every token pair ≥ 4.5:1 (text) / 3:1 (UI) | G-UI-1/7 | automated + manual |
-| V20 | Stop the tunnel → connection warning; start it → warning clears, stream resumes | G-UI-9 | manual |
-| V21 | As `user` (an AI agent's account): `curl --unix-socket /run/backup-suite-gui/gui-4337.sock http://x/api/health` and a connect to `/run/backup-suite/control.sock` both fail with permission denied | G-ARC-1/4/8 | automated (deploy check) + manual |
-| V22 | As `backup-gui` over SSH: a shell, a command, a TTY, and remote (`-R`) forwarding are all refused; `-L` to the GUI socket works | G-ARC-2 | manual |
-| V23 | HTTP requests with a foreign `Host` header, or a changing request without the CSRF token or with a foreign `Origin`, are refused with 403 | G-ARC-9 | automated |
-| V24 | The generated bundle has no `cursor_store`, `remote_service.enabled = false`, `remote_socket` equal to the listener's actual path, and the saved `backend_id` | G-CON-2/3 | automated |
+| V1 | The GUI runs as the admin user (not root); no GUI code reads Backup Suite files directly (grep: all access via the control client) | G-ARC-1/2 | automated + manual |
+| V2 | Unknown verb, extra argument, out-of-range value, path traversal in `failures.read` → `invalid_request`, nothing changed | G-ARC-2, §5 | automated |
+| V3 | System mode: socket `root:backup-suite-gui 0660`; a connection from a UID outside the group is refused and logged | G-BRK-1/2 | automated + manual |
+| V4 | No reply of any verb contains the ntfy token, the unmasked topic, or `rclone.conf` content | G-SEC-1 | automated |
+| V5 | Each changing verb leaves one journal line and one `audit.jsonl` line with the caller UID | G-AUD-1 | automated |
+| V6 | Socket directory owned by someone else → GUI refuses to start; a wider own directory is tightened to 0700 | G-ARC-5 | automated |
+| V7 | Idle RSS < 60 MB after 10 min with one tab; with no tab, only `events.stat` calls | G-RES-1/2 | manual |
+| V8 | Three tabs → one `status` call per interval | G-RES-3 | automated |
+| V9 | `runlog` with `lines=100000` → ≤ 2000 lines, `truncated: true` | G-RES-4 | automated |
+| V10 | `config.set` with a stale `expect_sha` → `config_conflict`, file unchanged; success keeps symlink/inode and leaves a backup copy | §5 | automated |
+| V11 | `file-sources.conf` SHA-256 unchanged after the whole test run; Sources panel has no save control | G-SRC-2 | automated |
+| V12 | During a real run: Running, project N of M, live gauges matching the watchdog status file | G-OV-1/2, G-RUN-3 | manual |
+| V13 | GUI "Adaptive moderate ↔ slow" gives the same `global.conf` keys and drop-in as `backup-profile.sh adaptive moderate slow` | G-PRF-1/5 | automated |
+| V14 | Watchdog form rejects release ≥ contain and critical ≥ minimum | G-WD-3 | automated |
+| V15 | Tunnel Manager: import into the owner's profile; with nobody logged in (linger), Start → `start-if-stopped` starts the unit if needed, health matches, WebView opens; a mismatched `backend_id` is refused | G-CON-1/2/5, G-ARC-1 | manual |
+| V16 | Events: baseline, echo of `delivery_mode`/`consumer_id`, once per installation, idempotent ack, 180 s TTL, no replay after restart | G-EVT-3 | automated + manual |
+| V17 | Test notification → ntfy with description + attachment; bell entry; a Tunnel Manager notice for a warning event and none for an info event | G-NTF-3, G-NOT-2 | manual |
+| V18 | 390 px wide: no horizontal scroll, all actions reachable | G-UI-6 | manual |
+| V19 | Themes system/light/dark apply; token contrast check ≥ 4.5:1 / 3:1 | G-UI-1/7 | automated + manual |
+| V20 | Tunnel down → banner; back → banner clears, stream resumes | G-UI-9 | manual |
+| V21 | Same verb tests pass in user mode (direct backend, `systemctl --user` via a fake) and in system mode (fake root) | G-ARC-3 | automated |
+| V22 | `Host: evil.example` → 403; `Host: 127.0.0.1:14399` and `localhost:<any>` and `[::1]:<any>` → allowed; changing request with foreign `Origin` or no CSRF token → 403; `POST /api/events` without CSRF → allowed | G-ARC-7 | automated |
+| V23 | Bundle: no `cursor_store`, actual `remote_socket` and unit, saved `backend_id`, `remote_service` `systemd-user` | G-CON-2 | automated |
+| V24 | Mode detection: user config only → user; socket only → system; both → system with switch offered; neither → "not found" page | G-ARC-4 | automated |
