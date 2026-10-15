@@ -1566,6 +1566,70 @@ test_job_run_and_job_patterns() {
     rm -rf "$test_root"
 }
 
+test_control_job_exclude() {
+    # Changing files: exclude a file or a folder in one child project or in every
+    # project of the job; the patterns go to the job's config (escaped), the row
+    # leaves the changing list, an exclude can be removed again, and bad input is refused.
+    local test_root
+    local reply
+    local key
+    test_root=$(mktemp -d)
+    setup_control_root "$test_root"
+    mkdir -p "$test_root/source/project-b"
+    reply=$(control_call "$test_root" '{"verb":"job","args":{"name":"workspace"}}')
+    key=$(json_field "$reply" '[p["key"] for p in d["data"]["projects"] if p["project"] == "workspace/project-a"][0]')
+    printf '14\t.ai-metadata/lifecycle/state.json\n3\t.ai-metadata/lifecycle/other.json\n2\tsrc/a[1].txt\n' > "$test_root/state/active-files/$key.tsv"
+
+    reply=$(control_call "$test_root" '{"verb":"job.exclude","args":{"name":"workspace","path":".ai-metadata/lifecycle","folder":true,"scope":"project","project":"project-a"}}')
+    [ "$(json_field "$reply" 'd["data"]["pattern"] == ".ai-metadata/lifecycle/**" and d["data"]["cleared"] == 2')" = "True" ] || fail_test "project exclude: $reply"
+    assert_contains "$test_root/config/jobs/workspace.projects/project-a.excludes" '.ai-metadata/lifecycle/**'
+    [ "$(cat "$test_root/state/active-files/$key.tsv")" = "$(printf '2\tsrc/a[1].txt')" ] || fail_test 'the excluded folder must leave the changing list'
+    reply=$(control_call "$test_root" '{"verb":"job.exclude","args":{"name":"workspace","path":"src/a[1].txt","scope":"job"}}')
+    [ "$(json_field "$reply" 'd["data"]["pattern"]')" = 'src/a\[1\].txt' ] || fail_test "glob characters must be escaped: $reply"
+    [ ! -e "$test_root/state/active-files/$key.tsv" ] || fail_test 'an empty changing list must be removed'
+    assert_contains "$test_root/config/jobs/workspace.excludes" 'src/a\[1\].txt'
+
+    reply=$(control_call "$test_root" '{"verb":"job","args":{"name":"workspace"}}')
+    [ "$(json_field "$reply" 'd["data"]["project_patterns"] == {"project-a": [".ai-metadata/lifecycle/**"]} and d["data"]["patterns"]["excludes"] == [r"src/a\[1\].txt"]')" = "True" ] || fail_test "job must list the excludes: $reply"
+
+    for bad in '"path":"../etc/passwd","scope":"job"' '"path":"a","scope":"project","project":"nope"' '"path":"a","scope":"project","project":"../x"' '"path":"a|b","scope":"job"'; do
+        reply=$(control_call "$test_root" "{\"verb\":\"job.exclude\",\"args\":{\"name\":\"workspace\",$bad}}")
+        [ "$(json_field "$reply" 'd["error"]["code"]')" = "invalid_request" ] || fail_test "must be refused ($bad): $reply"
+    done
+    reply=$(control_call "$test_root" '{"verb":"job.exclude","args":{"name":"workspace","scope":"project","project":"project-a","remove":true,"pattern":".ai-metadata/lifecycle/**"}}')
+    [ "$(json_field "$reply" 'd["data"]["removed"]')" = "True" ] || fail_test "remove: $reply"
+    [ ! -e "$test_root/config/jobs/workspace.projects/project-a.excludes" ] || fail_test 'an empty project list must be removed'
+    grep -q 'Excluded from job workspace' "$test_root/state/events.jsonl" || fail_test 'the exclude must be audited'
+    rm -rf "$test_root"
+}
+
+test_job_project_excludes_in_backup() {
+    # file-backup.sh applies a child project's own excludes to that project only,
+    # and the job's excludes to every project.
+    local test_root
+    local output_file
+    test_root=$(mktemp -d)
+    output_file="$test_root/output.log"
+    mkdir -p "$test_root/ws/alpha/.meta/lifecycle" "$test_root/ws/beta/.meta/lifecycle" "$test_root/remote" "$test_root/config/jobs/ws.projects"
+    for project in alpha beta; do
+        printf 's\n' > "$test_root/ws/$project/.meta/lifecycle/state.json"
+        printf 'k\n' > "$test_root/ws/$project/keep.txt"
+        printf 'l\n' > "$test_root/ws/$project/debug.log"
+    done
+    touch -d '10 minutes ago' "$test_root"/ws/*/.meta/lifecycle/state.json "$test_root"/ws/*/keep.txt "$test_root"/ws/*/debug.log
+    write_test_config "$test_root" rclone 'backup:'
+    printf '[backup]\ntype = alias\nremote = %s\n' "$test_root/remote" > "$test_root/config/rclone.conf"
+    printf '1|ws|%s|fixed|ws|.nosync|children\n' "$test_root/ws" > "$test_root/config/file-sources.conf"
+    printf '*.log\n' > "$test_root/config/jobs/ws.excludes"
+    printf '.meta/lifecycle/**\n' > "$test_root/config/jobs/ws.projects/alpha.excludes"
+    run_backup "$test_root" > "$output_file" 2>&1 || fail_test "backup failed: $(tail -5 "$output_file")"
+    assert_file "$test_root/remote/ws/alpha/keep.txt"
+    [ ! -e "$test_root/remote/ws/alpha/.meta/lifecycle/state.json" ] || fail_test "alpha's own exclude was not applied"
+    assert_file "$test_root/remote/ws/beta/.meta/lifecycle/state.json"
+    [ ! -e "$test_root/remote/ws/alpha/debug.log" ] && [ ! -e "$test_root/remote/ws/beta/debug.log" ] || fail_test "the job's exclude must apply to every project"
+    rm -rf "$test_root"
+}
+
 test_control_settings_catalog() {
     # Every global.conf key is shown; programs and paths are read-only; a schedule
     # change is applied to the timers as drop-ins.
@@ -1931,6 +1995,8 @@ run_test 'control script never returns secrets' test_control_never_returns_secre
 run_test 'control script config.set safety' test_control_config_set
 run_test 'backup jobs: add, edit, enable, remove, run' test_control_jobs
 run_test 'job run and per-job patterns in file-backup' test_job_run_and_job_patterns
+run_test 'exclude a changing file per project or per job' test_control_job_exclude
+run_test 'per-project job excludes in file-backup' test_job_project_excludes_in_backup
 run_test 'every global setting shown, schedule applied' test_control_settings_catalog
 run_test 'destinations, folder picker and remote jobs' test_control_destinations
 run_test 'a job on its own remote' test_job_on_its_own_remote

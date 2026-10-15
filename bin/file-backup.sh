@@ -63,6 +63,8 @@ project_history_keep_lines="${FILE_PROJECT_HISTORY_KEEP_LINES:-20000}"
 project_changes_keep_lines="${FILE_PROJECT_CHANGES_KEEP_LINES:-1000}"
 run_started_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 current_entry_label=""
+# The child folder being backed up, for a job with one project per child folder.
+current_child_name=""
 project_result=""
 project_started_iso=""
 project_deferred_active=0
@@ -214,14 +216,22 @@ job_selected() {
 }
 
 job_pattern_lines() {
-    # The current job's own patterns (CONFIG_DIR/jobs/<job>.<excludes|volatile>).
+    # The current job's own patterns (CONFIG_DIR/jobs/<job>.<excludes|volatile>),
+    # then those of the current child project only
+    # (CONFIG_DIR/jobs/<job>.projects/<child folder>.<excludes|volatile>).
     local kind="$1"
     local pattern_file
+    local pattern_files=()
 
     [[ "$current_entry_label" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || return 0
-    pattern_file=$(join_path "$jobs_config_dir" "${current_entry_label}.${kind}")
-    [ -f "$pattern_file" ] || return 0
-    grep -v '^[[:space:]]*#' "$pattern_file" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s|^/||' | grep -v '^$' || true
+    pattern_files+=("$(join_path "$jobs_config_dir" "${current_entry_label}.${kind}")")
+    if [ -n "$current_child_name" ] && [[ "$current_child_name" != */* ]]; then
+        pattern_files+=("$(join_path "$jobs_config_dir" "${current_entry_label}.projects" "${current_child_name}.${kind}")")
+    fi
+    for pattern_file in "${pattern_files[@]}"; do
+        [ -f "$pattern_file" ] || continue
+        grep -v '^[[:space:]]*#' "$pattern_file" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s|^/||' | grep -v '^$' || true
+    done
 }
 
 build_project_pattern_file() {
@@ -505,7 +515,7 @@ Some files have changed during every backup run for a long time, so the backup k
 ${entry_lines}
 Why: Backup Suite does not upload files that are being written (modified within the last ${file_active_window_seconds}s, or seen changing during the upload), because a half-written copy could be worse than the previous one. The previous remote version of each file is kept.
 
-What to do: if a file is a log or cache, add it to .backup-excludes in that project. If it must be backed up, stop or pause its writer briefly, or list it in .backup-volatile so the decision is explicit.
+What to do: decide for each file. In the Backup Suite GUI (the job, Changing files), Exclude… or a right-click excludes the file or one of its folders in that project or in every project of the job. If it must be backed up, stop or pause its writer briefly. Without the GUI, add it to .backup-excludes in that project.
 
 Host: $(hostname) | Profile: $PROFILE_NAME
 MSG
@@ -1182,6 +1192,7 @@ while IFS='|' read -r enabled label source_path destination_mode destination_val
 
     case "${isolation_mode:-single}" in
         single|"")
+            current_child_name=""
             process_project "${label:-$source_path}" "$source_path" "$destination_base" || true
             ;;
         children)
@@ -1195,7 +1206,9 @@ while IFS='|' read -r enabled label source_path destination_mode destination_val
                     record_skipped_project "$current_entry_label" "${label:-$(basename "$source_path")}/$child_name" "$child_path" "$(join_path "$destination_base" "$child_name")" skipped-stop-file
                     continue
                 fi
+                current_child_name="$child_name"
                 process_project "${label:-$(basename "$source_path")}/$child_name" "$child_path" "$(join_path "$destination_base" "$child_name")" || true
+                current_child_name=""
             done < <(find "$source_path" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
             if [ "$child_found" -eq 0 ]; then
                 failed_count=$((failed_count + 1))

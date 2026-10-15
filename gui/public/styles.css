@@ -564,7 +564,7 @@ tr.is-disabled td { color: var(--muted); }
 .legend .available::before { border-color: var(--chart-available); border-top-style: dotted; }
 
 /* Tables */
-.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+.table-wrap { position: relative; overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
 table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
 th, td { padding: 0.4rem 0.55rem; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { background: var(--panel-sunken); font-weight: 600; white-space: nowrap; }
@@ -784,3 +784,22 @@ mark { background: var(--warn-soft); color: var(--text); outline: 1px solid var(
 .copy-row button { white-space: nowrap; }
 
 .backend-banner { padding: 0.5rem 1rem; background: var(--accent-soft); border-bottom: 1px solid var(--accent); color: var(--text); text-align: center; }
+
+/* Right-click menu (Changing files: exclude a file or a parent folder) */
+.small-button { padding: 0.2rem 0.55rem; font-size: 0.85rem; min-height: 0; }
+.context-menu {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 200;
+  max-width: min(36rem, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+.context-menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 0.1rem; padding: 0.35rem 0.6rem; overflow-wrap: anywhere; }
+.context-menu button span { font-family: var(--mono, ui-monospace, monospace); }
+.context-menu-heading { padding: 0.45rem 0.6rem 0.2rem; font-size: 0.78rem; font-weight: 700; color: var(--muted); }
+.context-menu-heading:not(:first-child) { border-top: 1px solid var(--border); margin-top: 0.25rem; }
+.changing-table tbody tr { cursor: context-menu; }
+.pattern-list { list-style: none; padding-left: 0; }
+.pattern-list li { display: flex; align-items: center; gap: 0.5rem; padding: 0.15rem 0; }

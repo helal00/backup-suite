@@ -1439,6 +1439,144 @@
     body.append(cards);
   }
 
+  // ------------------------------------------------------------------ exclude a changing file
+
+  let openContextMenu = null;
+
+  function closeContextMenu() {
+    if (!openContextMenu) return;
+    const { menu, restoreFocus } = openContextMenu;
+    openContextMenu = null;
+    menu.remove();
+    document.removeEventListener("pointerdown", contextMenuOutside, true);
+    document.removeEventListener("keydown", contextMenuKey, true);
+    window.removeEventListener("scroll", contextMenuScroll, true);
+    window.removeEventListener("resize", closeContextMenu);
+    if (restoreFocus && document.contains(restoreFocus)) restoreFocus.focus();
+  }
+
+  function contextMenuOutside(event) {
+    if (openContextMenu && !openContextMenu.menu.contains(event.target)) closeContextMenu();
+  }
+
+  function contextMenuScroll(event) {
+    if (openContextMenu && !(event.target instanceof Node && openContextMenu.menu.contains(event.target))) closeContextMenu();
+  }
+
+  function contextMenuKey(event) {
+    if (!openContextMenu) return;
+    const items = [...openContextMenu.menu.querySelectorAll("button")];
+    const index = items.indexOf(document.activeElement);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeContextMenu();
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      items[(index + step + items.length) % items.length]?.focus({ preventScroll: false });
+    }
+  }
+
+  // showContextMenu(x, y, [{heading} | {label, detail, action}], focus element to restore)
+  function showContextMenu(x, y, items, restoreFocus) {
+    closeContextMenu();
+    const menu = h("div", { class: "popover-menu context-menu", role: "menu" }, items.map((item) => item.heading
+      ? h("div", { class: "context-menu-heading", role: "presentation" }, item.heading)
+      : h("button", { type: "button", role: "menuitem", onclick: () => { closeContextMenu(); item.action(); } },
+        h("span", {}, item.label), item.detail ? h("small", { class: "muted" }, item.detail) : null)));
+    document.body.append(menu);
+    const width = menu.offsetWidth;
+    const height = menu.offsetHeight;
+    menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - 8))}px`;
+    openContextMenu = { menu, restoreFocus };
+    document.addEventListener("pointerdown", contextMenuOutside, true);
+    document.addEventListener("keydown", contextMenuKey, true);
+    menu.querySelector("button")?.focus({ preventScroll: true });
+    // Listen for scrolling only after the menu has settled.
+    window.setTimeout(() => {
+      if (openContextMenu?.menu !== menu) return;
+      window.addEventListener("scroll", contextMenuScroll, true);
+      window.addEventListener("resize", closeContextMenu);
+    }, 0);
+  }
+
+  // The file itself, then each parent folder up to the project's own folder.
+  function excludeTargets(path) {
+    const parts = String(path || "").split("/").filter(Boolean);
+    const targets = [];
+    if (!parts.length) return targets;
+    targets.push({ path: parts.join("/"), folder: false, shown: parts.join("/") });
+    for (let depth = parts.length - 1; depth >= 1; depth -= 1) {
+      const folder = parts.slice(0, depth).join("/");
+      targets.push({ path: folder, folder: true, shown: `${folder}/` });
+    }
+    return targets;
+  }
+
+  function changingRowMenu(event, data, row) {
+    event.preventDefault();
+    const entry = data.entry;
+    const child = entry.isolation === "children" ? String(row.project || "").split("/").pop() : "";
+    const targets = excludeTargets(row.path);
+    const items = [];
+    if (child) {
+      items.push({ heading: `Exclude in ${child} only` });
+      for (const target of targets) items.push({ label: target.shown, detail: target.folder ? "this folder and everything in it" : "this file", action: () => excludeChanging(data, target, "project", child) });
+    }
+    items.push({ heading: child ? `Exclude in every project of ${entry.name} (each folder in ${entry.source})` : `Exclude in ${entry.name}` });
+    for (const target of targets) items.push({ label: target.shown, detail: target.folder ? "this folder and everything in it" : "this file", action: () => excludeChanging(data, target, "job", "") });
+    const anchor = event.currentTarget instanceof Element ? event.currentTarget : null;
+    let x = event.clientX;
+    let y = event.clientY;
+    if (!x && !y && anchor) {
+      const box = anchor.getBoundingClientRect();
+      x = box.left;
+      y = box.bottom;
+    }
+    showContextMenu(x, y, items, anchor);
+  }
+
+  async function excludeChanging(data, target, scope, child) {
+    const entry = data.entry;
+    const where = scope === "project" ? `project ${child} only` : (entry.isolation === "children" ? `every project of ${entry.name} (each folder in ${entry.source}, also ones added later)` : `job ${entry.name}`);
+    if (!(await confirmAction({
+      title: `Exclude ${target.shown}?`,
+      lines: [
+        `${target.folder ? "This folder and everything in it" : "This file"} will no longer be backed up in ${where}, from the next run on.`,
+        ["The copy already on the remote stays as it is; nothing is deleted there.",
+          "The pattern is kept in Backup Suite's config for this job, not in the project's folder. Remove it again under Excludes & stop files.",
+          "The change is audited and listed in Activity."]
+      ],
+      okLabel: "Exclude"
+    }))) return;
+    try {
+      const result = await control("job.exclude", { name: entry.name, path: target.path, folder: target.folder, scope, project: scope === "project" ? child : undefined });
+      toast(result.added ? `Excluded ${target.shown} (${scope === "project" ? child : "every project"}).` : `${target.shown} was already excluded there.`);
+      delete state.entryCache[entry.name];
+      await loadEntries({ quiet: true });
+      renderMain();
+    } catch (error) {
+      toast(`Failed: ${errorText(error)}`, "error", 10000);
+    }
+  }
+
+  async function removeJobExclude(entry, scope, child, pattern) {
+    if (!(await confirmAction({
+      title: `Back up ${pattern} again?`,
+      lines: [`${pattern} is backed up again in ${scope === "project" ? `project ${child}` : `every project of ${entry.name}`} from the next run (unless another pattern excludes it).`],
+      okLabel: "Remove exclude"
+    }))) return;
+    try {
+      await control("job.exclude", { name: entry.name, scope, project: scope === "project" ? child : undefined, remove: true, pattern });
+      toast(`${pattern} is no longer excluded.`);
+      delete state.entryCache[entry.name];
+      renderMain();
+    } catch (error) {
+      toast(`Failed: ${errorText(error)}`, "error", 10000);
+    }
+  }
+
   // ------------------------------------------------------------------ entry page
 
   const ENTRY_TABS = [
@@ -1628,21 +1766,24 @@
     },
 
     changing: (panel, data) => {
-      panel.append(h("p", { class: "muted" }, `A file modified in the last ${data.active_window_s}s before its project syncs, or seen changing during the upload, is skipped: its previous remote version stays in place and it is tried again next run. A file skipped ${data.max_deferrals} runs in a row never settles; exclude it with ${data.excludes.filename} or stop its writer briefly.`));
-      panel.append(data.changing.length ? h("div", { class: "table-wrap" }, h("table", {},
-        h("thead", {}, h("tr", {}, h("th", {}, "Project"), h("th", {}, "Path"), h("th", { class: "num" }, "Runs skipped in a row"), h("th", {}, "Last seen"))),
-        h("tbody", {}, data.changing.map((row) => h("tr", { class: row.count >= data.max_deferrals ? "highlight" : "" },
+      panel.append(h("p", { class: "muted" }, `A file modified in the last ${data.active_window_s}s before its project syncs, or seen changing during the upload, is skipped: its previous remote version stays in place and it is tried again next run. A file skipped ${data.max_deferrals} runs in a row never settles, and you are notified (the number of runs is FILE_ACTIVE_MAX_DEFERRALS in Admin → Settings).`));
+      const stale = data.changing.filter((row) => row.count >= data.max_deferrals).length;
+      if (stale) panel.append(h("p", { class: "notice" }, `${stale} file(s) never settle. Decide for each: exclude it (or its folder) in this project or in every project of the job with Exclude… or a right-click on the row, or leave it and stop its writer briefly so it can be backed up.`));
+      panel.append(data.changing.length ? h("div", { class: "table-wrap" }, h("table", { class: "changing-table" },
+        h("thead", {}, h("tr", {}, h("th", {}, "Project"), h("th", {}, "Path"), h("th", { class: "num" }, "Runs skipped in a row"), h("th", {}, "Last seen"), h("th", {}, h("span", { class: "sr-only" }, "Actions")))),
+        h("tbody", {}, data.changing.map((row) => h("tr", { class: row.count >= data.max_deferrals ? "highlight" : "", oncontextmenu: (event) => changingRowMenu(event, data, row) },
           h("td", {}, row.project.split("/").pop()), h("td", {}, h("code", {}, row.path)),
           h("td", { class: "num" }, row.count >= data.max_deferrals ? h("span", {}, String(row.count), " ", pill("never settles", "warn")) : String(row.count)),
-          h("td", {}, timeNode(row.updated))))))) : h("p", { class: "empty" }, "No file of this job is being skipped."));
+          h("td", {}, timeNode(row.updated)),
+          h("td", {}, h("button", { type: "button", class: "small-button", "aria-haspopup": "menu", title: "Exclude this file or a parent folder", onclick: (event) => changingRowMenu(event, data, row) }, "Exclude…"))))))) : h("p", { class: "empty" }, "No file of this job is being skipped."));
     },
 
     excludes: (panel, data) => {
       const entry = data.entry;
       const stopped = data.projects.filter((project) => project.stop_file_present);
-      panel.append(h("h3", {}, "Stop file"), h("p", {}, `${entry.stop_file} in ${entry.isolation === "children" ? "the source skips the whole job; in a child directory it skips that project" : "the source skips this job"}.`),
+      append(panel, [h("h3", {}, "Stop file"), h("p", {}, `${entry.stop_file} in ${entry.isolation === "children" ? "the source skips the whole job; in a child directory it skips that project" : "the source skips this job"}.`),
         entry.stop_file_present ? h("p", { class: "notice" }, `Present in the source: the job is paused.`) : null,
-        stopped.length ? h("ul", {}, stopped.map((project) => h("li", {}, h("code", {}, project.source), " is paused"))) : h("p", { class: "muted" }, "No project is paused by a stop file."));
+        stopped.length ? h("ul", {}, stopped.map((project) => h("li", {}, h("code", {}, project.source), " is paused"))) : h("p", { class: "muted" }, "No project is paused by a stop file.")]);
       const patternSection = (title, block, explanation) => {
         panel.append(h("h3", {}, title), h("p", { class: "muted" }, explanation));
         if (block.global.length) panel.append(h("details", {}, h("summary", {}, `Global patterns for every project (${block.global.length})`), h("pre", {}, block.global.join("\n"))));
@@ -1650,6 +1791,14 @@
         if (!block.files.length) panel.append(h("p", { class: "muted" }, `No ${block.filename} file in this job's source.`));
         for (const file of block.files) panel.append(h("details", {}, h("summary", {}, h("code", {}, file.relative), ` (${file.lines.length} line(s))`), h("pre", {}, file.lines.join("\n") || "(empty)")));
       };
+      const jobExcludes = data.patterns?.excludes || [];
+      const projectExcludes = Object.entries(data.project_patterns || {});
+      panel.append(h("h3", {}, "Excluded by this job"), h("p", { class: "muted" }, "Kept in Backup Suite's config, not in the projects' folders, and relative to each project's folder. Added from Changing files (Exclude…, or right-click) or in the job editor."));
+      const patternList = (patterns, scope, child) => h("ul", { class: "pattern-list" }, patterns.map((pattern) => h("li", {}, h("code", {}, pattern), " ",
+        h("button", { type: "button", class: "small-button", onclick: () => removeJobExclude(entry, scope, child, pattern) }, "Remove"))));
+      if (jobExcludes.length) panel.append(h("div", {}, h("p", {}, entry.isolation === "children" ? "In every project:" : "In this job:"), patternList(jobExcludes, "job", "")));
+      for (const [child, patterns] of projectExcludes) panel.append(h("div", {}, h("p", {}, `In ${child} only:`), patternList(patterns, "project", child)));
+      if (!jobExcludes.length && !projectExcludes.length) panel.append(h("p", { class: "muted" }, "None."));
       patternSection("Excluded files", data.excludes, `Patterns in ${data.excludes.filename} files are never uploaded (relative to the folder that holds the file).`);
       patternSection("Volatile files", data.volatile, `Patterns in ${data.volatile.filename} files are allowed to change during a sync: if they change, they are left for the next run instead of failing the project.`);
     },

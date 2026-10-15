@@ -17,6 +17,14 @@ the acceptance checks are in [GUI-SPECIFICATION.md](GUI-SPECIFICATION.md).
   **Remove…**, and eight tabs: Overview, Projects (one per child folder with
   `children`), Changed files, Changing files, Excludes & stop files, Runs, Log, and
   Source & destination (sizes measured on request).
+- **Files that never settle:** a file skipped `FILE_ACTIVE_MAX_DEFERRALS` runs in a
+  row (12 by default) is reported once per that many runs. On Changing files,
+  **Exclude…** (or a right-click on the row) excludes the file or any of its parent
+  folders, up to the project's own folder, either in that project only
+  (`<config>/jobs/<job>.projects/<child folder>.excludes`) or in every project of the
+  job (`<config>/jobs/<job>.excludes`). Nothing is written into the projects; the
+  remote copy stays; the row leaves the list at once; each change is audited and can
+  be undone under Excludes & stop files.
 - **Job editor:** name, enabled, source folder, projects (single or children),
   destination mode and folder, stop file, and the job's own exclude and volatile
   patterns (`<config>/jobs/<name>.excludes` and `.volatile`, applied to every project

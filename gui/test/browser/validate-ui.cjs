@@ -129,7 +129,7 @@ async function main() {
           const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
           if (overflow > 1) failures.push(`${label}/${scheme}/${name}: horizontal page scroll of ${overflow}px`);
           const bodyText = await page.textContent(bodySelector);
-          if (/\[object Object\]|undefined|NaN/.test(bodyText)) failures.push(`${label}/${scheme}/${name}: suspicious text: ${bodyText.match(/.{0,60}(\[object Object\]|undefined|NaN).{0,40}/)?.[0]}`);
+          if (/\[object Object\]|undefined|NaN|\bnull\b/.test(bodyText)) failures.push(`${label}/${scheme}/${name}: suspicious text: ${bodyText.match(/.{0,60}(\[object Object\]|undefined|NaN|\bnull\b).{0,40}/)?.[0]}`);
           await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-${name}.png`), fullPage: label === "desktop" && !name.startsWith("admin") });
           if (name.startsWith("admin")) await page.keyboard.press("Escape");
         }
@@ -192,6 +192,33 @@ async function main() {
           const editExcludes = await page.inputValue('#job-form [name="excludes"]');
           if (editLabel !== "web11" || !editExcludes.includes("cache/**")) failures.push(`job editor: edit did not load the job (${editLabel}, ${editExcludes})`);
           await page.keyboard.press("Escape");
+        }
+        // Changing files: the row menu excludes a parent folder in one project (once;
+        // the menu is opened everywhere for its layout).
+        await page.goto(`${base}/#job/workspace/changing`);
+        await page.waitForSelector('#section-body tr:has-text("data/cache.db")');
+        await page.click('#section-body tr:has-text("data/cache.db")', { button: "right" });
+        await page.waitForSelector(".context-menu");
+        const menuText = await page.textContent(".context-menu");
+        if (!/in beta only/i.test(menuText) || !/every project of workspace/i.test(menuText) || !menuText.includes("data/")) failures.push(`${label}/${scheme}: changing-file menu reads "${menuText}"`);
+        const menuBox = await page.$eval(".context-menu", (node) => { const box = node.getBoundingClientRect(); return { right: box.right, bottom: box.bottom, width: window.innerWidth, height: window.innerHeight }; });
+        if (menuBox.right > menuBox.width || menuBox.bottom > menuBox.height) failures.push(`${label}/${scheme}: changing-file menu leaves the window`);
+        await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-changing-menu.png`) });
+        if (label === "desktop" && scheme === "light") {
+          await page.locator('.context-menu button[role="menuitem"]').filter({ has: page.locator("span", { hasText: /^data\/$/ }) }).first().click();
+          await page.waitForSelector("#confirm-dialog[open]");
+          await page.click("#confirm-ok");
+          await page.waitForFunction(() => ![...document.querySelectorAll("#section-body code")].some((node) => node.textContent === "data/cache.db"), null, { timeout: 15000 });
+          const projectFile = path.join(fixture.configDir, "jobs", "workspace.projects", "beta.excludes");
+          if (!fs.existsSync(projectFile) || !fs.readFileSync(projectFile, "utf8").includes("data/**")) failures.push("changing-file menu: the project exclude was not written");
+          await page.goto(`${base}/#job/workspace/excludes`);
+          try { await page.waitForSelector('#section-body .pattern-list code:has-text("data/**")', { timeout: 8000 }); } catch (error) { await page.screenshot({ path: path.join(screenshotDir, "debug-excludes.png"), fullPage: true }); console.log("DEBUG", (await page.textContent("#section-body")).slice(0, 1500)); throw error; }
+          await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-job-excludes.png`), fullPage: true });
+          // Put the row back for the later passes.
+          fs.writeFileSync(path.join(fixture.stateDir, "active-files", `${crypto.createHash("sha256").update("fake:/projects/workspace/beta").digest("hex")}.tsv`), "14\tdata/cache.db\n2\tlogs/app.log\n");
+        } else {
+          await page.keyboard.press("Escape");
+          if (await page.$(".context-menu")) failures.push(`${label}/${scheme}: Escape must close the changing-file menu`);
         }
         // A new destination through the wizard (sftp needs no sign-in), once.
         if (label === "desktop" && scheme === "light") {

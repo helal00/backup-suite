@@ -1617,7 +1617,7 @@ def verb_job(request):
             position = {"offset_s": int(min(starts) - run_epoch), "duration_s": int(max(ends) - min(starts))}
 
     return {"entry": overview, "sha256": file_sha256(os.path.realpath(SOURCES_FILE)),
-            "patterns": verb_job_get_patterns(entry["label"]), "roots": job_source_roots(), "projects": projects, "children_truncated": children_truncated, "runs": run_list,
+            "patterns": verb_job_get_patterns(entry["label"]), "project_patterns": job_project_patterns(entry["label"]), "roots": job_source_roots(), "projects": projects, "children_truncated": children_truncated, "runs": run_list,
             "changing": changing_rows[:2000], "max_deferrals": max_deferrals, "run": current, "legacy": legacy,
             "history_truncated": truncated, "position": position,
             "excludes": {"filename": EXCLUDE_FILENAME, "files": excludes, "truncated": excludes_truncated, "global": GLOBAL_EXCLUDES},
@@ -1814,7 +1814,8 @@ def read_job_patterns(name, kind):
         return []
     try:
         with open(job_pattern_path(name, kind), "r", encoding="utf-8", errors="replace") as handle:
-            return [line.rstrip("\n") for index, line in enumerate(handle) if index < JOB_PATTERNS_MAX and line.strip()]
+            return [line.strip() for index, line in enumerate(handle)
+                    if index <= JOB_PATTERNS_MAX and line.strip() and not line.lstrip().startswith("#")]
     except OSError:
         return []
 
@@ -2067,6 +2068,12 @@ def verb_job_save(request):
                 os.remove(job_pattern_path(old_name, kind))
             except OSError:
                 pass
+    old_projects = os.path.join(JOBS_CONFIG_DIR, "%s.projects" % old_name) if old_name and JOB_NAME_RE.match(old_name) else ""
+    if old_name and old_name != name and old_projects and os.path.isdir(old_projects):
+        new_projects = os.path.join(JOBS_CONFIG_DIR, "%s.projects" % name)
+        if os.path.isdir(new_projects):
+            shutil.rmtree(new_projects)
+        os.rename(old_projects, new_projects)
     action = "edited" if editing else "added"
     record_event("info", "gui-action", "Backup job %s %s" % (name, action), info["line"], "")
     return {"sha256": file_sha256(path), "backup": backup, "line": info["line"], "name": name, "warnings": warnings,
@@ -2101,6 +2108,11 @@ def verb_job_remove(request):
         if JOB_NAME_RE.match(name) and os.path.isfile(job_pattern_path(name, kind)):
             backup_file(job_pattern_path(name, kind), "job-%s.%s" % (name, kind))
             os.remove(job_pattern_path(name, kind))
+    projects_dir = os.path.join(JOBS_CONFIG_DIR, "%s.projects" % name)
+    if JOB_NAME_RE.match(name) and os.path.isdir(projects_dir):
+        for child, patterns in job_project_patterns(name).items():
+            backup_file(job_project_pattern_path(name, child, "excludes"), "job-%s.project-excludes" % name)
+        shutil.rmtree(projects_dir)
     record_event("warning", "gui-action", "Backup job %s removed" % name,
                  "Its line was removed from file-sources.conf. Nothing was deleted on the remote.", "")
     return {"sha256": file_sha256(path), "backup": backup, "name": name}
@@ -2135,6 +2147,192 @@ def verb_job_run(request):
         raise ControlError("action_failed", (err or out).strip()[-500:] or "systemctl start failed.")
     record_event("info", "gui-action", "Backup of job %s started" % name, "Only this job runs; the watchdog and the resource profile apply as usual.", "file-backup.service")
     return {"name": name, "started": True}
+
+
+# --------------------------------------------------------------------------- excluding a file or folder
+#
+# From the Changing files list: exclude one path (a file, or a folder and all it
+# holds) for one project of a job, or for every project of the job. The patterns
+# live in Backup Suite's config, never in the project's own folder:
+#   CONFIG_DIR/jobs/<job>.excludes                          every project of the job
+#   CONFIG_DIR/jobs/<job>.projects/<child folder>.excludes  one child project
+# file-backup.sh applies both (relative to the project's folder) from the next run.
+
+EXCLUDE_GLOB_CHARS = "\\*?[]{}"
+
+
+def job_project_pattern_path(name, child, kind):
+    return os.path.join(JOBS_CONFIG_DIR, "%s.projects" % name, "%s.%s" % (child, kind))
+
+
+def read_pattern_file(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            return [line.strip() for index, line in enumerate(handle)
+                    if index < JOB_PATTERNS_MAX + 1 and line.strip() and not line.lstrip().startswith("#")]
+    except OSError:
+        return []
+
+
+def write_pattern_file(path, header, patterns):
+    if not patterns:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return
+    os.makedirs(os.path.dirname(path), mode=0o750, exist_ok=True)
+    temporary = "%s.tmp.%d" % (path, os.getpid())
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write("# Written by the Backup Suite GUI: %s.\n" % header)
+        handle.write("\n".join(patterns) + "\n")
+    os.chmod(temporary, 0o640)
+    os.replace(temporary, path)
+
+
+def job_project_patterns(name):
+    """{child folder: [exclude patterns]} for a job's per-project files."""
+    result = {}
+    if not JOB_NAME_RE.match(name or ""):
+        return result
+    directory = os.path.join(JOBS_CONFIG_DIR, "%s.projects" % name)
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return result
+    for item in names:
+        if item.endswith(".excludes"):
+            patterns = read_pattern_file(os.path.join(directory, item))
+            if patterns:
+                result[item[:-len(".excludes")]] = patterns
+    return result
+
+
+def exclude_pattern(path, folder):
+    """The rclone filter pattern for one relative path: glob characters escaped,
+    and a folder excluded with everything below it."""
+    escaped = "".join("\\" + char if char in EXCLUDE_GLOB_CHARS else char for char in path)
+    return escaped + "/**" if folder else escaped
+
+
+def check_exclude_path(value):
+    if not isinstance(value, str):
+        invalid("path must be text.")
+    path = value.strip().strip("/")
+    parts = path.split("/")
+    if not path or len(path) > 300 or any(part in ("", ".", "..") for part in parts) or re.search(r"[\x00-\x1f|]", path):
+        invalid("path must be a path inside the project, such as .ai-metadata/lifecycle/state.json.")
+    return path
+
+
+def entry_project_keys(entry, child=None):
+    """The state keys (active-files/<key>.tsv) of a job's projects, or of one child."""
+    grouped, _, _ = rows_by_entry()
+    last_key = {}
+    for row in grouped.get(entry["name"], []):
+        if row["key"]:
+            last_key[row["project"]] = row["key"]
+    present, _ = entry_projects(entry)
+    keys = []
+    for label, path, destination, _ in present:
+        if child is not None and os.path.basename(path) != child:
+            continue
+        key = last_key.get(label) or (destination_key(destination) if destination else "")
+        if key:
+            keys.append(key)
+    return keys
+
+
+def prune_changing_paths(keys, path, folder):
+    """Drops the excluded path from the changing-files lists now; the next run
+    would drop it anyway, as excluded files are no longer scanned."""
+    removed = 0
+    directory = state_path("active-files")
+    for key in keys:
+        state_file = os.path.join(directory, "%s.tsv" % key)
+        try:
+            with open(state_file, "r", encoding="utf-8", errors="surrogateescape") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            continue
+        kept = []
+        for line in lines:
+            parts = line.split("\t", 1)
+            listed = parts[1] if len(parts) == 2 else ""
+            if listed == path or (folder and listed.startswith(path + "/")):
+                removed += 1
+            else:
+                kept.append(line)
+        if len(kept) == len(lines):
+            continue
+        if kept:
+            temporary = "%s.tmp.%d" % (state_file, os.getpid())
+            with open(temporary, "w", encoding="utf-8", errors="surrogateescape") as handle:
+                handle.write("\n".join(kept) + "\n")
+            os.chmod(temporary, 0o640)
+            os.replace(temporary, state_file)
+        else:
+            os.remove(state_file)
+    return removed
+
+
+def verb_job_exclude(request):
+    args = get_args(request, ["name", "path", "folder", "scope", "project", "remove", "pattern"])
+    entry = find_entry(args)
+    name = entry["label"]
+    if not JOB_NAME_RE.match(name or ""):
+        invalid("Give this job a name (label) in its editor first; excludes are kept per job name.")
+    scope = args.get("scope", "job")
+    if scope not in ("job", "project"):
+        invalid("scope must be job or project.")
+    child = None
+    if scope == "project":
+        if entry["isolation"] != "children":
+            invalid("This job is one project; exclude for the whole job.")
+        child = args.get("project")
+        names = [os.path.basename(path) for _, path, _, _ in entry_projects(entry)[0]]
+        if not isinstance(child, str) or "/" in child or child not in names:
+            invalid("project must be one of this job's child folders.")
+        target = job_project_pattern_path(name, child, "excludes")
+        header = "excluded paths for project %s of job %s" % (child, name)
+        backup_name = "job-%s.project-excludes" % name
+    else:
+        target = job_pattern_path(name, "excludes")
+        header = "patterns for every project of job %s" % name
+        backup_name = "job-%s.excludes" % name
+    patterns = read_pattern_file(target)
+
+    if args.get("remove"):
+        pattern = args.get("pattern")
+        if not isinstance(pattern, str) or pattern.strip() not in patterns:
+            invalid("That pattern is not in this list.")
+        backup_file(target, backup_name)
+        patterns.remove(pattern.strip())
+        write_pattern_file(target, header, patterns)
+        record_event("info", "gui-action", "Exclude removed from job %s" % name,
+                     "%s no longer excluded%s." % (pattern.strip(), " in %s" % child if child else " in every project"), "")
+        return {"name": name, "scope": scope, "project": child, "pattern": pattern.strip(), "removed": True, "patterns": patterns}
+
+    path = check_exclude_path(args.get("path"))
+    folder = args.get("folder", False)
+    if not isinstance(folder, bool):
+        invalid("folder must be true or false.")
+    pattern = exclude_pattern(path, folder)
+    if not JOB_PATTERN_RE.match(pattern):
+        invalid("This path cannot be written as a pattern.")
+    added = pattern not in patterns
+    if added:
+        if len(patterns) >= JOB_PATTERNS_MAX:
+            invalid("This list already has %d patterns." % JOB_PATTERNS_MAX)
+        backup_file(target, backup_name)
+        patterns.append(pattern)
+        write_pattern_file(target, header, patterns)
+    cleared = prune_changing_paths(entry_project_keys(entry, child), path, folder)
+    where = "project %s" % child if child else "every project of the job"
+    record_event("info", "gui-action", "Excluded from job %s" % name,
+                 "%s %s is no longer backed up in %s (pattern %s)." % ("Folder" if folder else "File", path, where, pattern), "")
+    return {"name": name, "scope": scope, "project": child, "pattern": pattern, "added": added, "cleared": cleared,
+            "file": target, "patterns": patterns}
 
 
 # --------------------------------------------------------------------------- destinations (rclone remotes)
@@ -2490,6 +2688,7 @@ VERBS = {
     "job.enable": (verb_job_enable, True),
     "job.remove": (verb_job_remove, True),
     "job.run": (verb_job_run, True),
+    "job.exclude": (verb_job_exclude, True),
     "remotes": (verb_remotes, False),
     "remote.create": (verb_remote_create, True),
     "remote.continue": (verb_remote_continue, True),

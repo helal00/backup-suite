@@ -31,7 +31,7 @@ const VERBS = {
   "profile.set": true, "profile.limits": true, "profile.override": true, "config.get": false, "config.set": true,
   "backup.start": true, "backup.stop": true, "timer.set": true, "notify.test": true, "events.since": false,
   "events.stat": false, audit: false, jobs: false, job: false, "job.changes": false, "job.log": false,
-  "job.measure": false, "job.check": false, "job.save": true, "job.enable": true, "job.remove": true, "job.run": true,
+  "job.measure": false, "job.check": false, "job.save": true, "job.enable": true, "job.remove": true, "job.run": true, "job.exclude": true,
   remotes: false, "remote.create": true, "remote.continue": true, "remote.test": false, "remote.delete": true,
   "remote.browse": false, "fs.browse": false
 };
