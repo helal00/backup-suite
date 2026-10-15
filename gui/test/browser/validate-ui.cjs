@@ -124,6 +124,7 @@ async function main() {
             if (!/Running 5\/12/.test(chip)) failures.push(`${label}/${scheme}: state chip shows "${chip}"`);
             const cards = await page.$$eval(".entry-card", (nodes) => nodes.map((node) => node.textContent));
             if (cards.length < 2) failures.push(`${label}/${scheme}: expected at least 2 job cards, got ${cards.length}`);
+            if (!(await page.isHidden("#backend-banner"))) failures.push(`${label}/${scheme}: the outdated-backend notice shows for a current backend`);
           }
           const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
           if (overflow > 1) failures.push(`${label}/${scheme}/${name}: horizontal page scroll of ${overflow}px`);

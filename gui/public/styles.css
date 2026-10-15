@@ -782,3 +782,5 @@ mark { background: var(--warn-soft); color: var(--text); outline: 1px solid var(
 .remote-dialog .threshold-grid label { display: flex; flex-direction: column; gap: 0.25rem; }
 .wizard-help { white-space: pre-wrap; background: var(--panel-sunken); padding: 0.6rem; border-radius: 6px; font-size: 0.85rem; }
 .copy-row button { white-space: nowrap; }
+
+.backend-banner { padding: 0.5rem 1rem; background: var(--accent-soft); border-bottom: 1px solid var(--accent); color: var(--text); text-align: center; }

@@ -556,6 +556,9 @@ def verb_status(request):
         "progress": read_key_values(state_path("run", "progress.env")),
         "server": server_memory(),
         "events": events_stat_data(),
+        # What this installed control script can do: the GUI compares it with what
+        # it needs and says when Backup Suite on the server must be deployed again.
+        "verbs": sorted(VERBS),
         "at": now_iso(),
     }
 

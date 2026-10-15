@@ -318,8 +318,29 @@
     return h("p", { class: "muted" }, text);
   }
 
+  // An installed Backup Suite older than this GUI answers "Unknown verb" to what it
+  // does not have yet: say what to do instead.
+  function isOutdatedBackendError(error) {
+    return error?.code === "invalid_request" && /Unknown verb/i.test(error.message || "");
+  }
+
+  const OUTDATED_TEXT = "Backup Suite on the server is older than this GUI, so this page is not available yet. Deploy the latest version (sudo ./production-deploy.sh … from the repository), then reload. Everything else keeps working.";
+
   function errorNode(error) {
+    if (isOutdatedBackendError(error)) return h("div", { class: "notice info", role: "status" }, OUTDATED_TEXT);
     return h("div", { class: "notice bad", role: "alert" }, errorText(error));
+  }
+
+  // The control verbs this GUI uses. A server whose status lists fewer (or none:
+  // older than this check) gets the deploy notice in the top bar.
+  const REQUIRED_VERBS = ["jobs", "job", "job.save", "job.run", "remotes", "remote.create", "fs.browse", "remote.browse"];
+
+  function updateBackendNotice(status) {
+    const verbs = status?.verbs;
+    const missing = Array.isArray(verbs) ? REQUIRED_VERBS.filter((verb) => !verbs.includes(verb)) : REQUIRED_VERBS;
+    const banner = $("#backend-banner");
+    banner.hidden = missing.length === 0;
+    if (missing.length) banner.textContent = `Backup Suite on the server is older than this GUI: backup jobs, destinations or folder pickers may not work yet. Deploy the latest version (sudo ./production-deploy.sh …), then reload.`;
   }
 
   // ------------------------------------------------------------------ status model
@@ -1242,7 +1263,7 @@
   // The entry verbs arrived with the per-entry pages; an older installed Backup Suite
   // answers "Unknown verb" until it is deployed again.
   function entriesErrorNode(error) {
-    if (error?.code === "invalid_request" && /Unknown verb/i.test(error.message || "")) {
+    if (isOutdatedBackendError(error)) {
       return h("div", { class: "notice info" }, "The installed Backup Suite is older than this GUI: backup jobs need the latest version. Deploy it (sudo ./production-deploy.sh …), then reload. Home and Admin work meanwhile.");
     }
     return errorNode(error);
@@ -2538,6 +2559,7 @@
   // when the run moved to another project or ended.
   function onStatusChanged(previous) {
     checkResourceWarning(state.status);
+    if (state.status) updateBackendNotice(state.status);
     const before = previous?.progress || {};
     const now = state.status?.progress || {};
     const moved = before.current_project !== now.current_project || before.state !== now.state;
