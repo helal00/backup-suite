@@ -2,57 +2,62 @@
 // Sources: docs/RESOURCES.md, docs/OPERATIONS.md and docs/GUI-SPECIFICATION.md.
 window.BACKUP_SUITE_HELP = {
   navigation: {
-    title: "Backup entries",
+    title: "Backup jobs",
     sections: [
-      ["Home", "The whole system at a glance: is everything in order, what runs now, server and backup resources, every entry's state, database backups and the latest ntfy notifications."],
-      ["Entries", "One card per line of file-sources.conf: a source directory and where it is backed up. The card shows whether it is enabled, its state, its source, its mapping (destination mode, stop file, isolation) and when it last ran. Click a card for everything about that entry."],
-      ["Filter", "All entries, only enabled ones, or only those needing attention (failed, config problem, paused by a stop file, or files that never settle)."],
-      ["Admin", "Everything that is not about one entry: start and stop, schedule, profiles, watchdog, ntfy, server settings, all runs, logs and the audit log."]
+      ["Home", "The whole system at a glance: is everything in order, what runs now, server and backup resources, every job's state, database backups and the latest ntfy notifications."],
+      ["Jobs", "One card per backup job (one line of file-sources.conf): a source folder and where it is backed up. The card shows whether it is enabled, its state, its source, its mapping (destination mode, stop file, projects) and when it last ran. Click a card for everything about that job."],
+      ["New job", "Adds a job. The form is checked on the server as you type: the folder must exist and lie under the allowed folders (FILE_JOB_SOURCE_ROOTS, set on the server), and its destination must not overlap another job's."],
+      ["Filter", "All jobs, only enabled ones, or only those needing attention (failed, config problem, paused by a stop file, or files that never settle)."],
+      ["Admin", "Everything that is not about one job: start and stop, schedule, profiles, watchdog, ntfy, every global setting, all runs, logs and the audit log."]
     ]
   },
   home: {
     title: "Home",
     sections: [
-      ["Verdict", "Green when the schedule is on, the server has memory to spare and every enabled entry was backed up in its last run. Amber or red lists what needs a look."],
+      ["Verdict", "Green when the schedule is on, the server has memory to spare and every enabled job was backed up in its last run. Amber or red lists what needs a look."],
       ["Gauges", "Backup memory against its throttle (MemoryHigh) and hard limit (MemoryMax), memory that cannot be reclaimed, swap, CPU against its quota, tasks, and the server's free RAM and memory pressure. The thin marks are the watchdog's thresholds."],
-      ["Entries table", "Each entry's state, last run, when it was last backed up, how many files changed last run, and how many files are being skipped because they keep changing. Click a row to open the entry."]
+      ["Jobs table", "Each job's state, last run, when it was last backed up, how many files changed last run, and how many files are being skipped because they keep changing. Click a row to open the job."]
     ]
   },
   entry: {
-    title: "An entry",
+    title: "A backup job",
     sections: [
-      ["Overview", "What is backed up and where, previous versions and how long they are kept, when the entry last ran and was last backed up, when the next run reaches it, and projects that need a look."],
+      ["Buttons", "Back up now runs this job alone (with the watchdog, as usual). Edit changes any of its options and its own exclude and volatile patterns. Disable keeps it but skips it in scheduled runs. Remove deletes its line; nothing on the remote is deleted."],
+      ["Overview", "What is backed up and where, previous versions and how long they are kept, when the job last ran and was last backed up, when the next run reaches it, and projects that need a look."],
       ["Projects", "With isolation children each child directory is its own project: a failure in one never stops the others. Click a project for its paths, history and the files that changed in its last run."],
       ["Changed files", "The files each project uploaded in its last run: new, updated (the previous version moved to the archive) and removed (moved to the archive)."],
       ["Changing files", "Files modified moments before their project synced are skipped and tried again next run; their previous remote version stays. A file skipped many runs in a row never settles: exclude it or stop its writer briefly."],
-      ["Excludes & stop files", "The stop file (.nosync by default) pauses the entry or one project. .backup-excludes patterns are never uploaded; .backup-volatile patterns may change during a sync without failing it."],
-      ["Runs, Log, Source & destination", "This entry's runs with each project's result, its part of the run log, and on request the size of the source and of the destination."]
+      ["Excludes & stop files", "The stop file (.nosync by default) pauses the job or one project. .backup-excludes patterns are never uploaded; .backup-volatile patterns may change during a sync without failing it."],
+      ["Runs, Log, Source & destination", "This job's runs with each project's result, its part of the run log, and on request the size of the source and of the destination."]
     ]
   },
   admin: {
     title: "Admin",
     sections: [
-      ["What is here", "Backup Suite's settings and actions for the whole server, not for one entry: start and stop, the schedule, resource profiles, the watchdog, ntfy, server settings, every run, the sources file, logs and the audit log."],
+      ["What is here", "Backup Suite's settings and actions for the whole server, not for one job: start and stop, the schedule, resource profiles, the watchdog, ntfy, every global setting, every run, the sources file, logs and the audit log."],
       ["Changes", "Every change asks for confirmation, is validated by the control script, and is recorded in the audit log."]
     ]
   },
   actions: {
     title: "Actions & schedule",
     sections: [
-      ["File backup", "Start runs every enabled entry in file-sources.conf order. Stopping is safe for the remote copies: finished projects stay backed up and the interrupted project is redone next run."],
+      ["File backup", "Start runs every enabled job in file-sources.conf order. Stopping is safe for the remote copies: finished projects stay backed up and the interrupted project is redone next run."],
       ["Schedule", "If file-backup.timer is off, scheduled backups do not run; Home then shows a warning."]
     ]
   },
-  server: {
-    title: "Server settings",
+  settings: {
+    title: "All settings",
     sections: [
-      ["global.conf", "Run time limit, how long previous versions are kept, and the changing-file rules. Each change is validated, confirmed, backed up and audited, and applies from the next run."]
+      ["global.conf", "Every key of Backup Suite's global.conf, grouped. Each save is checked by the server, confirmed, backed up and audited, and applies from the next run."],
+      ["Schedule", "When file and database backups run (systemd calendar expressions). Saved changes are applied to the timers at once."],
+      ["Remote", "Changing the remote root, the hostname folder or the default destination moves every job's destination: the next run uploads everything again there; nothing is moved or deleted."],
+      ["Read-only", "Programs and paths that run as root (rclone binary, extra rclone flags, config and state paths), the folders jobs may back up, and install options are shown but changed in global.conf on the server only: from the GUI they could make root run anything."]
     ]
   },
   logs: {
     title: "Logs",
     sections: [
-      ["Journals", "The systemd journal of the file and database backups, the watchdog, and the GUI's control requests. An entry's own part of the run log is on its Log tab."]
+      ["Journals", "The systemd journal of the file and database backups, the watchdog, and the GUI's control requests. A job's own part of the run log is on its Log tab."]
     ]
   },
   runs: {
@@ -106,7 +111,7 @@ window.BACKUP_SUITE_HELP = {
   details: {
     title: "Details",
     sections: [
-      ["Details panel", "Shows the log, record or preview you opened. Maximize it for long logs; close it to give the main panel more room."]
+      ["Details panel", "Shows the project, run, log, record or preview you opened. Maximize it for long logs; close it to give the main panel more room."]
     ]
   },
   settings: {

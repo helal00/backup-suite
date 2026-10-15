@@ -434,8 +434,8 @@ tr.is-disabled td { color: var(--muted); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 /* Admin dialog: backup-wide settings and actions */
-.admin-dialog { width: min(92rem, calc(100vw - 1.5rem)); height: min(56rem, calc(100vh - 1.5rem)); max-width: none; max-height: none; display: none; flex-direction: column; padding: 0.9rem; }
-.admin-dialog[open] { display: flex; }
+.dialog.admin-dialog { width: min(92rem, calc(100vw - 1.5rem)); height: min(56rem, calc(100vh - 1.5rem)); max-width: none; max-height: none; display: none; flex-direction: column; padding: 0.9rem; }
+.dialog.admin-dialog[open] { display: flex; }
 .admin-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(11rem, 14rem) minmax(0, 1fr) auto; gap: 0.75rem; }
 .admin-tabs { display: flex; flex-direction: column; gap: 0.25rem; overflow: auto; }
 .admin-tabs button { text-align: left; border-color: transparent; background: transparent; }
@@ -701,7 +701,7 @@ mark { background: var(--warn-soft); color: var(--text); outline: 1px solid var(
   }
   .layout .sidebar, .layout .details { display: none; position: static; max-height: none; }
   .layout.show-sidebar .sidebar { display: flex; }
-  .admin-dialog { width: calc(100vw - 0.5rem); height: calc(100vh - 0.5rem); padding: 0.6rem; }
+  .dialog.admin-dialog { width: calc(100vw - 0.5rem); height: calc(100vh - 0.5rem); padding: 0.6rem; }
   .admin-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .admin-tabs { flex-direction: row; flex-wrap: wrap; }
   .admin-details { position: fixed; inset: 0.5rem; width: auto; z-index: 70; box-shadow: var(--shadow); }
@@ -738,3 +738,25 @@ mark { background: var(--warn-soft); color: var(--text); outline: 1px solid var(
 @media (prefers-reduced-motion: no-preference) {
   .gauge-fill { transition: width 0.4s ease; }
 }
+
+/* Job editor, job actions, all settings */
+.notice.ok { border-color: var(--ok); background: var(--ok-soft); }
+.notice ul { margin: 0.25rem 0 0; padding-left: 1.2rem; }
+.dialog.job-dialog { width: min(64rem, calc(100vw - 1.5rem)); }
+.job-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); gap: 0.75rem; }
+.job-form-grid label { display: flex; flex-direction: column; gap: 0.25rem; margin: 0.35rem 0; }
+.job-form-grid label.inline-check { flex-direction: row; align-items: flex-start; }
+.job-form-grid textarea, .setting-row textarea { width: 100%; font-family: var(--font-mono); font-size: 0.85rem; resize: vertical; }
+.radio-group { border: none; padding: 0; margin: 0.4rem 0; }
+.radio-group legend { font-weight: 600; margin-bottom: 0.2rem; }
+.job-check { grid-column: 1 / -1; border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.75rem; background: var(--panel-sunken); min-width: 0; }
+.job-check h3 { margin: 0 0 0.4rem; font-size: 0.95rem; }
+.job-check code { overflow-wrap: anywhere; }
+.job-actions { margin: 0.25rem 0 0.6rem; }
+.setting-row.readonly { background: var(--panel-sunken); }
+.setting-row .readonly-value { overflow-wrap: anywhere; font-size: 0.85rem; }
+.setting-key { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; }
+.sticky-save { position: sticky; bottom: 0; background: var(--panel); padding: 0.5rem 0; border-top: 1px solid var(--border); }
+#new-job-button { width: 100%; }
+.job-form-grid fieldset { min-width: 0; }
+.job-form-grid input[type="text"], .job-form-grid select, .job-form-grid textarea { width: 100%; box-sizing: border-box; }

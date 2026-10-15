@@ -34,6 +34,9 @@ FILE_ARCHIVE_FOLDER_NAME="deleted_files"
 FILE_ARCHIVE_SUFFIX="_old"
 FILE_RETENTION_DAYS="21d"
 FILE_SYNC_STOP_FILE=".nosync"
+# Folders a backup job may back up (the GUI's job editor refuses anything else, and
+# always refuses system folders and Backup Suite's own). Only set here, on the server.
+FILE_JOB_SOURCE_ROOTS="/home /var/www /srv /opt"
 FILE_PROJECT_EXCLUDE_FILENAME=".backup-excludes"
 # Explicit rebuildable AgentW runtime artifacts. Canonical .ai-metadata Markdown
 # continuity files remain included.

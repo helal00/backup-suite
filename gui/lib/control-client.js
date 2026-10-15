@@ -19,9 +19,9 @@ const path = require("path");
 
 const READ_TIMEOUT_MS = 15000;
 const CHANGE_TIMEOUT_MS = 75000;
-// entry.measure walks a whole source tree or asks rclone for a destination's size.
+// job.measure walks a whole source tree or asks rclone for a destination's size.
 const SLOW_TIMEOUT_MS = 115000;
-const SLOW_VERBS = new Set(["entry.measure"]);
+const SLOW_VERBS = new Set(["job.measure"]);
 const MAX_REPLY_BYTES = 16 * 1024 * 1024;
 
 const VERBS = {
@@ -29,8 +29,8 @@ const VERBS = {
   deferrals: false, "sources.get": false, "excludes.list": false, "profile.show": false, "profile.preview": false,
   "profile.set": true, "profile.limits": true, "profile.override": true, "config.get": false, "config.set": true,
   "backup.start": true, "backup.stop": true, "timer.set": true, "notify.test": true, "events.since": false,
-  "events.stat": false, audit: false, entries: false, entry: false, "entry.changes": false, "entry.log": false,
-  "entry.measure": false
+  "events.stat": false, audit: false, jobs: false, job: false, "job.changes": false, "job.log": false,
+  "job.measure": false, "job.check": false, "job.save": true, "job.enable": true, "job.remove": true, "job.run": true
 };
 
 function homeDir(env) {

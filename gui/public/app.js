@@ -19,7 +19,6 @@
     ["Adaptive steps", ["WATCHDOG_ADAPTIVE_STEP_DOWN_AVAILABLE_PERCENT", "WATCHDOG_ADAPTIVE_STEP_DOWN_PSI_FULL", "WATCHDOG_ADAPTIVE_STEP_UP_AVAILABLE_PERCENT", "WATCHDOG_ADAPTIVE_STEP_UP_SECONDS", "WATCHDOG_ADAPTIVE_COOLDOWN_SECONDS", "WATCHDOG_NOTIFY_PROFILE_STEPS"]]
   ];
   const NTFY_KEYS = ["NOTIFY_FAILURES_ENABLED", "NOTIFY_NTFY_TOPIC_URL", "NOTIFY_NTFY_TOKEN", "NOTIFY_NTFY_PRIORITY", "NOTIFY_NTFY_TITLE_PREFIX", "NOTIFY_NTFY_ATTACH_DETAILS", "NOTIFY_NTFY_MESSAGE_MAX_BYTES"];
-  const SERVER_KEYS = ["FILE_BACKUP_RUNTIME_MAX_SEC", "FILE_RETENTION_DAYS", "FILE_ACTIVE_TRACKING_ENABLED", "FILE_ACTIVE_WINDOW_SECONDS", "FILE_ACTIVE_MAX_DEFERRALS"];
   const SEEN_KEY = "backup-suite-gui-events-seen";
 
   const state = {
@@ -533,14 +532,14 @@
     const cards = h("div", { class: "cards" });
     cards.append(h("section", { class: "card" }, h("h3", {}, "File backup"), kv([
       ["State", pill(backupState.label, backupState.key === "running" ? "info" : backupState.key === "failed" ? "bad" : backupState.key === "paused" ? "warn" : "ok")],
-      running && progress.current_entry ? ["Entry", progress.current_entry] : null,
+      running && progress.current_entry ? ["Job", progress.current_entry] : null,
       running && progress.current_project ? ["Project", h("code", {}, progress.current_project)] : null,
       status.watchdog_last_action?.reason ? ["Last watchdog stop", h("span", {}, status.watchdog_last_action.reason, " ", timeNode(status.watchdog_last_action.at || status.watchdog_last_action.time))] : null
     ].filter(Boolean)),
     h("div", { class: "toolbar-row tight" },
       h("button", { type: "button", class: "primary-button", dataset: { key: "start-files" }, disabled: running, onclick: () => runAction("start-files") }, "Start file backup now"),
       h("button", { type: "button", class: "danger-button", dataset: { key: "stop-files" }, disabled: !running, onclick: () => runAction("stop-files") }, "Stop file backup")),
-    h("p", { class: "muted" }, "A file backup always covers every enabled entry, in file-sources.conf order.")));
+    h("p", { class: "muted" }, "A scheduled file backup covers every enabled job, in file-sources.conf order. To back up one job, use Back up now on its page.")));
     const dbRows = ["database-backup.service", "database-size-check.service"].map((unit) => {
       const info = status.services?.[unit] || {};
       const ok = !info.Result || info.Result === "success";
@@ -559,27 +558,6 @@
     scheduleCard.append(timersTable(status));
     cards.append(scheduleCard);
     body.append(cards);
-  };
-
-  // Admin: server settings (global.conf) -----------------------------------------
-
-  renderers.server = async (body) => {
-    body.append(loadingNode());
-    let config;
-    try {
-      config = await control("config.get");
-    } catch (error) {
-      clear(body).append(errorNode(error));
-      return;
-    }
-    clear(body);
-    const byKey = Object.fromEntries(config.settings.map((entry) => [entry.key, entry]));
-    const form = h("div", { class: "threshold-grid" }, SERVER_KEYS.filter((key) => byKey[key]).map((key) => settingField(byKey[key])));
-    body.append(h("p", { class: "muted" }, "These change Backup Suite's global.conf on the server. Each save is confirmed, backed up and recorded in the audit log. Watchdog thresholds and ntfy have their own tabs."),
-      form,
-      h("div", { class: "toolbar-row end" }, h("button", { type: "button", class: "primary-button", onclick: async () => {
-        if (await saveConfig(collectChanges(form), config, { title: "Save server settings?", note: "They apply from the next backup run." })) renderAdmin();
-      } }, "Save server settings…")));
   };
 
   // Admin: logs -------------------------------------------------------------------
@@ -957,6 +935,9 @@
       input = h("input", { id, name: entry.key, type: "password", autocomplete: "new-password", placeholder: entry.is_set ? "set — type to replace" : "not set", spellcheck: "false" });
     } else if (entry.kind === "url" && entry.masked) {
       input = h("input", { id, name: entry.key, type: "url", placeholder: entry.value || "not set", spellcheck: "false" });
+    } else if (entry.kind === "patterns") {
+      input = h("textarea", { id, name: entry.key, rows: "4", spellcheck: "false", dataset: { join: "|" } });
+      input.value = (entry.value || "").split("|").filter(Boolean).join("\n");
     } else if (entry.kind === "int") {
       input = h("input", { id, name: entry.key, type: "number", min: entry.min, max: entry.max, step: "1", value: entry.value || entry.default });
     } else {
@@ -977,7 +958,7 @@
 
   function collectChanges(container) {
     const changes = {};
-    for (const input of container.querySelectorAll("input[name], select[name]")) {
+    for (const input of container.querySelectorAll("input[name], select[name], textarea[name]")) {
       if (input.name.endsWith("__clear")) {
         if (input.checked) changes[input.name.replace("__clear", "")] = "";
         continue;
@@ -986,7 +967,8 @@
         if (input.value) changes[input.name] = input.value.trim();
         continue;
       }
-      if (input.value !== input.dataset.original) changes[input.name] = input.value.trim();
+      if (input.value === input.dataset.original) continue;
+      changes[input.name] = input.dataset.join ? input.value.split("\n").map((line) => line.trim()).filter(Boolean).join(input.dataset.join) : input.value.trim();
     }
     return changes;
   }
@@ -1098,7 +1080,7 @@
     clear(body);
     body.append(h("p", { class: "notice info" }, "Sources are read-only in this version. Edit ", h("code", {}, sources.path), " on the server; editing here arrives in a later version."),
       kv([["File", h("code", {}, sources.path)], ["Modified", timeNode(sources.modified)], ["SHA-256", h("code", {}, sources.sha256.slice(0, 16) + "…")]]));
-    body.append(h("h3", {}, "Entries"), sources.rows.length ? h("div", { class: "table-wrap" }, h("table", {},
+    body.append(h("h3", {}, "Jobs (lines)"), sources.rows.length ? h("div", { class: "table-wrap" }, h("table", {},
       h("thead", {}, h("tr", {}, ["Line", "Enabled", "Label", "Source", "Destination", "Stop file", "Isolation"].map((label) => h("th", {}, label)))),
       h("tbody", {}, sources.rows.map((row) => h("tr", {},
         h("td", { class: "num" }, row.line),
@@ -1107,7 +1089,7 @@
         h("td", {}, h("code", {}, row.source), row.source_exists ? "" : h("span", {}, " ", pill("missing", "bad"))),
         h("td", {}, `${row.destination_mode}${row.destination_value ? `: ${row.destination_value}` : ""}`),
         h("td", {}, row.stop_file || "default"),
-        h("td", {}, row.isolation)))))) : h("p", { class: "empty" }, "No entries."));
+        h("td", {}, row.isolation)))))) : h("p", { class: "empty" }, "No jobs."));
     body.append(h("h3", {}, "Raw file"), textBlock(sources.text, { searchable: false, fileName: "file-sources.conf" }));
     const excludesHost = h("div", {}, loadingNode("Looking for .backup-excludes files…"));
     body.append(h("h3", {}, "Per-project exclude files"), excludesHost);
@@ -1183,7 +1165,7 @@
   }
 
   function entryHash(name, tab) {
-    return `#entry/${encodeURIComponent(name)}${tab && tab !== "overview" ? `/${tab}` : ""}`;
+    return `#job/${encodeURIComponent(name)}${tab && tab !== "overview" ? `/${tab}` : ""}`;
   }
 
   // The state an entry is in now, for its card and its page.
@@ -1211,11 +1193,11 @@
 
   async function loadEntries({ quiet = false } = {}) {
     try {
-      state.entriesData = await control("entries");
+      state.entriesData = await control("jobs");
       state.entriesError = null;
     } catch (error) {
       state.entriesError = error;
-      if (!quiet && error?.code !== "invalid_request") toast(`Entries: ${errorText(error)}`, "error");
+      if (!quiet && error?.code !== "invalid_request") toast(`Backup jobs: ${errorText(error)}`, "error");
     }
     state.entriesLoadedAt = Date.now();
     renderEntryList();
@@ -1226,7 +1208,7 @@
   // answers "Unknown verb" until it is deployed again.
   function entriesErrorNode(error) {
     if (error?.code === "invalid_request" && /Unknown verb/i.test(error.message || "")) {
-      return h("div", { class: "notice info" }, "The installed Backup Suite is older than this GUI: per-entry pages need the latest version. Deploy it (sudo ./production-deploy.sh …), then reload. Home and Admin work meanwhile.");
+      return h("div", { class: "notice info" }, "The installed Backup Suite is older than this GUI: backup jobs need the latest version. Deploy it (sudo ./production-deploy.sh …), then reload. Home and Admin work meanwhile.");
     }
     return errorNode(error);
   }
@@ -1235,16 +1217,16 @@
     const host = $("#entry-list");
     const data = state.entriesData;
     if (!data) {
-      clear(host).append(state.entriesError ? entriesErrorNode(state.entriesError) : loadingNode("Loading entries…"));
+      clear(host).append(state.entriesError ? entriesErrorNode(state.entriesError) : loadingNode("Loading backup jobs…"));
       return;
     }
     const filter = $("#entry-filter").value;
-    const entries = data.entries.filter((entry) => filter === "all" || (filter === "enabled" ? entry.enabled : entryNeedsAttention(entry)));
+    const entries = data.jobs.filter((entry) => filter === "all" || (filter === "enabled" ? entry.enabled : entryNeedsAttention(entry)));
     const home = $("#home-button");
     if (state.view.kind === "home") home.setAttribute("aria-current", "page");
     else home.removeAttribute("aria-current");
-    const attention = data.entries.filter(entryNeedsAttention).length;
-    $("#home-card-note").textContent = attention ? `${attention} entr${attention === 1 ? "y needs" : "ies need"} attention` : "System condition";
+    const attention = data.jobs.filter(entryNeedsAttention).length;
+    $("#home-card-note").textContent = attention ? `${attention} job${attention === 1 ? " needs" : "s need"} attention` : "System condition";
     const cards = entries.map((entry) => {
       const condition = entryCondition(entry);
       const selected = state.view.kind === "entry" && state.view.name === entry.name;
@@ -1264,8 +1246,8 @@
         last && last.changes_known ? ` · ${last.new + last.updated + last.removed} changed` : "",
         entry.changing_files ? ` · ${entry.changing_files} changing` : "") : null);
     });
-    append(clear(host), [cards.length ? cards : h("p", { class: "empty" }, filter === "attention" ? "No entry needs attention." : "No entries.")]);
-    if (data.legacy) host.append(h("p", { class: "muted small-note" }, "Per-entry history starts with the next backup run; until then the latest run's log is used."));
+    append(clear(host), [cards.length ? cards : h("p", { class: "empty" }, filter === "attention" ? "No job needs attention." : "No backup jobs yet. Add one with + New job.")]);
+    if (data.legacy) host.append(h("p", { class: "muted small-note" }, "Per-job history starts with the next backup run; until then the latest run's log is used."));
   }
 
   function openEntry(name, tab = "overview") {
@@ -1301,7 +1283,7 @@
       if (info && info.Result && info.Result !== "success") problems.push(`${unit.replace(".service", "")}: last result ${info.Result}.`);
     }
     if (entriesData) {
-      for (const entry of entriesData.entries.filter(entryNeedsAttention)) {
+      for (const entry of entriesData.jobs.filter(entryNeedsAttention)) {
         const condition = entryCondition(entry);
         (condition.kind === "bad" ? problems : notes).push(`${entry.name}: ${condition.label}.`);
       }
@@ -1326,7 +1308,7 @@
       h("h3", {}, verdict.level === "ok" ? "Everything is in order" : verdict.level === "warn" ? "Working, with notes" : verdict.level === "bad" ? "Needs attention" : "Checking…"));
     if (verdict.problems.length) verdictCard.append(h("ul", {}, verdict.problems.map((line) => h("li", {}, line))));
     if (verdict.notes.length) verdictCard.append(h("ul", { class: "muted" }, verdict.notes.map((line) => h("li", {}, line))));
-    if (!verdict.problems.length && !verdict.notes.length) verdictCard.append(h("p", { class: "muted" }, "The schedule is on, the server has memory to spare, and every enabled entry's last run was backed up."));
+    if (!verdict.problems.length && !verdict.notes.length) verdictCard.append(h("p", { class: "muted" }, "The schedule is on, the server has memory to spare, and every enabled job's last run was backed up."));
     cards.append(verdictCard);
 
     const next = nextRunDate();
@@ -1334,7 +1316,7 @@
     if (running) {
       const started = parseTime(progress.started_at);
       nowRows.push(["Started", h("span", {}, timeNode(progress.started_at), started ? ` (${relative(started)})` : "")]);
-      if (progress.current_entry) nowRows.push(["Entry", h("button", { type: "button", class: "link-button", onclick: () => openEntry(progress.current_entry) }, progress.current_entry)]);
+      if (progress.current_entry) nowRows.push(["Job", h("button", { type: "button", class: "link-button", onclick: () => openEntry(progress.current_entry) }, progress.current_entry)]);
       if (progress.current_project) nowRows.push(["Project", h("code", {}, progress.current_project)]);
       if (progress.projects_total) nowRows.push(["Progress", `project ${progress.project_index || 0} of ${progress.projects_total}`]);
       nowRows.push(["So far", `synced ${progress.synced || 0}, skipped ${progress.skipped || 0}, kept while changing ${(Number(progress.skipped_changed) || 0) + (Number(progress.deferred_active) || 0)}, failed ${progress.failed || 0}`]);
@@ -1359,11 +1341,11 @@
       h("div", { class: "legend" }, h("span", { class: "memory" }, "Backup memory (% of hard limit)"), h("span", { class: "cpu" }, "Backup CPU %"), h("span", { class: "available" }, "Server RAM available %"))));
 
     const data = state.entriesData;
-    const entriesCard = h("section", { class: "card wide" }, h("h3", {}, "Backup entries"));
+    const entriesCard = h("section", { class: "card wide" }, h("h3", {}, "Backup jobs"));
     if (data) {
       entriesCard.append(h("div", { class: "table-wrap" }, h("table", {},
-        h("thead", {}, h("tr", {}, ["Entry", "State", "Last run", "Last backed up", "Changed last run", "Changing files"].map((label) => h("th", {}, label)))),
-        h("tbody", {}, data.entries.map((entry) => {
+        h("thead", {}, h("tr", {}, ["Job", "State", "Last run", "Last backed up", "Changed last run", "Changing files"].map((label) => h("th", {}, label)))),
+        h("tbody", {}, data.jobs.map((entry) => {
           const condition = entryCondition(entry);
           const last = entry.last_run;
           return h("tr", { class: `clickable ${entry.enabled ? "" : "is-disabled"}`, tabindex: "0", onclick: () => openEntry(entry.name), onkeydown: (event) => { if (event.key === "Enter") openEntry(entry.name); } },
@@ -1412,7 +1394,7 @@
     let data = state.entryCache[name];
     if (!data) body.append(loadingNode());
     try {
-      data = await control("entry", { name });
+      data = await control("job", { name });
       state.entryCache[name] = data;
     } catch (error) {
       if (!data) {
@@ -1428,7 +1410,8 @@
     body.append(h("div", { class: "entry-headline" },
       pill(entry.enabled ? "enabled" : "disabled", entry.enabled ? "ok" : ""), " ", pill(condition.label, condition.kind),
       h("span", { class: "muted" }, ` line ${entry.line} of file-sources.conf · ${entry.isolation === "children" ? `one project per child directory (${data.projects.length})` : "one project"}`)));
-    if (data.legacy) body.append(h("p", { class: "notice info" }, "Per-entry history is recorded from the next backup run on. Until then this page shows what the latest run's log says."));
+    body.append(jobActionBar(data));
+    if (data.legacy) body.append(h("p", { class: "notice info" }, "Per-job history is recorded from the next backup run on. Until then this page shows what the latest run's log says."));
     const tabBar = h("div", { class: "settings-tabs entry-tabs", role: "tablist", "aria-label": `${entry.name} sections` },
       ENTRY_TABS.map(([key, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(key === tab), onclick: () => openEntry(name, key) }, label)));
     const panel = h("div", { class: "entry-panel", role: "tabpanel" });
@@ -1468,7 +1451,7 @@
     ]);
     showDetails(title, [head, loadingNode("Loading this project's changed files…")]);
     try {
-      const changes = await control("entry.changes", { name: data.entry.name, project: project.project });
+      const changes = await control("job.changes", { name: data.entry.name, project: project.project });
       showDetails(title, [head, changesView(changes)]);
     } catch (error) {
       showDetails(title, [head, h("h3", {}, "Changed files"), h("p", { class: "muted" }, error.code === "not_found" ? "No changes recorded for this project yet." : errorText(error))]);
@@ -1499,13 +1482,13 @@
       const next = nextRunDate();
       const cards = h("div", { class: "cards" });
       if (entry.problem) cards.append(h("section", { class: "card wide alert-bad" }, h("h3", {}, "Problem"), h("p", {}, entry.problem)));
-      if (entry.stop_file_present) cards.append(h("section", { class: "card wide alert-warn" }, h("h3", {}, "Paused"), h("p", {}, `${entry.stop_file} exists in ${entry.source}: the whole entry is skipped until it is removed.`)));
+      if (entry.stop_file_present) cards.append(h("section", { class: "card wide alert-warn" }, h("h3", {}, "Paused"), h("p", {}, `${entry.stop_file} exists in ${entry.source}: the whole job is skipped until it is removed.`)));
       cards.append(h("section", { class: "card wide" }, h("h3", {}, "What is backed up, and where"), kv([
         ["Source", h("code", {}, entry.source)],
         ["Destination", h("code", {}, entry.destination || "—")],
         ["Mapping", `${entry.destination_mode}${entry.destination_value ? `: ${entry.destination_value}` : ""}`],
         ["Projects", entry.isolation === "children" ? `each child directory is its own project (${data.projects.length}); a failure in one never stops the others` : "the whole source is one project"],
-        ["Stop file", `${entry.stop_file}: in the source pauses the entry${entry.isolation === "children" ? ", in a child pauses that project" : ""}`],
+        ["Stop file", `${entry.stop_file}: in the source pauses the job${entry.isolation === "children" ? ", in a child pauses that project" : ""}`],
         ["Previous versions", h("span", {}, "replaced and deleted files move to ", h("code", {}, entry.archive), ` and are kept ${entry.retention}`)]
       ])));
       const runRows = [
@@ -1517,12 +1500,12 @@
       ];
       if (data.position && next) {
         const reach = new Date(next.getTime() + data.position.offset_s * 1000);
-        runRows.push(["Reaches this entry", h("span", {}, "about ", timeNode(reach.toISOString()), ` and takes about ${duration(data.position.duration_s)} (as in the last run)`)]);
+        runRows.push(["Reaches this job", h("span", {}, "about ", timeNode(reach.toISOString()), ` and takes about ${duration(data.position.duration_s)} (as in the last run)`)]);
       }
       cards.append(h("section", { class: "card" }, h("h3", {}, "When"), kv(runRows)));
-      cards.append(h("section", { class: "card" }, h("h3", {}, "Last run of this entry"), last ? kv([
+      cards.append(h("section", { class: "card" }, h("h3", {}, "Last run of this job"), last ? kv([
         ["Projects", `${last.projects}: ${last.synced} synced, ${last.skipped} skipped, ${last.failed} failed${last.other ? `, ${last.other} other` : ""}`],
-        ["Files", last.changes_known ? `${last.new} new, ${last.updated} updated, ${last.removed} removed` : "not recorded (before per-entry history)"],
+        ["Files", last.changes_known ? `${last.new} new, ${last.updated} updated, ${last.removed} removed` : "not recorded (before per-job history)"],
         ["Kept while changing", String(last.deferred)],
         ["Took", last.started && last.ended ? duration((parseTime(last.ended) - parseTime(last.started)) / 1000) : "—"]
       ]) : h("p", { class: "muted" }, "No run recorded yet.")));
@@ -1577,7 +1560,7 @@
           const target = h("div", {}, loadingNode());
           section.append(target);
           try {
-            const changes = await control("entry.changes", { name: data.entry.name, project: project.project });
+            const changes = await control("job.changes", { name: data.entry.name, project: project.project });
             append(clear(target), changesView(changes).slice(1));
           } catch (error) {
             clear(target).append(errorNode(error));
@@ -1595,20 +1578,20 @@
         h("tbody", {}, data.changing.map((row) => h("tr", { class: row.count >= data.max_deferrals ? "highlight" : "" },
           h("td", {}, row.project.split("/").pop()), h("td", {}, h("code", {}, row.path)),
           h("td", { class: "num" }, row.count >= data.max_deferrals ? h("span", {}, String(row.count), " ", pill("never settles", "warn")) : String(row.count)),
-          h("td", {}, timeNode(row.updated))))))) : h("p", { class: "empty" }, "No file of this entry is being skipped."));
+          h("td", {}, timeNode(row.updated))))))) : h("p", { class: "empty" }, "No file of this job is being skipped."));
     },
 
     excludes: (panel, data) => {
       const entry = data.entry;
       const stopped = data.projects.filter((project) => project.stop_file_present);
-      panel.append(h("h3", {}, "Stop file"), h("p", {}, `${entry.stop_file} in ${entry.isolation === "children" ? "the source skips the whole entry; in a child directory it skips that project" : "the source skips this entry"}.`),
-        entry.stop_file_present ? h("p", { class: "notice" }, `Present in the source: the entry is paused.`) : null,
+      panel.append(h("h3", {}, "Stop file"), h("p", {}, `${entry.stop_file} in ${entry.isolation === "children" ? "the source skips the whole job; in a child directory it skips that project" : "the source skips this job"}.`),
+        entry.stop_file_present ? h("p", { class: "notice" }, `Present in the source: the job is paused.`) : null,
         stopped.length ? h("ul", {}, stopped.map((project) => h("li", {}, h("code", {}, project.source), " is paused"))) : h("p", { class: "muted" }, "No project is paused by a stop file."));
       const patternSection = (title, block, explanation) => {
         panel.append(h("h3", {}, title), h("p", { class: "muted" }, explanation));
         if (block.global.length) panel.append(h("details", {}, h("summary", {}, `Global patterns for every project (${block.global.length})`), h("pre", {}, block.global.join("\n"))));
         if (block.truncated) panel.append(h("p", { class: "notice info" }, "The search stopped early; not every file is listed."));
-        if (!block.files.length) panel.append(h("p", { class: "muted" }, `No ${block.filename} file in this entry.`));
+        if (!block.files.length) panel.append(h("p", { class: "muted" }, `No ${block.filename} file in this job's source.`));
         for (const file of block.files) panel.append(h("details", {}, h("summary", {}, h("code", {}, file.relative), ` (${file.lines.length} line(s))`), h("pre", {}, file.lines.join("\n") || "(empty)")));
       };
       patternSection("Excluded files", data.excludes, `Patterns in ${data.excludes.filename} files are never uploaded (relative to the folder that holds the file).`);
@@ -1617,10 +1600,10 @@
 
     runs: (panel, data) => {
       if (!data.runs.length) {
-        panel.append(h("p", { class: "empty" }, "No run of this entry recorded yet."));
+        panel.append(h("p", { class: "empty" }, "No run of this job recorded yet."));
         return;
       }
-      panel.append(h("p", { class: "muted" }, "Each backup run of this entry, newest first. Click a run for each project's result and the entry's part of the log."));
+      panel.append(h("p", { class: "muted" }, "Each backup run of this job, newest first. Click a run for each project's result and the job's part of the log."));
       panel.append(h("div", { class: "table-wrap" }, h("table", {},
         h("thead", {}, h("tr", {}, ["Run", "Result", "Projects", "New / updated / removed", "Kept while changing", "Took"].map((label) => h("th", {}, label)))),
         h("tbody", {}, data.runs.map((run) => h("tr", { class: "clickable", tabindex: "0", onclick: () => openEntryRun(data, run), onkeydown: (event) => { if (event.key === "Enter") openEntryRun(data, run); } },
@@ -1634,8 +1617,8 @@
     log: async (panel, data) => {
       panel.append(loadingNode());
       try {
-        const log = await control("entry.log", { name: data.entry.name });
-        clear(panel).append(h("p", { class: "muted" }, log.run ? `This entry's lines of the run started ${log.run}.` : "No run in the durable log yet."),
+        const log = await control("job.log", { name: data.entry.name });
+        clear(panel).append(h("p", { class: "muted" }, log.run ? `This job's lines of the run started ${log.run}.` : "No run in the durable log yet."),
           log.truncated ? h("p", { class: "notice info" }, "Only the last 2000 lines are shown.") : null,
           textBlock(log.lines, { fileName: `${data.entry.name.replace(/[^A-Za-z0-9._-]+/g, "_")}-log.txt` }));
       } catch (error) {
@@ -1650,7 +1633,7 @@
         const host = resultHost[what];
         clear(host).append(loadingNode(what === "source" ? "Counting files in the source (up to 90 s)…" : "Asking the remote for the destination's size (up to 90 s)…"));
         try {
-          const result = await control("entry.measure", { name: entry.name, what });
+          const result = await control("job.measure", { name: entry.name, what });
           const r = result.result;
           clear(host).append(kv([
             ["Measured", timeNode(result.at)],
@@ -1684,11 +1667,270 @@
         h("td", { class: "num" }, item.new === null || item.new === undefined ? "—" : `${item.new} / ${item.updated} / ${item.removed}`), h("td", { class: "num" }, String(item.deferred)))))));
     showDetails(title, [table, loadingNode("Loading the log…")]);
     try {
-      const log = await control("entry.log", { name: data.entry.name, run: run.run });
-      showDetails(title, [table, h("h3", {}, "This entry's lines of the run log"), textBlock(log.lines, { fileName: `${data.entry.name.replace(/[^A-Za-z0-9._-]+/g, "_")}-${run.run.replace(/[^0-9]/g, "")}.log` })]);
+      const log = await control("job.log", { name: data.entry.name, run: run.run });
+      showDetails(title, [table, h("h3", {}, "This job's lines of the run log"), textBlock(log.lines, { fileName: `${data.entry.name.replace(/[^A-Za-z0-9._-]+/g, "_")}-${run.run.replace(/[^0-9]/g, "")}.log` })]);
     } catch (error) {
       showDetails(title, [table, h("p", { class: "muted" }, `Log: ${errorText(error)}`)]);
     }
+  }
+
+  // ------------------------------------------------------------------ job changes
+  //
+  // New job, Edit, Enable/Disable, Remove and Back up now. Every change is checked
+  // by the server (job.check as you type, again on save), confirmed, and refused if
+  // file-sources.conf changed since the page read it.
+
+  const jobEditor = { name: null, sha: "", timer: null, check: null, token: 0 };
+
+  function patternsText(list) {
+    return (list || []).join("\n");
+  }
+
+  function readJobForm() {
+    const form = $("#job-form");
+    const lines = (name) => form.elements[name].value.split("\n").map((line) => line.trim()).filter(Boolean);
+    return {
+      enabled: form.elements.enabled.checked,
+      label: form.elements.label.value.trim(),
+      source: form.elements.source.value.trim(),
+      destination_mode: form.elements.destination_mode.value,
+      destination_value: form.elements.destination_value.value.trim(),
+      stop_file: form.elements.stop_file.value.trim(),
+      isolation: form.querySelector('input[name="isolation"]:checked')?.value || "single",
+      excludes: lines("excludes"),
+      volatile: lines("volatile")
+    };
+  }
+
+  function renderJobCheck(result) {
+    const host = clear($("#job-check"));
+    const info = result.info || {};
+    host.append(h("h3", {}, "Check"),
+      kv([
+        ["Destination", info.destination ? h("code", {}, info.destination) : "—"],
+        ["Projects", info.projects === null || info.projects === undefined ? "—" : String(info.projects)],
+        ["Line written", h("code", {}, info.line || "—")]
+      ]));
+    if (result.problems.length) host.append(h("div", { class: "notice bad", role: "alert" }, h("strong", {}, "Cannot be saved yet"), h("ul", {}, result.problems.map((line) => h("li", {}, line)))));
+    if (result.warnings.length) host.append(h("div", { class: "notice" }, h("strong", {}, "Note"), h("ul", {}, result.warnings.map((line) => h("li", {}, line)))));
+    if (!result.problems.length && !result.warnings.length) host.append(h("p", { class: "notice ok" }, "Looks good."));
+    $("#job-save-button").disabled = result.problems.length > 0;
+    $("#job-roots-note").textContent = info.roots?.length ? `Allowed under: ${info.roots.join(", ")} (FILE_JOB_SOURCE_ROOTS, set on the server). System folders and Backup Suite's own folders are never allowed.` : "";
+  }
+
+  function scheduleJobCheck() {
+    clearTimeout(jobEditor.timer);
+    jobEditor.timer = setTimeout(async () => {
+      const token = ++jobEditor.token;
+      const job = readJobForm();
+      const destinationInput = $("#job-form").elements.destination_value;
+      destinationInput.disabled = job.destination_mode === "same-name";
+      try {
+        const args = { job };
+        if (jobEditor.name) args.name = jobEditor.name;
+        const result = await control("job.check", args);
+        if (token !== jobEditor.token) return;
+        jobEditor.check = result;
+        renderJobCheck(result);
+      } catch (error) {
+        if (token !== jobEditor.token) return;
+        clear($("#job-check")).append(entriesErrorNode(error));
+      }
+    }, 350);
+  }
+
+  async function openJobEditor(name = null) {
+    const form = $("#job-form");
+    form.reset();
+    jobEditor.name = name;
+    jobEditor.check = null;
+    $("#job-dialog-title").textContent = name ? `Edit job ${name}` : "New backup job";
+    clear($("#job-check")).append(loadingNode("Checking…"));
+    let job = { enabled: true, label: "", source: "", destination_mode: "fixed", destination_value: "", stop_file: "", isolation: "single", excludes: [], volatile: [] };
+    try {
+      if (name) {
+        const data = await control("job", { name });
+        state.entryCache[name] = data;
+        const entry = data.entry;
+        jobEditor.sha = data.sha256;
+        job = { enabled: entry.enabled, label: entry.label || entry.name, source: entry.source, destination_mode: entry.destination_mode,
+          destination_value: entry.destination_value, stop_file: entry.stop_file_configured ?? "",
+          isolation: entry.isolation, excludes: data.patterns?.excludes || [], volatile: data.patterns?.volatile || [] };
+      } else {
+        const jobs = await control("jobs");
+        state.entriesData = jobs;
+        jobEditor.sha = jobs.sha256;
+      }
+    } catch (error) {
+      toast(errorText(error), "error");
+      return;
+    }
+    form.elements.label.value = job.label;
+    form.elements.enabled.checked = job.enabled;
+    form.elements.source.value = job.source;
+    form.elements.destination_mode.value = job.destination_mode;
+    form.elements.destination_value.value = job.destination_value;
+    form.elements.stop_file.value = job.stop_file;
+    for (const radio of form.querySelectorAll('input[name="isolation"]')) radio.checked = radio.value === job.isolation;
+    form.elements.excludes.value = patternsText(job.excludes);
+    form.elements.volatile.value = patternsText(job.volatile);
+    $("#job-dialog").showModal();
+    form.elements.label.focus();
+    scheduleJobCheck();
+  }
+
+  async function saveJobFromEditor() {
+    const job = readJobForm();
+    let check;
+    try {
+      check = await control("job.check", jobEditor.name ? { name: jobEditor.name, job } : { job });
+    } catch (error) {
+      toast(errorText(error), "error");
+      return;
+    }
+    renderJobCheck(check);
+    if (check.problems.length) return;
+    const before = jobEditor.name ? state.entryCache[jobEditor.name]?.entry : null;
+    const lines = [jobEditor.name ? `Changes job ${jobEditor.name} in file-sources.conf (a backup copy is kept and the change is audited):` : "Adds this line to file-sources.conf (a backup copy is kept and the change is audited):",
+      h("pre", {}, check.info.line),
+      `Destination: ${check.info.destination || "—"}`];
+    if (before && before.destination && before.destination !== check.info.destination) {
+      lines.push(h("p", { class: "notice" }, `The destination changes from ${before.destination}: the next run uploads everything again to the new place. The old copy stays where it is.`));
+    }
+    if (before && before.name !== job.label) lines.push(`Renamed from ${before.name}; its history stays under the old name.`);
+    if (check.warnings.length) lines.push(check.warnings);
+    $("#job-dialog").close();
+    if (!(await confirmAction({ title: jobEditor.name ? "Save the job?" : "Add the job?", lines, okLabel: jobEditor.name ? "Save job" : "Add job" }))) {
+      $("#job-dialog").showModal();
+      return;
+    }
+    try {
+      const args = { job, expect_sha: jobEditor.sha };
+      if (jobEditor.name) args.name = jobEditor.name;
+      const result = await control("job.save", args);
+      toast(`Job ${result.name} ${result.action}. It is backed up from the next run on.`);
+      if (jobEditor.name) delete state.entryCache[jobEditor.name];
+      await loadEntries({ quiet: true });
+      openEntry(result.name);
+    } catch (error) {
+      if (error.code === "config_conflict") toast("file-sources.conf changed on the server since the form opened. Open the editor again.", "warn", 10000);
+      else toast(`Not saved: ${errorText(error)}`, "error", 12000);
+    }
+  }
+
+  async function jobRunNow(entry) {
+    if (!(await confirmAction({
+      title: `Back up ${entry.name} now?`,
+      lines: ["Starts a file backup of this job only, with the current resource profile and the watchdog.",
+        ["Other jobs are not touched; the next scheduled run backs up every job as usual.", "A scheduled run that comes due meanwhile is skipped (one backup at a time).", "You do not have to keep the GUI open."]],
+      okLabel: "Back up now"
+    }))) return;
+    try {
+      await control("job.run", { name: entry.name });
+      toast(`Backing up ${entry.name}…`);
+    } catch (error) {
+      toast(`Not started: ${errorText(error)}`, "error", 10000);
+    }
+  }
+
+  async function jobSetEnabled(entry, sha, enabled) {
+    if (!(await confirmAction({
+      title: enabled ? `Enable ${entry.name}?` : `Disable ${entry.name}?`,
+      lines: enabled ? ["Scheduled runs back this job up again from the next run."] : ["Scheduled runs skip this job until it is enabled again.", "Nothing is deleted: its remote copy and history stay."],
+      okLabel: enabled ? "Enable" : "Disable", danger: !enabled
+    }))) return;
+    try {
+      await control("job.enable", { name: entry.name, enabled, expect_sha: sha });
+      toast(`${entry.name} ${enabled ? "enabled" : "disabled"}.`);
+      delete state.entryCache[entry.name];
+      await loadEntries({ quiet: true });
+      renderMain();
+    } catch (error) {
+      toast(error.code === "config_conflict" ? "file-sources.conf changed on the server; reload and try again." : `Failed: ${errorText(error)}`, "error", 10000);
+    }
+  }
+
+  async function jobRemove(entry, sha) {
+    if (!(await confirmAction({
+      title: `Remove job ${entry.name}?`,
+      lines: ["Removes its line from file-sources.conf and its own patterns (backup copies are kept and the change is audited).",
+        ["Nothing on the remote is deleted: the last copy stays at " + (entry.destination || "its destination") + ", and previous versions stay in the archive until they expire.", "Its history stays in the GUI under the same name.", "To pause it instead, use Disable."]],
+      okLabel: "Remove job", danger: true
+    }))) return;
+    try {
+      await control("job.remove", { name: entry.name, expect_sha: sha });
+      toast(`Job ${entry.name} removed.`, "warn");
+      delete state.entryCache[entry.name];
+      await loadEntries({ quiet: true });
+      goHome();
+    } catch (error) {
+      toast(error.code === "config_conflict" ? "file-sources.conf changed on the server; reload and try again." : `Failed: ${errorText(error)}`, "error", 10000);
+    }
+  }
+
+  function jobActionBar(data) {
+    const entry = data.entry;
+    const running = ["running", "paused"].includes(fileBackupState(state.status).key);
+    return h("div", { class: "toolbar-row tight job-actions" },
+      h("button", { type: "button", class: "primary-button", dataset: { key: "job-run" }, disabled: !entry.enabled || Boolean(entry.problem) || running,
+        title: running ? "A backup is running; try again when it has finished." : !entry.enabled ? "Enable the job first." : "", onclick: () => jobRunNow(entry) }, "Back up now"),
+      h("button", { type: "button", dataset: { key: "job-edit" }, onclick: () => openJobEditor(entry.name) }, "Edit…"),
+      h("button", { type: "button", dataset: { key: "job-toggle" }, onclick: () => jobSetEnabled(entry, data.sha256, !entry.enabled) }, entry.enabled ? "Disable…" : "Enable…"),
+      h("button", { type: "button", class: "danger-button", dataset: { key: "job-remove" }, onclick: () => jobRemove(entry, data.sha256) }, "Remove…"));
+  }
+
+  // Admin: every global setting ---------------------------------------------------
+
+  renderers.settings = async (body) => {
+    body.append(loadingNode());
+    let config;
+    try {
+      config = await control("config.get");
+    } catch (error) {
+      clear(body).append(errorNode(error));
+      return;
+    }
+    clear(body);
+    const byKey = Object.fromEntries(config.settings.map((entry) => [entry.key, entry]));
+    const form = h("div", { class: "form-host" });
+    const filter = h("input", { type: "search", placeholder: "Find a setting (name or text)", "aria-label": "Find a setting" });
+    for (const group of config.groups) {
+      const fields = group.keys.map((key) => byKey[key]).filter(Boolean).map((entry) => entry.editable ? settingField(entry) : readonlySetting(entry));
+      if (!fields.length) continue;
+      const fieldset = h("fieldset", { class: "settings-option-group", dataset: { group: group.id } }, h("legend", {}, group.label));
+      if (group.id === "schedule") fieldset.append(h("p", { class: "settings-help" }, "Applied to the timers as soon as you save. Calendar examples: *:0/30 (every 30 minutes), hourly, daily, *-*-* 02:00, Mon..Fri 22:00."));
+      if (group.id === "remote") fieldset.append(h("p", { class: "notice" }, "Changing the remote root, the hostname folder or the default destination moves where every job is backed up: the next run uploads everything again there. Nothing is moved or deleted."));
+      if (group.id === "profile") fieldset.append(h("div", { class: "toolbar-row tight" }, h("button", { type: "button", onclick: () => openAdmin("profiles") }, "Open Profiles & limits")));
+      fieldset.append(h("div", { class: "threshold-grid" }, fields));
+      form.append(fieldset);
+    }
+    filter.addEventListener("input", () => {
+      const term = filter.value.trim().toLowerCase();
+      for (const row of form.querySelectorAll(".setting-row")) row.hidden = Boolean(term) && !row.textContent.toLowerCase().includes(term);
+      for (const fieldset of form.querySelectorAll("fieldset")) fieldset.hidden = ![...fieldset.querySelectorAll(".setting-row")].some((row) => !row.hidden);
+    });
+    const errors = h("div", { class: "field-error", role: "alert" });
+    body.append(h("p", { class: "muted" }, "Every key of Backup Suite's global.conf. Each save is checked by the server, confirmed, backed up and audited. Programs and paths that run as root, and install options, are shown but changed on the server only."),
+      h("div", { class: "search-row" }, filter), form, errors,
+      h("div", { class: "toolbar-row end sticky-save" }, h("button", { type: "button", class: "primary-button", onclick: async () => {
+        const changes = collectChanges(form);
+        const problems = validateWatchdog(changes, config);
+        errors.textContent = problems.join(" ");
+        if (problems.length) return;
+        const relocating = Object.keys(changes).filter((key) => byKey[key]?.relocates);
+        const schedule = Object.keys(changes).filter((key) => byKey[key]?.schedule);
+        const note = [schedule.length ? "The schedule is applied to the timers at once." : "", relocating.length ? `${relocating.join(", ")} moves every job's destination: the next run uploads everything again there.` : "", "Everything else applies from the next backup run."].filter(Boolean).join(" ");
+        if (await saveConfig(changes, config, { title: relocating.length ? "Save, and move every job's destination?" : "Save these settings?", note })) renderAdmin();
+      } }, "Save settings…")));
+  };
+
+  function readonlySetting(entry) {
+    const value = entry.kind === "secret" ? (entry.is_set ? "set (never shown)" : "not set") : entry.value || `(not set; default ${entry.default || "empty"})`;
+    return h("div", { class: "setting-row readonly" },
+      h("span", { class: "setting-key" }, h("code", {}, entry.key), " ", pill("read-only", "")),
+      h("code", { class: "readonly-value" }, value),
+      entry.explanation ? h("div", { class: "meta" }, entry.explanation) : null,
+      h("div", { class: "meta" }, entry.readonly_reason));
   }
 
   // ------------------------------------------------------------------ main view
@@ -1722,7 +1964,7 @@
     profiles: "Profiles & limits",
     watchdog: "Watchdog",
     notifications: "Notifications (ntfy)",
-    server: "Server settings",
+    settings: "All settings",
     sources: "Sources file",
     logs: "Logs",
     activity: "Activity & audit"
@@ -1891,7 +2133,7 @@
   function route() {
     const hash = decodeURIComponent(location.hash.slice(1));
     const [kind, ...rest] = hash.split("/");
-    if (kind === "entry" && rest.length) {
+    if ((kind === "job" || kind === "entry") && rest.length) {
       let tab = "overview";
       const last = rest[rest.length - 1];
       if (rest.length > 1 && ENTRY_TABS.some(([key]) => key === last)) {
@@ -1903,7 +2145,7 @@
       state.view = { kind: "entry", name, tab };
     } else {
       state.view = { kind: "home" };
-      if (kind === "admin") openAdmin(rest[0]);
+      if (kind === "admin") openAdmin(rest[0] === "server" ? "settings" : rest[0]);
       else if (ADMIN_TABS[kind]) openAdmin(kind);
       else if (kind === "bell") openBell();
     }
@@ -2256,6 +2498,14 @@
       if (location.hash.startsWith("#admin")) history.replaceState(null, "", state.view.kind === "entry" ? entryHash(state.view.name, state.view.tab) : "#home");
     });
     $("#home-button").addEventListener("click", goHome);
+    $("#new-job-button").addEventListener("click", () => openJobEditor(null));
+    $("#job-form").addEventListener("input", scheduleJobCheck);
+    $("#job-form").addEventListener("change", scheduleJobCheck);
+    $("#job-form").addEventListener("submit", (event) => {
+      if (event.submitter?.value !== "save") return;
+      event.preventDefault();
+      saveJobFromEditor();
+    });
     $("#entry-filter").addEventListener("change", () => {
       storageSet("backup-suite-gui-entry-filter", $("#entry-filter").value);
       renderEntryList();

@@ -25,8 +25,8 @@ const crypto = require("crypto");
 
 // Home, every tab of one entry, and every Admin tab.
 const ENTRY_TABS = ["overview", "projects", "changes", "changing", "excludes", "runs", "log", "storage"];
-const ADMIN_TABS = ["actions", "runs", "profiles", "watchdog", "notifications", "server", "sources", "logs", "activity"];
-const PAGES = [["home", "#home", "#section-body"], ...ENTRY_TABS.map((tab) => [`entry-${tab}`, `#entry/workspace${tab === "overview" ? "" : `/${tab}`}`, "#section-body"]),
+const ADMIN_TABS = ["actions", "runs", "profiles", "watchdog", "notifications", "settings", "sources", "logs", "activity"];
+const PAGES = [["home", "#home", "#section-body"], ...ENTRY_TABS.map((tab) => [`entry-${tab}`, `#job/workspace${tab === "overview" ? "" : `/${tab}`}`, "#section-body"]),
   ...ADMIN_TABS.map((tab) => [`admin-${tab}`, `#admin/${tab}`, "#admin-body"])];
 
 function seed(fixture) {
@@ -48,6 +48,7 @@ function seed(fixture) {
   fs.writeFileSync(path.join(sourceDir, "paused", ".nosync"), "");
   fs.writeFileSync(path.join(sourceDir, "alpha", ".backup-excludes"), "*.tmp\nnode_modules/**\n");
   fs.appendFileSync(path.join(fixture.configDir, "file-sources.conf"), `0|web10-native|${sourceDir}/alpha|fixed|sites/web10|.nosync|single\n`);
+  fs.appendFileSync(path.join(fixture.configDir, "global.conf"), `FILE_JOB_SOURCE_ROOTS="${path.dirname(stateDir)}"\n`);
   const key = (destination) => crypto.createHash("sha256").update(destination).digest("hex");
   const history = [];
   for (const [run, offset] of [["2026-10-13T10:00:00Z", 0], ["2026-10-14T10:00:00Z", 1]]) {
@@ -121,7 +122,7 @@ async function main() {
             const chip = await page.textContent("#state-chip");
             if (!/Running 5\/12/.test(chip)) failures.push(`${label}/${scheme}: state chip shows "${chip}"`);
             const cards = await page.$$eval(".entry-card", (nodes) => nodes.map((node) => node.textContent));
-            if (cards.length !== 2) failures.push(`${label}/${scheme}: expected 2 entry cards, got ${cards.length}`);
+            if (cards.length < 2) failures.push(`${label}/${scheme}: expected at least 2 job cards, got ${cards.length}`);
           }
           const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
           if (overflow > 1) failures.push(`${label}/${scheme}/${name}: horizontal page scroll of ${overflow}px`);
@@ -131,7 +132,7 @@ async function main() {
           if (name.startsWith("admin")) await page.keyboard.press("Escape");
         }
         // A project's details and the entry list on a phone.
-        await page.goto(`${base}/#entry/workspace/projects`);
+        await page.goto(`${base}/#job/workspace/projects`);
         await page.waitForSelector("#section-body table tbody tr");
         await page.click("#section-body table tbody tr");
         await page.waitForTimeout(1200);
@@ -142,6 +143,41 @@ async function main() {
           await page.click('[data-show-panel="sidebar"]');
           await page.waitForTimeout(300);
           await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-entries.png`) });
+        }
+        // The job editor: a refused source, then add, disable and edit a job (once).
+        if (label === "desktop" && scheme === "light") {
+          const sourcesFile = path.join(fixture.configDir, "file-sources.conf");
+          await page.goto(`${base}/#home`);
+          await page.click("#new-job-button");
+          await page.fill('#job-form [name="label"]', "web11");
+          await page.fill('#job-form [name="source"]', "/etc");
+          await page.fill('#job-form [name="destination_value"]', "sites/web11");
+          await page.waitForSelector("#job-check .notice.bad");
+          if (!(await page.isDisabled("#job-save-button"))) failures.push("job editor: save must be disabled for /etc");
+          await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-job-editor-refused.png`) });
+          await page.fill('#job-form [name="source"]', path.join(fixture.stateDir, "..", "source", "gamma"));
+          await page.fill('#job-form [name="excludes"]', "*.log\ncache/**");
+          await page.waitForFunction(() => !document.querySelector("#job-check .notice.bad") && document.querySelector("#job-check code"));
+          await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-job-editor.png`) });
+          await page.click("#job-save-button");
+          await page.waitForSelector("#confirm-dialog[open]");
+          await page.click("#confirm-ok");
+          await page.waitForTimeout(1500);
+          if (!fs.readFileSync(sourcesFile, "utf8").includes("1|web11|")) failures.push("job editor: the new job was not written");
+          if (!fs.existsSync(path.join(fixture.configDir, "jobs", "web11.excludes"))) failures.push("job editor: its excludes were not written");
+          await page.waitForSelector('[data-key="job-toggle"]');
+          await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-job-added.png`), fullPage: true });
+          await page.click('[data-key="job-toggle"]');
+          await page.waitForSelector("#confirm-dialog[open]");
+          await page.click("#confirm-ok");
+          await page.waitForTimeout(1500);
+          if (!fs.readFileSync(sourcesFile, "utf8").includes("0|web11|")) failures.push("job editor: disable was not written");
+          await page.click('[data-key="job-edit"]');
+          await page.waitForSelector("#job-dialog[open]");
+          const editLabel = await page.inputValue('#job-form [name="label"]');
+          const editExcludes = await page.inputValue('#job-form [name="excludes"]');
+          if (editLabel !== "web11" || !editExcludes.includes("cache/**")) failures.push(`job editor: edit did not load the job (${editLabel}, ${editExcludes})`);
+          await page.keyboard.press("Escape");
         }
         // Dialogs.
         await page.goto(`${base}/#home`);

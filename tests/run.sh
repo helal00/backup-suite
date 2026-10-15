@@ -254,26 +254,26 @@ test_project_records_and_changes() {
     local reply
     mkdir -p "$test_root/bin"
     ln -s "$ROOT_DIR/tests/fixtures/fake-systemctl.sh" "$test_root/bin/systemctl"
-    reply=$(control_call "$test_root" '{"verb":"entries"}')
-    [ "$(json_field "$reply" 'len(d["data"]["entries"])')" = "3" ] || fail_test "entries: expected 3, got: $reply"
-    [ "$(json_field "$reply" '[e for e in d["data"]["entries"] if e["name"] == "workspace"][0]["last_run"]["synced"]')" = "2" ] || fail_test "workspace last run should have 2 synced projects: $reply"
-    [ "$(json_field "$reply" '[e for e in d["data"]["entries"] if e["name"] == "workspace"][0]["children"]')" = "3" ] || fail_test 'workspace has 3 children'
-    [ "$(json_field "$reply" '[e for e in d["data"]["entries"] if e["name"] == "workspace"][0]["destination"]')" = "backup:/projects/workspace" ] || fail_test "destination: $reply"
-    [ "$(json_field "$reply" '[e for e in d["data"]["entries"] if e["name"] == "gone"][0]["problem"]')" = "The source directory does not exist." ] || fail_test 'missing source problem'
-    reply=$(control_call "$test_root" '{"verb":"entry","args":{"name":"workspace"}}')
+    reply=$(control_call "$test_root" '{"verb":"jobs"}')
+    [ "$(json_field "$reply" 'len(d["data"]["jobs"])')" = "3" ] || fail_test "entries: expected 3, got: $reply"
+    [ "$(json_field "$reply" '[e for e in d["data"]["jobs"] if e["name"] == "workspace"][0]["last_run"]["synced"]')" = "2" ] || fail_test "workspace last run should have 2 synced projects: $reply"
+    [ "$(json_field "$reply" '[e for e in d["data"]["jobs"] if e["name"] == "workspace"][0]["children"]')" = "3" ] || fail_test 'workspace has 3 children'
+    [ "$(json_field "$reply" '[e for e in d["data"]["jobs"] if e["name"] == "workspace"][0]["destination"]')" = "backup:/projects/workspace" ] || fail_test "destination: $reply"
+    [ "$(json_field "$reply" '[e for e in d["data"]["jobs"] if e["name"] == "gone"][0]["problem"]')" = "The source directory does not exist." ] || fail_test 'missing source problem'
+    reply=$(control_call "$test_root" '{"verb":"job","args":{"name":"workspace"}}')
     [ "$(json_field "$reply" 'sorted(p["name"] for p in d["data"]["projects"])')" = "['alpha', 'beta', 'paused']" ] || fail_test "entry projects: $reply"
     [ "$(json_field "$reply" '[p for p in d["data"]["projects"] if p["name"] == "paused"][0]["stop_file_present"]')" = "True" ] || fail_test 'paused has .nosync'
     [ "$(json_field "$reply" '[p for p in d["data"]["projects"] if p["name"] == "alpha"][0]["changes"]["updated"]')" = "1" ] || fail_test 'alpha changes header'
     [ "$(json_field "$reply" 'len(d["data"]["runs"])')" = "2" ] || fail_test 'two runs of the entry'
-    reply=$(control_call "$test_root" '{"verb":"entry.changes","args":{"name":"workspace","project":"workspace/alpha"}}')
+    reply=$(control_call "$test_root" '{"verb":"job.changes","args":{"name":"workspace","project":"workspace/alpha"}}')
     [ "$(json_field "$reply" 'sorted(f["kind"] + ":" + f["path"] for f in d["data"]["files"])')" = "['new:added.txt', 'removed:remove.txt', 'updated:sub/change.txt']" ] || fail_test "entry.changes: $reply"
-    reply=$(control_call "$test_root" '{"verb":"entry.log","args":{"name":"single-entry"}}')
+    reply=$(control_call "$test_root" '{"verb":"job.log","args":{"name":"single-entry"}}')
     [ "$(json_field "$reply" 'any("single-entry" in l for l in d["data"]["lines"]) and not any("workspace/alpha" in l for l in d["data"]["lines"])')" = "True" ] || fail_test "entry.log: $reply"
-    reply=$(control_call "$test_root" '{"verb":"entry.measure","args":{"name":"workspace","what":"source"}}')
+    reply=$(control_call "$test_root" '{"verb":"job.measure","args":{"name":"workspace","what":"source"}}')
     [ "$(json_field "$reply" 'd["data"]["result"]["files"]')" = "6" ] || fail_test "entry.measure source: $reply"
-    reply=$(control_call "$test_root" '{"verb":"entry.measure","args":{"name":"workspace","what":"destination"}}')
+    reply=$(control_call "$test_root" '{"verb":"job.measure","args":{"name":"workspace","what":"destination"}}')
     [ "$(json_field "$reply" 'd["data"]["result"]["files"]')" = "4" ] || fail_test "entry.measure destination: $reply"
-    reply=$(control_call "$test_root" '{"verb":"entry","args":{"name":"../etc"}}')
+    reply=$(control_call "$test_root" '{"verb":"job","args":{"name":"../etc"}}')
     [ "$(json_field "$reply" 'd["error"]["code"]')" = "not_found" ] || fail_test "unknown entry: $reply"
     rm -rf "$test_root"
 }
@@ -1158,6 +1158,7 @@ test_watchdog_unit_and_deploy_guards() {
     assert_contains "$deploy" '--stop-running'
     assert_contains "$deploy" 'install_swap_cap_dropin database-backup.service'
     assert_contains "$deploy" 'install_swap_cap_dropin database-size-check.service'
+    assert_contains "$deploy" 'bin/apply-schedule.sh" --no-reload'
     assert_contains "$deploy" 'backup-watchdog.sh" "$SERVICE_UNIT" --self-test'
     assert_contains "$deploy" 'backup-profile.sh" set "$REQUESTED_PROFILE"'
     assert_contains "$deploy" 'backup-profile.sh" adaptive "$REQUESTED_PROFILE" "$REQUESTED_FLOOR"'
@@ -1461,6 +1462,130 @@ test_control_never_returns_secrets() {
     assert_contains "$all_replies" '"is_set":true'
 }
 
+test_control_jobs() {
+    # Add, check, edit, enable/disable, remove and run backup jobs through the
+    # control script: every refusal, the written lines, per-job patterns, backups,
+    # the conflict check, and that a run backs up only the requested job.
+    local test_root
+    local reply
+    local sha
+    test_root=$(mktemp -d)
+    setup_control_root "$test_root"
+    mkdir -p "$test_root/web/site" "$test_root/source/project-b"
+    printf 'FILE_JOB_SOURCE_ROOTS="%s"\n' "$test_root" >> "$test_root/config/global.conf"
+    sha=$(json_field "$(control_call "$test_root" '{"verb":"jobs"}')" 'd["data"]["sha256"]')
+
+    # Refusals: outside the allowed roots, a system folder, a folder holding Backup
+    # Suite's own config, a duplicate name, an overlapping destination, | in a field.
+    reply=$(control_call "$test_root" '{"verb":"job.check","args":{"job":{"label":"etc","source":"/etc","destination_mode":"fixed","destination_value":"x","isolation":"single"}}}')
+    [ "$(json_field "$reply" 'any("only folders under" in p for p in d["data"]["problems"]) and any("system or Backup Suite" in p for p in d["data"]["problems"])')" = "True" ] || fail_test "/etc must be refused: $reply"
+    reply=$(control_call "$test_root" "{\"verb\":\"job.check\",\"args\":{\"job\":{\"label\":\"all\",\"source\":\"$test_root\",\"destination_mode\":\"fixed\",\"destination_value\":\"all\",\"isolation\":\"single\"}}}")
+    [ "$(json_field "$reply" 'any("system or Backup Suite" in p for p in d["data"]["problems"])')" = "True" ] || fail_test "a source holding the config must be refused: $reply"
+    reply=$(control_call "$test_root" "{\"verb\":\"job.check\",\"args\":{\"job\":{\"label\":\"workspace\",\"source\":\"$test_root/web\",\"destination_mode\":\"fixed\",\"destination_value\":\"projects/workspace/sub\",\"isolation\":\"single\"}}}")
+    [ "$(json_field "$reply" 'any("already named" in p for p in d["data"]["problems"]) and any("overlaps job workspace" in p for p in d["data"]["problems"])')" = "True" ] || fail_test "duplicate name and overlapping destination: $reply"
+    reply=$(control_call "$test_root" "{\"verb\":\"job.save\",\"args\":{\"expect_sha\":\"$sha\",\"job\":{\"label\":\"bad|name\",\"source\":\"$test_root/web\",\"destination_mode\":\"fixed\",\"destination_value\":\"sites/web\",\"isolation\":\"single\"}}}")
+    [ "$(json_field "$reply" 'd["error"]["code"]')" = "invalid_request" ] || fail_test "a | in the name must be refused: $reply"
+
+    # Add a job with its own patterns.
+    reply=$(control_call "$test_root" "{\"verb\":\"job.save\",\"args\":{\"expect_sha\":\"$sha\",\"job\":{\"enabled\":true,\"label\":\"web\",\"source\":\"$test_root/web\",\"destination_mode\":\"fixed\",\"destination_value\":\"sites/web\",\"stop_file\":\".nosync\",\"isolation\":\"children\",\"excludes\":[\"*.log\",\"cache/**\"],\"volatile\":[\"db/*.sqlite\"]}}}")
+    [ "$(json_field "$reply" 'd["ok"]')" = "True" ] || fail_test "job.save add: $reply"
+    assert_contains "$test_root/config/file-sources.conf" "1|web|$test_root/web|fixed|sites/web|.nosync|children"
+    assert_contains "$test_root/config/jobs/web.excludes" 'cache/**'
+    assert_contains "$test_root/config/jobs/web.volatile" 'db/*.sqlite'
+    ls "$test_root/state/gui/config-backups/" | grep -q '^file-sources.conf\.' || fail_test 'no backup copy of file-sources.conf'
+    assert_contains "$test_root/state/gui/audit.jsonl" '"verb": "job.save"'
+
+    # A stale checksum is refused.
+    reply=$(control_call "$test_root" "{\"verb\":\"job.enable\",\"args\":{\"expect_sha\":\"$sha\",\"name\":\"web\",\"enabled\":false}}")
+    [ "$(json_field "$reply" 'd["error"]["code"]')" = "config_conflict" ] || fail_test "stale sha: $reply"
+
+    # Edit (rename) moves the patterns; disable keeps the rest of the line.
+    sha=$(json_field "$(control_call "$test_root" '{"verb":"jobs"}')" 'd["data"]["sha256"]')
+    reply=$(control_call "$test_root" "{\"verb\":\"job.save\",\"args\":{\"expect_sha\":\"$sha\",\"name\":\"web\",\"job\":{\"enabled\":true,\"label\":\"websites\",\"source\":\"$test_root/web\",\"destination_mode\":\"fixed\",\"destination_value\":\"sites/web\",\"stop_file\":\"\",\"isolation\":\"children\",\"excludes\":[\"*.log\"],\"volatile\":[]}}}")
+    [ "$(json_field "$reply" 'd["data"]["renamed_from"]')" = "web" ] || fail_test "rename: $reply"
+    [ ! -e "$test_root/config/jobs/web.excludes" ] || fail_test 'old pattern file left behind'
+    [ ! -e "$test_root/config/jobs/websites.volatile" ] || fail_test 'an empty pattern list must remove its file'
+    assert_contains "$test_root/config/jobs/websites.excludes" '*.log'
+    sha=$(json_field "$reply" 'd["data"]["sha256"]')
+    reply=$(control_call "$test_root" "{\"verb\":\"job.enable\",\"args\":{\"expect_sha\":\"$sha\",\"name\":\"websites\",\"enabled\":false}}")
+    assert_contains "$test_root/config/file-sources.conf" "0|websites|$test_root/web|fixed|sites/web||children"
+    sha=$(json_field "$reply" 'd["data"]["sha256"]')
+
+    # A disabled job cannot run; an enabled one runs alone.
+    reply=$(control_call "$test_root" '{"verb":"job.run","args":{"name":"websites"}}')
+    [ "$(json_field "$reply" 'd["error"]["code"]')" = "invalid_request" ] || fail_test "disabled job run: $reply"
+    reply=$(control_call "$test_root" '{"verb":"job.run","args":{"name":"workspace"}}')
+    [ "$(json_field "$reply" 'd["ok"]')" = "True" ] || fail_test "job.run: $reply"
+    assert_contains "$test_root/state/run/job-request.env" 'jobs=workspace'
+    assert_contains "$test_root/systemctl.log" 'start --no-block file-backup.service'
+
+    # Remove: the line and the patterns go; nothing else changes.
+    reply=$(control_call "$test_root" "{\"verb\":\"job.remove\",\"args\":{\"expect_sha\":\"$sha\",\"name\":\"websites\"}}")
+    [ "$(json_field "$reply" 'd["ok"]')" = "True" ] || fail_test "job.remove: $reply"
+    assert_not_contains "$test_root/config/file-sources.conf" 'websites'
+    assert_contains "$test_root/config/file-sources.conf" '1|workspace|'
+    [ ! -e "$test_root/config/jobs/websites.excludes" ] || fail_test 'removed job kept its patterns'
+    rm -rf "$test_root"
+}
+
+test_job_run_and_job_patterns() {
+    # file-backup.sh: a fresh job request backs up only that job and is used
+    # once; an old one is ignored; a job's own excludes reach rclone.
+    local test_root
+    local output_file
+    test_root=$(mktemp -d)
+    output_file="$test_root/output.log"
+    mkdir -p "$test_root/one" "$test_root/two" "$test_root/remote" "$test_root/state/run" "$test_root/config/jobs"
+    printf 'keep\n' > "$test_root/one/keep.txt"
+    printf 'skip\n' > "$test_root/one/skip.log"
+    printf 'two\n' > "$test_root/two/t.txt"
+    write_test_config "$test_root" rclone 'backup:'
+    printf '[backup]\ntype = alias\nremote = %s\n' "$test_root/remote" > "$test_root/config/rclone.conf"
+    printf '1|one|%s|fixed|jobs/one|.nosync|single\n1|two|%s|fixed|jobs/two|.nosync|single\n' "$test_root/one" "$test_root/two" > "$test_root/config/file-sources.conf"
+    printf '# test\n*.log\n' > "$test_root/config/jobs/one.excludes"
+    printf 'jobs=one\nrequested_at=%s\nrequested_by=tester\n' "$(date +%s)" > "$test_root/state/run/job-request.env"
+    run_backup "$test_root" > "$output_file" 2>&1 || fail_test "job run failed: $(tail -5 "$output_file")"
+    assert_contains "$output_file" 'Backing up only job(s) one, as requested from the GUI by tester.'
+    assert_file "$test_root/remote/jobs/one/keep.txt"
+    [ ! -e "$test_root/remote/jobs/one/skip.log" ] || fail_test "the job's own exclude was not applied"
+    [ ! -e "$test_root/remote/jobs/two" ] || fail_test 'a job that was not requested was backed up'
+    [ ! -e "$test_root/state/run/job-request.env" ] || fail_test 'the request must be used once'
+    printf 'jobs=one\nrequested_at=%s\n' "$(( $(date +%s) - 3600 ))" > "$test_root/state/run/job-request.env"
+    run_backup "$test_root" > "$output_file" 2>&1 || true
+    assert_contains "$output_file" 'Ignoring an old job request'
+    assert_file "$test_root/remote/jobs/two/t.txt"
+    rm -rf "$test_root"
+}
+
+test_control_settings_catalog() {
+    # Every global.conf key is shown; programs and paths are read-only; a schedule
+    # change is applied to the timers as drop-ins.
+    local test_root
+    local reply
+    local sha
+    test_root=$(mktemp -d)
+    setup_control_root "$test_root"
+    printf 'FILE_RCLONE_EXTRA_FLAGS="--fast-list"\nMY_OWN_KEY="x"\n' >> "$test_root/config/global.conf"
+    mkdir -p "$test_root/home/.config/systemd/user"
+    printf '[Timer]\nOnCalendar=*:0/30\n' > "$test_root/home/.config/systemd/user/file-backup.timer"
+    reply=$(control_call "$test_root" '{"verb":"config.get"}')
+    [ "$(json_field "$reply" 'all(k in [s["key"] for s in d["data"]["settings"]] for k in ["FILE_BACKUP_ONCALENDAR","DB_RETENTION_DAYS","USER_RCLONE_BIN","MY_OWN_KEY","FILE_JOB_SOURCE_ROOTS"])')" = "True" ] || fail_test "config.get must list every key: $reply"
+    [ "$(json_field "$reply" '[s for s in d["data"]["settings"] if s["key"] == "FILE_RCLONE_EXTRA_FLAGS"][0]["editable"]')" = "False" ] || fail_test 'extra rclone flags must be read-only'
+    sha=$(json_field "$reply" 'd["data"]["sha256"]')
+    for key in USER_RCLONE_BIN FILE_RCLONE_EXTRA_FLAGS FILE_JOB_SOURCE_ROOTS MY_OWN_KEY FILE_BACKUP_PROFILE; do
+        reply=$(control_call "$test_root" "{\"verb\":\"config.set\",\"args\":{\"expect_sha\":\"$sha\",\"changes\":{\"$key\":\"x\"}}}")
+        [ "$(json_field "$reply" 'd["error"]["code"]')" = "invalid_request" ] || fail_test "$key must not be settable: $reply"
+    done
+    reply=$(control_call "$test_root" "{\"verb\":\"config.set\",\"args\":{\"expect_sha\":\"$sha\",\"changes\":{\"FILE_BACKUP_ONCALENDAR\":\"not a time\"}}}")
+    [ "$(json_field "$reply" 'd["error"]["code"]')" = "invalid_request" ] || fail_test "a bad calendar must be refused: $reply"
+    reply=$(control_call "$test_root" "{\"verb\":\"config.set\",\"args\":{\"expect_sha\":\"$sha\",\"changes\":{\"FILE_BACKUP_ONCALENDAR\":\"hourly\",\"DB_RETENTION_DAYS\":\"30\"}}}")
+    [ "$(json_field "$reply" 'd["ok"]')" = "True" ] || fail_test "schedule save: $reply"
+    assert_contains "$test_root/config/global.conf" 'FILE_BACKUP_ONCALENDAR="hourly"'
+    assert_contains "$test_root/home/.config/systemd/user/file-backup.timer.d/60-schedule.conf" 'OnCalendar=hourly'
+    assert_contains "$test_root/systemctl.log" 'daemon-reload'
+    rm -rf "$test_root"
+}
+
 test_control_config_set() {
     local test_root
     local reply
@@ -1713,6 +1838,9 @@ run_test 'adaptive level carries into the next run' test_adaptive_level_carries_
 run_test 'control script read verbs and refusals' test_control_read_verbs
 run_test 'control script never returns secrets' test_control_never_returns_secrets
 run_test 'control script config.set safety' test_control_config_set
+run_test 'backup jobs: add, edit, enable, remove, run' test_control_jobs
+run_test 'job run and per-job patterns in file-backup' test_job_run_and_job_patterns
+run_test 'every global setting shown, schedule applied' test_control_settings_catalog
 run_test 'control script profile verbs match the CLI' test_control_profile_matches_cli
 run_test 'control script actions, audit and peer check' test_control_actions_and_peer_check
 run_test 'events file and run progress' test_events_and_progress_files

@@ -145,6 +145,113 @@ CONFIG_DEFAULTS = {
     "NOTIFY_NTFY_PRIORITY": "high", "NOTIFY_NTFY_TITLE_PREFIX": "Backup Suite", "NOTIFY_NTFY_ATTACH_DETAILS": "1",
     "NOTIFY_NTFY_MESSAGE_MAX_BYTES": "3500",
 }
+
+# Every other global.conf key the GUI shows. These are editable; their checks are in
+# validate_config_value. Schedule keys are applied to the timers at once
+# (apply-schedule.sh); the rest apply from the next run.
+CONFIG_KEYS.update({
+    "FILE_BACKUP_ONCALENDAR": (("calendar",), "When file backups run (systemd OnCalendar, e.g. *:0/30 for every 30 minutes, hourly, daily, Mon..Fri 22:00)."),
+    "FILE_BACKUP_RANDOMIZED_DELAY_SEC": (("regex", r"[0-9]+(s|min|m|h)?"), "Random delay added to each scheduled start, so runs do not all begin on the hour (e.g. 15m)."),
+    "DB_BACKUP_ONCALENDAR": (("calendar",), "When database backups run (systemd OnCalendar, e.g. daily or *-*-* 03:30)."),
+    "DB_MONITOR_ONCALENDAR": (("calendar",), "When the database size check runs (systemd OnCalendar)."),
+    "RCLONE_REMOTE_ROOT": (("remote",), "The rclone remote and folder every backup goes under (e.g. gdrive,root_folder_id=...:server-backups). Changing it starts a new copy elsewhere; nothing moves."),
+    "INCLUDE_HOSTNAME_IN_REMOTE": (("bool",), "Put this server's name under the remote root, so several servers can share one remote. Changing it starts a new copy elsewhere."),
+    "REMOTE_HOSTNAME": (("regex", r"([A-Za-z0-9][A-Za-z0-9.-]{0,62})?"), "Name used for this server in the remote (empty: the real hostname)."),
+    "FILE_DEFAULT_DESTINATION_ROOT": (("relpath",), "Folder under the remote root for jobs with destination mode default-root."),
+    "FILE_ARCHIVE_FOLDER_NAME": (("filename",), "Folder under the remote root where replaced and deleted file versions are kept."),
+    "FILE_ARCHIVE_SUFFIX": (("regex", r"[A-Za-z0-9._-]{0,20}"), "Suffix added to archived versions by older Backup Suite versions."),
+    "FILE_SYNC_STOP_FILE": (("filename",), "Default stop file: a job or project folder holding it is skipped (a job can name its own)."),
+    "FILE_PROJECT_EXCLUDE_FILENAME": (("filename",), "Name of the per-folder exclude files in a source (rclone filter patterns, one per line)."),
+    "FILE_VOLATILE_FILENAME": (("filename",), "Name of the per-folder volatile files: patterns allowed to change during a sync."),
+    "FILE_GLOBAL_EXCLUDE_PATTERNS": (("patterns",), "Patterns never uploaded by any job, separated by |."),
+    "FILE_GLOBAL_VOLATILE_PATTERNS": (("patterns",), "Patterns that may change during a sync in every job, separated by |."),
+    "FILE_PROCESS_CHECK_ENABLED": (("bool",), "Skip a scheduled run while a listed process is running (for example an editor session)."),
+    "FILE_PROCESS_CHECK_USER_ONLY": (("bool",), "Only look at processes of the account the backup runs as."),
+    "FILE_PROCESS_CHECK_PATTERNS": (("regex", r"[A-Za-z0-9 ._/|,:-]{0,200}"), "Process command-line patterns (pgrep -f) that skip a run, separated by , or |."),
+    "FILE_STABILITY_INTERVAL_SECONDS": (int_range(0, 600), "Seconds between the two file snapshots that find files changing during a failed sync."),
+    "FILE_CHANGED_DETAIL_LIMIT": (int_range(0, 1000), "How many changing paths each project lists in the log."),
+    "FILE_RCLONE_TRANSFERS": (int_range(1, 64), "Parallel uploads (custom profile only; the other profiles set their own)."),
+    "FILE_RCLONE_CHECKERS": (int_range(1, 128), "Parallel checks (custom profile only)."),
+    "FILE_RCLONE_BUFFER_SIZE": (("regex", r"[0-9]+[KMG]?"), "Buffer per upload (custom profile only), e.g. 16M."),
+    "FILE_RCLONE_TPSLIMIT": (int_range(0, 1000), "API calls per second (custom profile only; 0 = no limit)."),
+    "FILE_RCLONE_BWLIMIT": (("regex", r"([0-9]+[KMG]?)?"), "Bandwidth limit (custom profile only), e.g. 4M; empty = unlimited."),
+    "BACKUP_SUITE_LOG_MAX_BYTES": (int_range(1048576, 1073741824), "Size at which the durable run log is rotated."),
+    "BACKUP_SUITE_LOG_KEEP_FILES": (int_range(1, 200), "Rotated run logs kept."),
+    "NOTIFY_JOURNAL_LINES": (int_range(10, 2000), "Journal lines included in a failure record."),
+    "NOTIFY_DURABLE_LOG_LINES": (int_range(10, 5000), "Run-log lines included in a failure record."),
+    "NOTIFY_FAILURE_LOG_KEEP_FILES": (int_range(1, 1000), "Failure records kept."),
+    "DB_REMOTE_DESTINATION_ROOT": (("relpath",), "Folder under the remote root for database dumps."),
+    "DB_RETENTION_DAYS": (int_range(1, 3650), "Days database dumps are kept on the remote."),
+    "DB_RCLONE_TRANSFERS": (int_range(1, 64), "Parallel uploads for database dumps."),
+    "DB_RCLONE_CHECKERS": (int_range(1, 128), "Parallel checks for database dumps."),
+    "DB_SKIP_UNCHANGED_BACKUPS": (("bool",), "Do not upload a dump identical to the previous one."),
+    "DB_KEEP_LOCAL_AFTER_UPLOAD": (("bool",), "Keep the local dump after it was uploaded."),
+    "DB_MONITOR_THRESHOLD_MB": (int_range(1, 10485760), "Warn when a database grows past this size (MB)."),
+})
+CONFIG_DEFAULTS.update({
+    "FILE_BACKUP_ONCALENDAR": "*:0/30", "FILE_BACKUP_RANDOMIZED_DELAY_SEC": "15m", "DB_BACKUP_ONCALENDAR": "daily",
+    "DB_MONITOR_ONCALENDAR": "daily", "RCLONE_REMOTE_ROOT": "", "INCLUDE_HOSTNAME_IN_REMOTE": "1", "REMOTE_HOSTNAME": "",
+    "FILE_DEFAULT_DESTINATION_ROOT": "files", "FILE_ARCHIVE_FOLDER_NAME": "deleted_files", "FILE_ARCHIVE_SUFFIX": "_old",
+    "FILE_SYNC_STOP_FILE": ".nosync", "FILE_PROJECT_EXCLUDE_FILENAME": ".backup-excludes", "FILE_VOLATILE_FILENAME": ".backup-volatile",
+    "FILE_GLOBAL_EXCLUDE_PATTERNS": "", "FILE_GLOBAL_VOLATILE_PATTERNS": "", "FILE_PROCESS_CHECK_ENABLED": "1",
+    "FILE_PROCESS_CHECK_USER_ONLY": "1", "FILE_PROCESS_CHECK_PATTERNS": "vscode-server", "FILE_STABILITY_INTERVAL_SECONDS": "10",
+    "FILE_CHANGED_DETAIL_LIMIT": "20", "FILE_RCLONE_TRANSFERS": "2", "FILE_RCLONE_CHECKERS": "4", "FILE_RCLONE_BUFFER_SIZE": "16M",
+    "FILE_RCLONE_TPSLIMIT": "10", "FILE_RCLONE_BWLIMIT": "", "BACKUP_SUITE_LOG_MAX_BYTES": "10485760", "BACKUP_SUITE_LOG_KEEP_FILES": "10",
+    "NOTIFY_JOURNAL_LINES": "40", "NOTIFY_DURABLE_LOG_LINES": "120", "NOTIFY_FAILURE_LOG_KEEP_FILES": "100",
+    "DB_REMOTE_DESTINATION_ROOT": "databases", "DB_RETENTION_DAYS": "14", "DB_RCLONE_TRANSFERS": "4", "DB_RCLONE_CHECKERS": "8",
+    "DB_SKIP_UNCHANGED_BACKUPS": "1", "DB_KEEP_LOCAL_AFTER_UPLOAD": "1", "DB_MONITOR_THRESHOLD_MB": "512",
+})
+SCHEDULE_KEYS = {"FILE_BACKUP_ONCALENDAR", "FILE_BACKUP_RANDOMIZED_DELAY_SEC", "FILE_BACKUP_RUNTIME_MAX_SEC",
+                 "DB_BACKUP_ONCALENDAR", "DB_MONITOR_ONCALENDAR"}
+# Settings that move every job's destination: the save is marked as such.
+RELOCATING_KEYS = {"RCLONE_REMOTE_ROOT", "INCLUDE_HOSTNAME_IN_REMOTE", "REMOTE_HOSTNAME", "FILE_DEFAULT_DESTINATION_ROOT"}
+
+CONFIG_GROUPS = [
+    ("schedule", "Schedule", ["FILE_BACKUP_ONCALENDAR", "FILE_BACKUP_RANDOMIZED_DELAY_SEC", "FILE_BACKUP_RUNTIME_MAX_SEC",
+                              "DB_BACKUP_ONCALENDAR", "DB_MONITOR_ONCALENDAR"]),
+    ("remote", "Remote and previous versions", ["RCLONE_REMOTE_ROOT", "INCLUDE_HOSTNAME_IN_REMOTE", "REMOTE_HOSTNAME",
+                                                "FILE_DEFAULT_DESTINATION_ROOT", "FILE_ARCHIVE_FOLDER_NAME", "FILE_RETENTION_DAYS", "FILE_ARCHIVE_SUFFIX"]),
+    ("files", "What every file job skips", ["FILE_SYNC_STOP_FILE", "FILE_PROJECT_EXCLUDE_FILENAME", "FILE_VOLATILE_FILENAME",
+                                            "FILE_GLOBAL_EXCLUDE_PATTERNS", "FILE_GLOBAL_VOLATILE_PATTERNS"]),
+    ("changing", "Changing files", ["FILE_ACTIVE_TRACKING_ENABLED", "FILE_ACTIVE_WINDOW_SECONDS", "FILE_ACTIVE_MAX_DEFERRALS",
+                                    "FILE_STABILITY_INTERVAL_SECONDS", "FILE_CHANGED_DETAIL_LIMIT"]),
+    ("busy", "Skip runs while busy", ["FILE_PROCESS_CHECK_ENABLED", "FILE_PROCESS_CHECK_USER_ONLY", "FILE_PROCESS_CHECK_PATTERNS"]),
+    ("profile", "Resource profile", ["FILE_BACKUP_PROFILE", "FILE_BACKUP_PROFILE_MODE", "FILE_BACKUP_PROFILE_FLOOR", "FILE_PROFILE_LIMITS_MODE"]),
+    ("custom", "rclone tuning (custom profile)", ["FILE_RCLONE_TRANSFERS", "FILE_RCLONE_CHECKERS", "FILE_RCLONE_BUFFER_SIZE",
+                                                  "FILE_RCLONE_TPSLIMIT", "FILE_RCLONE_BWLIMIT", "FILE_RCLONE_EXTRA_FLAGS"]),
+    ("database", "Database backups", ["DB_REMOTE_DESTINATION_ROOT", "DB_RETENTION_DAYS", "DB_RCLONE_TRANSFERS", "DB_RCLONE_CHECKERS",
+                                      "DB_SKIP_UNCHANGED_BACKUPS", "DB_KEEP_LOCAL_AFTER_UPLOAD", "DB_MONITOR_THRESHOLD_MB", "DB_RCLONE_EXTRA_FLAGS"]),
+    ("watchdog", "Watchdog", [key for key in CONFIG_KEYS if key.startswith("WATCHDOG_")]),
+    ("ntfy", "Notifications (ntfy)", [key for key in CONFIG_KEYS if key.startswith("NOTIFY_NTFY_") or key == "NOTIFY_FAILURES_ENABLED"]),
+    ("logs", "Logs and failure records", ["BACKUP_SUITE_LOG_MAX_BYTES", "BACKUP_SUITE_LOG_KEEP_FILES", "NOTIFY_JOURNAL_LINES",
+                                          "NOTIFY_DURABLE_LOG_LINES", "NOTIFY_FAILURE_LOG_KEEP_FILES"]),
+    ("install", "Installation (read-only)", ["INSTALL_MODE", "FILE_JOB_SOURCE_ROOTS", "INSTALL_SYSTEMD_UNITS", "ENABLE_TIMERS_AFTER_INSTALL"]
+     + ["%s_%s" % (prefix, name) for prefix in ("SYSTEM", "USER") for name in
+        ("INSTALL_DIR", "CANONICAL_SOURCE_DIR", "CONFIG_DIR", "STATE_DIR", "DB_LOCAL_OUTPUT_DIR", "RCLONE_CONFIG_PATH", "RCLONE_BIN",
+         "FILE_SOURCE_CONFIG_PATH", "DATABASE_BACKUP_CONFIG_PATH", "MYSQL_PROFILE_DIR", "SYSTEMD_UNIT_DIR")]),
+]
+# Shown but never written by the GUI: programs and paths the backup runs or reads as
+# root (a change could make root run anything), and what the deploy decides.
+READONLY_REASONS = {
+    "FILE_RCLONE_EXTRA_FLAGS": "Extra rclone flags run as root (rclone can run commands, e.g. --password-command), so they are changed in global.conf on the server only.",
+    "DB_RCLONE_EXTRA_FLAGS": "Extra rclone flags run as root, so they are changed in global.conf on the server only.",
+    "FILE_JOB_SOURCE_ROOTS": "The folders a backup job may back up. Only the server's administrator sets this, in global.conf.",
+}
+INSTALL_REASON = "Installation path, program or install option: changed in global.conf on the server, then re-deployed."
+PROFILE_REASON = "Set in Admin → Profiles & limits."
+CONFIG_KEY_ORDER = [key for _, _, keys in CONFIG_GROUPS for key in keys]
+DEFAULT_JOB_SOURCE_ROOTS = "/home /var/www /srv /opt"
+
+
+def config_readonly_reason(key):
+    if key in READONLY_REASONS:
+        return READONLY_REASONS[key]
+    if key.startswith(("FILE_BACKUP_PROFILE", "FILE_PROFILE_")):
+        return PROFILE_REASON
+    if key not in CONFIG_KEYS:
+        return INSTALL_REASON
+    return ""
+
 FAILURE_NAME_RE = re.compile(r"^[0-9TZ]+-[A-Za-z0-9._-]+\.log$")
 RUN_START_RE = re.compile(r"^File backup started at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC")
 
@@ -757,31 +864,48 @@ def verb_profile_override(request):
     return run_profile_change(["override", profile, key, value])
 
 
+def config_entry(key, values):
+    present = key in values
+    value = values.get(key, "")
+    reason = config_readonly_reason(key)
+    if key in CONFIG_KEYS:
+        kind, explanation = CONFIG_KEYS[key]
+    else:
+        kind, explanation = ("text", 0), ""
+    entry = {"key": key, "kind": kind[0], "explanation": explanation, "default": CONFIG_DEFAULTS.get(key, ""),
+             "present": present, "editable": not reason, "readonly_reason": reason,
+             "schedule": key in SCHEDULE_KEYS, "relocates": key in RELOCATING_KEYS}
+    if key == "FILE_JOB_SOURCE_ROOTS":
+        entry["default"] = DEFAULT_JOB_SOURCE_ROOTS
+    if kind[0] == "int":
+        entry["min"], entry["max"] = kind[1], kind[2]
+    if kind[0] == "choice":
+        entry["options"] = kind[1]
+    if key in SECRET_KEYS:
+        entry["value"] = None
+        entry["is_set"] = bool(value)
+    elif key in MASKED_KEYS:
+        entry["value"] = mask_url(value)
+        entry["is_set"] = bool(value)
+        entry["masked"] = True
+    else:
+        entry["value"] = value
+    return entry
+
+
 def verb_config_get(request):
     get_args(request, [])
     path = os.path.realpath(GLOBAL_CONFIG_FILE)
     values = parse_global_config(path)
-    settings = []
-    for key, (kind, explanation) in CONFIG_KEYS.items():
-        present = key in values
-        value = values.get(key, "")
-        entry = {"key": key, "kind": kind[0], "explanation": explanation, "default": CONFIG_DEFAULTS.get(key, ""),
-                 "present": present}
-        if kind[0] == "int":
-            entry["min"], entry["max"] = kind[1], kind[2]
-        if kind[0] == "choice":
-            entry["options"] = kind[1]
-        if key in SECRET_KEYS:
-            entry["value"] = None
-            entry["is_set"] = bool(value)
-        elif key in MASKED_KEYS:
-            entry["value"] = mask_url(value)
-            entry["is_set"] = bool(value)
-            entry["masked"] = True
-        else:
-            entry["value"] = value
-        settings.append(entry)
-    return {"path": GLOBAL_CONFIG_FILE, "sha256": file_sha256(path), "settings": settings}
+    settings = [config_entry(key, values) for key in CONFIG_KEY_ORDER]
+    known = set(CONFIG_KEY_ORDER)
+    others = sorted(key for key in values if key not in known)
+    groups = [{"id": group_id, "label": label, "keys": keys} for group_id, label, keys in CONFIG_GROUPS]
+    if others:
+        # Keys this GUI does not know (older or newer Backup Suite, or a typo): shown read-only.
+        settings += [config_entry(key, values) for key in others]
+        groups.append({"id": "other", "label": "Other keys in global.conf (read-only)", "keys": others})
+    return {"path": GLOBAL_CONFIG_FILE, "sha256": file_sha256(path), "settings": settings, "groups": groups}
 
 
 def validate_config_value(key, value):
@@ -812,6 +936,26 @@ def validate_config_value(key, value):
     elif name == "secret":
         if len(value) > 200 or not re.fullmatch(r"[A-Za-z0-9._-]*", value):
             invalid("%s may hold only letters, digits, . _ and -." % key)
+    elif name == "calendar":
+        if not value or len(value) > 100 or not re.fullmatch(r"[A-Za-z0-9 *:/.,~+-]+", value):
+            invalid("%s must be a systemd calendar expression such as *:0/30, hourly or daily." % key)
+        analyze = shutil.which("systemd-analyze")
+        if analyze:
+            code, _, err = run([analyze, "calendar", value], READ_TIMEOUT)
+            if code != 0:
+                invalid("%s: systemd does not accept '%s' (%s)." % (key, value, err.strip().splitlines()[-1] if err.strip() else "invalid"))
+    elif name == "remote":
+        if not re.fullmatch(r"[A-Za-z0-9_-]+(,[A-Za-z0-9_]+=[A-Za-z0-9._-]+)*:[A-Za-z0-9._/ -]*", value):
+            invalid("%s must look like remote:folder (optionally remote,option=value:folder)." % key)
+    elif name == "relpath":
+        if not re.fullmatch(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*", value) or ".." in value.split("/"):
+            invalid("%s must be a relative folder like files or sites/web10." % key)
+    elif name == "filename":
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", value) or value in (".", ".."):
+            invalid("%s must be a single file or folder name." % key)
+    elif name == "patterns":
+        if len(value) > 4000 or not re.fullmatch(r"[A-Za-z0-9 ._/*?\[\]{},|!+#@%=:~-]*", value):
+            invalid("%s may hold rclone patterns separated by | (no quotes, $ or backslashes)." % key)
 
 
 def merged_config_checks(values):
@@ -838,8 +982,8 @@ def verb_config_set(request):
     if not isinstance(changes, dict) or not changes:
         invalid("changes must be a non-empty object.")
     for key, value in changes.items():
-        if key not in CONFIG_KEYS:
-            invalid("%s cannot be changed from the GUI." % key)
+        if key not in CONFIG_KEYS or config_readonly_reason(key):
+            invalid("%s cannot be changed from the GUI. %s" % (key, config_readonly_reason(key)))
         validate_config_value(key, value)
     expect = args.get("expect_sha")
     if not isinstance(expect, str) or not re.fullmatch(r"[0-9a-f]{64}", expect):
@@ -887,8 +1031,16 @@ def verb_config_set(request):
         handle.truncate()
     changed = ", ".join("%s=%s" % (k, "[set]" if k in SECRET_KEYS and v else v) for k, v in changes.items())
     record_event("info", "gui-action", "Settings changed: %s" % ", ".join(sorted(changes)), changed, "")
-    return {"sha256": file_sha256(path), "backup": backup_path, "changed": sorted(changes),
-            "note": "Watchdog and notification settings apply from the next backup run."}
+    note = "The changes apply from the next backup run."
+    schedule_output = ""
+    if SCHEDULE_KEYS & set(changes):
+        code, out, err = run([bin_script("apply-schedule.sh")], CHANGE_TIMEOUT)
+        schedule_output = (out + err).strip()
+        if code != 0:
+            raise ControlError("apply_failed", "global.conf was saved, but the timers were not updated: %s" % schedule_output[-500:])
+        note = "The schedule was applied to the timers at once; other changes apply from the next backup run."
+    return {"sha256": file_sha256(path), "backup": backup_path, "changed": sorted(changes), "note": note,
+            "schedule_output": schedule_output}
 
 
 def verb_backup_start(request):
@@ -986,9 +1138,9 @@ def verb_audit(request):
 
 
 # verb: (function, changes something)
-# --------------------------------------------------------------------------- source entries
+# --------------------------------------------------------------------------- backup jobs
 #
-# One "entry" is one line of file-sources.conf. Its projects are the entry itself
+# One backup job is one line of file-sources.conf. Its projects are the entry itself
 # (isolation single) or each child directory (isolation children). file-backup.sh
 # records one row per project and run in projects/history.tsv and the changed files
 # of each project's last run in projects/changes/<key>.tsv, where <key> is the
@@ -1059,7 +1211,7 @@ def describe_entry(row):
         "source": row["source"], "source_exists": row["source_exists"], "isolation": row["isolation"],
         "destination_mode": row["destination_mode"] or "default-root", "destination_value": row["destination_value"],
         "destination": join_path(REMOTE_BASE, relative) if relative and REMOTE_BASE else "",
-        "destination_relative": relative, "stop_file": stop_file,
+        "destination_relative": relative, "stop_file": stop_file, "stop_file_configured": row["stop_file"],
         "stop_file_present": bool(row["source_exists"] and stop_file and os.path.isfile(os.path.join(row["source"], stop_file))),
         "archive": join_path(REMOTE_BASE, ARCHIVE_FOLDER, "<run time>", "attempt-<n>", relative) if relative and REMOTE_BASE else "",
         "retention": RETENTION, "problem": "",
@@ -1295,7 +1447,7 @@ def load_entries():
     return [describe_entry(row) for row in parse_sources(text)]
 
 
-def verb_entries(request):
+def verb_jobs(request):
     get_args(request, [])
     entries = load_entries()
     grouped, legacy, truncated = rows_by_entry()
@@ -1310,18 +1462,18 @@ def verb_entries(request):
                 card["children"] = None
         else:
             card["children"] = None
-    return {"entries": cards, "run": current, "legacy": legacy, "history_truncated": truncated,
+    return {"jobs": cards, "sha256": file_sha256(os.path.realpath(SOURCES_FILE)), "run": current, "legacy": legacy, "history_truncated": truncated,
             "max_deferrals": max_deferrals, "remote_base": REMOTE_BASE, "archive_folder": ARCHIVE_FOLDER, "retention": RETENTION}
 
 
 def find_entry(args):
     name = args.get("name")
     if not isinstance(name, str) or not LABEL_RE.match(name):
-        invalid("name must be an entry label (or source path) from file-sources.conf.")
+        invalid("name must be a job name (its label, or its source path) from file-sources.conf.")
     for entry in load_entries():
         if entry["name"] == name:
             return entry
-    raise ControlError("not_found", "No entry named %s in file-sources.conf." % name)
+    raise ControlError("not_found", "No backup job named %s in file-sources.conf." % name)
 
 
 def read_changes_header(key):
@@ -1358,7 +1510,7 @@ def pattern_files(source, filename, limit=200, seconds=5):
     return files, truncated
 
 
-def verb_entry(request):
+def verb_job(request):
     args = get_args(request, ["name"])
     entry = find_entry(args)
     grouped, legacy, truncated = rows_by_entry()
@@ -1443,7 +1595,8 @@ def verb_entry(request):
         if run_epoch and starts and ends:
             position = {"offset_s": int(min(starts) - run_epoch), "duration_s": int(max(ends) - min(starts))}
 
-    return {"entry": overview, "projects": projects, "children_truncated": children_truncated, "runs": run_list,
+    return {"entry": overview, "sha256": file_sha256(os.path.realpath(SOURCES_FILE)),
+            "patterns": verb_job_get_patterns(entry["label"]), "roots": job_source_roots(), "projects": projects, "children_truncated": children_truncated, "runs": run_list,
             "changing": changing_rows[:2000], "max_deferrals": max_deferrals, "run": current, "legacy": legacy,
             "history_truncated": truncated, "position": position,
             "excludes": {"filename": EXCLUDE_FILENAME, "files": excludes, "truncated": excludes_truncated, "global": GLOBAL_EXCLUDES},
@@ -1451,19 +1604,19 @@ def verb_entry(request):
             "active_window_s": int(ENV.get("BSC_ACTIVE_WINDOW", "120") or 120)}
 
 
-def verb_entry_changes(request):
+def verb_job_changes(request):
     args = get_args(request, ["name", "project"])
     entry = find_entry(args)
     project = args.get("project")
     if not isinstance(project, str) or not LABEL_RE.match(project):
-        invalid("project must be a project label of this entry.")
+        invalid("project must be a project of this job.")
     rows, _ = read_project_history()
     key = next((row["key"] for row in reversed(rows) if row["entry"] == entry["name"] and row["project"] == project and row["key"]), "")
     if not key:
         present, _ = entry_projects(entry)
         destination = next((dest for label, _, dest, _ in present if label == project), "")
         if not destination:
-            raise ControlError("not_found", "No project %s in entry %s." % (project, entry["name"]))
+            raise ControlError("not_found", "No project %s in job %s." % (project, entry["name"]))
         key = destination_key(destination)
     text, truncated = read_text(state_path("projects", "changes", "%s.tsv" % key), 2 * 1024 * 1024)
     header = None
@@ -1480,7 +1633,7 @@ def verb_entry_changes(request):
     return {"project": project, "key": key, "header": header, "files": files, "note": note, "truncated": truncated}
 
 
-def verb_entry_log(request):
+def verb_job_log(request):
     args = get_args(request, ["name", "run"])
     entry = find_entry(args)
     text, _ = read_text(state_path("logs", "backup-file.log"), 8 * 1024 * 1024)
@@ -1544,7 +1697,7 @@ def measure_source(path):
     return {"files": files, "directories": directories, "bytes": size, "complete": complete}
 
 
-def verb_entry_measure(request):
+def verb_job_measure(request):
     args = get_args(request, ["name", "what"])
     entry = find_entry(args)
     what = choice(args, "what", ["source", "destination"])
@@ -1555,7 +1708,7 @@ def verb_entry_measure(request):
         result["note"] = "Everything under the source, before excludes and stop files."
         return {"what": what, "path": entry["source"], "result": result, "at": now_iso()}
     if not entry["destination"]:
-        raise ControlError("not_found", "This entry has no destination.")
+        raise ControlError("not_found", "This job has no destination.")
     command = [RCLONE_BIN, "size", "--json", entry["destination"]]
     if RCLONE_CONFIG:
         command += ["--config", RCLONE_CONFIG]
@@ -1585,6 +1738,364 @@ def verb_entry_measure(request):
             "listing": listing}
 
 
+# --------------------------------------------------------------------------- job changes
+#
+# Add, edit, enable, disable and remove backup jobs (lines of file-sources.conf),
+# each job's own exclude and volatile patterns (CONFIG_DIR/jobs/<name>.excludes and
+# .volatile, applied to every project of the job), and "back up this job now".
+#
+# A job may only back up a folder under FILE_JOB_SOURCE_ROOTS (set in global.conf by
+# the server's administrator; the GUI cannot change it), and never a system folder or
+# Backup Suite's own config and state: in system mode the backup runs as root, so a
+# job could otherwise upload any file on the server.
+
+JOB_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+JOB_DESTINATION_MODES = ["fixed", "same-name", "default-root"]
+JOB_ISOLATIONS = ["single", "children"]
+JOB_PATTERN_RE = re.compile(r"^[^\x00-\x1f|]{1,300}$")
+JOB_PATTERNS_MAX = 500
+JOB_REQUEST_MAX_AGE = 600
+JOBS_CONFIG_DIR = os.path.join(ENV.get("BSC_CONFIG_DIR", ""), "jobs")
+SYSTEM_FOLDERS = ["/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/libx32", "/proc", "/root", "/run", "/sbin",
+                  "/snap", "/sys", "/usr", "/var/cache", "/var/lib", "/var/log", "/lost+found"]
+
+
+def path_within(path, folder):
+    folder = folder.rstrip("/") or "/"
+    return path == folder or path.startswith(folder + "/") or folder == "/"
+
+
+def job_source_roots():
+    values = parse_global_config(os.path.realpath(GLOBAL_CONFIG_FILE)) if GLOBAL_CONFIG_FILE else {}
+    text = values.get("FILE_JOB_SOURCE_ROOTS", DEFAULT_JOB_SOURCE_ROOTS)
+    roots = []
+    for part in re.split(r"[\s:|,]+", text):
+        if part.startswith("/") and part != "/":
+            roots.append(os.path.realpath(part))
+    return roots
+
+
+def protected_folders():
+    folders = list(SYSTEM_FOLDERS)
+    for path in (STATE_DIR, ENV.get("BSC_CONFIG_DIR", ""), os.path.dirname(BIN_DIR.rstrip("/")),
+                 os.path.dirname(os.path.realpath(GLOBAL_CONFIG_FILE)) if GLOBAL_CONFIG_FILE else ""):
+        if path and path != "/":
+            folders.append(os.path.realpath(path))
+    return folders
+
+
+def job_pattern_path(name, kind):
+    return os.path.join(JOBS_CONFIG_DIR, "%s.%s" % (name, kind))
+
+
+def read_job_patterns(name, kind):
+    if not JOB_NAME_RE.match(name or ""):
+        return []
+    try:
+        with open(job_pattern_path(name, kind), "r", encoding="utf-8", errors="replace") as handle:
+            return [line.rstrip("\n") for index, line in enumerate(handle) if index < JOB_PATTERNS_MAX and line.strip()]
+    except OSError:
+        return []
+
+
+def job_draft(args):
+    """The job fields from a request, as strings and lists, before any check."""
+    draft = args.get("job")
+    if not isinstance(draft, dict):
+        invalid("job must be an object.")
+    unknown = set(draft) - {"enabled", "label", "source", "destination_mode", "destination_value", "stop_file", "isolation",
+                            "excludes", "volatile"}
+    if unknown:
+        invalid("Unknown job field(s): %s" % ", ".join(sorted(unknown)))
+    fields = {}
+    for key in ("label", "source", "destination_mode", "destination_value", "stop_file", "isolation"):
+        value = draft.get(key, "")
+        if not isinstance(value, str) or len(value) > 1024:
+            invalid("%s must be text." % key)
+        fields[key] = value.strip()
+    enabled = draft.get("enabled", True)
+    if not isinstance(enabled, bool):
+        invalid("enabled must be true or false.")
+    fields["enabled"] = enabled
+    for key in ("excludes", "volatile"):
+        value = draft.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            invalid("%s must be a list of patterns." % key)
+        fields[key] = [item.strip() for item in value if item.strip()]
+    return fields
+
+
+def check_job(fields, rows, editing=None):
+    """Returns (problems, warnings, info) for a draft job. `editing` is the row being
+    edited (it does not conflict with itself)."""
+    problems = []
+    warnings = []
+    others = [row for row in rows if editing is None or row["line"] != editing["line"]]
+    name = fields["label"]
+    if not JOB_NAME_RE.match(name):
+        problems.append("Name: 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or digit.")
+    elif any((row["label"] or row["source"]) == name for row in others):
+        problems.append("Another job is already named %s." % name)
+
+    source = fields["source"]
+    real_source = ""
+    if not source.startswith("/") or "|" in source or any(ord(character) < 32 for character in source):
+        problems.append("Source: an absolute folder path (starting with /), without |.")
+    else:
+        source = os.path.normpath(source)
+        fields["source"] = source
+        real_source = os.path.realpath(source)
+        if not os.path.isdir(real_source):
+            problems.append("Source: %s is not an existing folder on this server." % source)
+        roots = job_source_roots()
+        if not any(path_within(real_source, root) for root in roots):
+            problems.append("Source: only folders under %s may be backed up (FILE_JOB_SOURCE_ROOTS in global.conf, set on the server)." % ", ".join(roots or ["(none)"]))
+        for folder in protected_folders():
+            if path_within(real_source, folder) or (folder.startswith(real_source.rstrip("/") + "/") and real_source != "/"):
+                problems.append("Source: %s holds system or Backup Suite files (%s) and cannot be backed up by a job." % (source, folder))
+                break
+        for row in others:
+            other = os.path.realpath(row["source"]) if row["source"] else ""
+            if other and (path_within(real_source, other) or path_within(other, real_source)):
+                warnings.append("The source overlaps job %s (%s): those files are backed up twice." % (row["label"] or row["source"], row["source"]))
+
+    mode = fields["destination_mode"] or "fixed"
+    fields["destination_mode"] = mode
+    value = fields["destination_value"]
+    if mode not in JOB_DESTINATION_MODES:
+        problems.append("Destination mode: fixed, same-name or default-root.")
+    elif mode == "fixed" and not value:
+        problems.append("Destination: fixed mode needs a folder, e.g. projects/%s." % (name or "my-job"))
+    if mode == "same-name":
+        value = ""
+        fields["destination_value"] = ""
+    if value and (not re.fullmatch(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*", value.strip("/")) or ".." in value.split("/")):
+        problems.append("Destination: a relative folder of letters, digits, . _ - and /, e.g. sites/web10.")
+    fields["destination_value"] = value.strip("/") if value else ""
+
+    stop = fields["stop_file"]
+    if stop and (not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", stop) or stop in (".", "..")):
+        problems.append("Stop file: a single file name such as .nosync.")
+    isolation = fields["isolation"] or "single"
+    fields["isolation"] = isolation
+    if isolation not in JOB_ISOLATIONS:
+        problems.append("Projects: single or children.")
+    for key in ("excludes", "volatile"):
+        if len(fields[key]) > JOB_PATTERNS_MAX:
+            problems.append("At most %d %s patterns." % (JOB_PATTERNS_MAX, key))
+        bad = [item for item in fields[key] if not JOB_PATTERN_RE.match(item)]
+        if bad:
+            problems.append("%s pattern %r: up to 300 characters, without |." % (key.capitalize(), bad[0][:40]))
+
+    row = {"enabled": "1" if fields["enabled"] else "0", "label": name, "source": source, "destination_mode": mode,
+           "destination_value": fields["destination_value"], "stop_file": stop, "isolation": isolation, "extra_fields": False,
+           "source_exists": bool(real_source) and os.path.isdir(real_source), "line": editing["line"] if editing else 0}
+    relative = entry_destination_relative(row) if mode in JOB_DESTINATION_MODES else ""
+    destination = join_path(REMOTE_BASE, relative) if relative and REMOTE_BASE else ""
+    if relative:
+        for other_row in others:
+            other_relative = entry_destination_relative(other_row)
+            if other_relative and (other_relative == relative or other_relative.startswith(relative + "/") or relative.startswith(other_relative + "/")):
+                problems.append("Destination %s overlaps job %s (%s): two jobs would overwrite each other's files." % (relative, other_row["label"] or other_row["source"], other_relative))
+    projects = None
+    if row["source_exists"] and isolation == "children":
+        try:
+            projects = sum(1 for item in os.listdir(real_source) if os.path.isdir(os.path.join(real_source, item)))
+        except OSError:
+            projects = None
+        if projects == 0:
+            warnings.append("The source has no child folders yet: with children, each child folder is one project.")
+    elif row["source_exists"]:
+        projects = 1
+    line = "|".join([row["enabled"], name, source, mode, fields["destination_value"], stop, isolation])
+    info = {"line": line, "destination": destination, "destination_relative": relative, "projects": projects,
+            "real_source": real_source, "roots": job_source_roots()}
+    return problems, warnings, info
+
+
+def require_sources_sha(args):
+    expect = args.get("expect_sha")
+    if not isinstance(expect, str) or not re.fullmatch(r"[0-9a-f]{64}", expect):
+        invalid("expect_sha is required.")
+    path = os.path.realpath(SOURCES_FILE)
+    if not os.path.isfile(path):
+        raise ControlError("not_found", "Source config not found: %s" % SOURCES_FILE)
+    if file_sha256(path) != expect:
+        raise ControlError("config_conflict", "file-sources.conf changed since it was read; reload and try again.")
+    return path
+
+
+def backup_file(path, name):
+    backups = os.path.join(gui_dir(), "config-backups")
+    os.makedirs(backups, mode=0o750, exist_ok=True)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    target = os.path.join(backups, "%s.%s" % (name, stamp))
+    if os.path.isfile(path):
+        shutil.copy2(path, target)
+        os.chmod(target, 0o600)
+    existing = sorted(item for item in os.listdir(backups) if item.startswith(name + "."))
+    for item in existing[:-CONFIG_BACKUPS_KEEP]:
+        try:
+            os.remove(os.path.join(backups, item))
+        except OSError:
+            pass
+    return target
+
+
+def rewrite_sources(path, replace_line=None, new_line=None):
+    """Replaces (or with new_line None removes) line number replace_line, or appends
+    new_line. Rewrites in place: keeps the inode, owner, mode and any symlink."""
+    with open(path, "r", encoding="utf-8", errors="surrogateescape") as handle:
+        lines = handle.read().splitlines()
+    if replace_line is not None:
+        if not 1 <= replace_line <= len(lines):
+            raise ControlError("config_conflict", "file-sources.conf changed since it was read; reload and try again.")
+        if new_line is None:
+            del lines[replace_line - 1]
+        else:
+            lines[replace_line - 1] = new_line
+    else:
+        lines.append(new_line)
+    with open(path, "r+", encoding="utf-8", errors="surrogateescape") as handle:
+        handle.seek(0)
+        handle.write("\n".join(lines) + "\n")
+        handle.truncate()
+
+
+def write_job_patterns(name, kind, patterns):
+    path = job_pattern_path(name, kind)
+    if not patterns:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return
+    os.makedirs(JOBS_CONFIG_DIR, mode=0o750, exist_ok=True)
+    temporary = "%s.tmp.%d" % (path, os.getpid())
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write("# Written by the Backup Suite GUI: patterns for every project of job %s.\n" % name)
+        handle.write("\n".join(patterns) + "\n")
+    os.chmod(temporary, 0o640)
+    os.replace(temporary, path)
+
+
+def sources_rows():
+    text, _ = read_text(SOURCES_FILE)
+    return parse_sources(text)
+
+
+def find_row(rows, name):
+    if not isinstance(name, str) or not LABEL_RE.match(name):
+        invalid("name must be a job name from file-sources.conf.")
+    for row in rows:
+        if (row["label"] or row["source"]) == name:
+            return row
+    raise ControlError("not_found", "No backup job named %s in file-sources.conf." % name)
+
+
+def verb_job_check(request):
+    args = get_args(request, ["name", "job"])
+    fields = job_draft(args)
+    rows = sources_rows()
+    editing = find_row(rows, args["name"]) if args.get("name") else None
+    problems, warnings, info = check_job(fields, rows, editing)
+    return {"problems": problems, "warnings": warnings, "info": info, "job": fields}
+
+
+def verb_job_get_patterns(name):
+    return {"excludes": read_job_patterns(name, "excludes"), "volatile": read_job_patterns(name, "volatile")}
+
+
+def verb_job_save(request):
+    args = get_args(request, ["name", "job", "expect_sha"])
+    path = require_sources_sha(args)
+    fields = job_draft(args)
+    rows = sources_rows()
+    editing = find_row(rows, args["name"]) if args.get("name") else None
+    problems, warnings, info = check_job(fields, rows, editing)
+    if problems:
+        invalid(" ".join(problems))
+    backup = backup_file(path, "file-sources.conf")
+    rewrite_sources(path, editing["line"] if editing else None, info["line"])
+    name = fields["label"]
+    old_name = (editing["label"] or editing["source"]) if editing else None
+    for kind in ("excludes", "volatile"):
+        write_job_patterns(name, kind, fields[kind])
+        if old_name and old_name != name and JOB_NAME_RE.match(old_name):
+            try:
+                os.remove(job_pattern_path(old_name, kind))
+            except OSError:
+                pass
+    action = "edited" if editing else "added"
+    record_event("info", "gui-action", "Backup job %s %s" % (name, action), info["line"], "")
+    return {"sha256": file_sha256(path), "backup": backup, "line": info["line"], "name": name, "warnings": warnings,
+            "action": action, "renamed_from": old_name if old_name and old_name != name else None}
+
+
+def verb_job_enable(request):
+    args = get_args(request, ["name", "enabled", "expect_sha"])
+    if not isinstance(args.get("enabled"), bool):
+        invalid("enabled must be true or false.")
+    path = require_sources_sha(args)
+    row = find_row(sources_rows(), args.get("name"))
+    with open(path, "r", encoding="utf-8", errors="surrogateescape") as handle:
+        original = handle.read().splitlines()[row["line"] - 1]
+    parts = original.split("|")
+    parts[0] = "1" if args["enabled"] else "0"
+    backup = backup_file(path, "file-sources.conf")
+    rewrite_sources(path, row["line"], "|".join(parts))
+    name = row["label"] or row["source"]
+    record_event("info", "gui-action", "Backup job %s %s" % (name, "enabled" if args["enabled"] else "disabled"), "", "")
+    return {"sha256": file_sha256(path), "backup": backup, "name": name, "enabled": args["enabled"]}
+
+
+def verb_job_remove(request):
+    args = get_args(request, ["name", "expect_sha"])
+    path = require_sources_sha(args)
+    row = find_row(sources_rows(), args.get("name"))
+    name = row["label"] or row["source"]
+    backup = backup_file(path, "file-sources.conf")
+    rewrite_sources(path, row["line"], None)
+    for kind in ("excludes", "volatile"):
+        if JOB_NAME_RE.match(name) and os.path.isfile(job_pattern_path(name, kind)):
+            backup_file(job_pattern_path(name, kind), "job-%s.%s" % (name, kind))
+            os.remove(job_pattern_path(name, kind))
+    record_event("warning", "gui-action", "Backup job %s removed" % name,
+                 "Its line was removed from file-sources.conf. Nothing was deleted on the remote.", "")
+    return {"sha256": file_sha256(path), "backup": backup, "name": name}
+
+
+def verb_job_run(request):
+    args = get_args(request, ["name"])
+    row = find_row(sources_rows(), args.get("name"))
+    name = row["label"] or row["source"]
+    if not is_enabled_value(row["enabled"]):
+        raise ControlError("invalid_request", "Job %s is disabled; enable it first." % name)
+    if describe_entry(row)["problem"]:
+        raise ControlError("invalid_request", "Job %s has a problem: %s" % (name, describe_entry(row)["problem"]))
+    code, out, _ = systemctl("show", "file-backup.service", "-p", "Id,ActiveState")
+    active = parse_show_blocks(out).get("file-backup.service", {}).get("ActiveState", "") if code == 0 else ""
+    if active in ("active", "activating", "deactivating", "reloading"):
+        raise ControlError("busy", "A file backup is running; this job can run once it has finished.")
+    run_dir = state_path("run")
+    os.makedirs(run_dir, mode=0o750, exist_ok=True)
+    request_path = os.path.join(run_dir, "job-request.env")
+    temporary = request_path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write("jobs=%s\nrequested_at=%d\nrequested_by=%s\n" % (name, int(time.time()), CALLER_LOGIN or CALLER_UID))
+    os.chmod(temporary, 0o640)
+    os.replace(temporary, request_path)
+    code, out, err = systemctl("start", "--no-block", "file-backup.service", timeout=CHANGE_TIMEOUT)
+    if code != 0:
+        try:
+            os.remove(request_path)
+        except OSError:
+            pass
+        raise ControlError("action_failed", (err or out).strip()[-500:] or "systemctl start failed.")
+    record_event("info", "gui-action", "Backup of job %s started" % name, "Only this job runs; the watchdog and the resource profile apply as usual.", "file-backup.service")
+    return {"name": name, "started": True}
+
+
 VERBS = {
     "status": (verb_status, False),
     "history": (verb_history, False),
@@ -1609,11 +2120,16 @@ VERBS = {
     "events.since": (verb_events_since, False),
     "events.stat": (verb_events_stat, False),
     "audit": (verb_audit, False),
-    "entries": (verb_entries, False),
-    "entry": (verb_entry, False),
-    "entry.changes": (verb_entry_changes, False),
-    "entry.log": (verb_entry_log, False),
-    "entry.measure": (verb_entry_measure, False),
+    "jobs": (verb_jobs, False),
+    "job": (verb_job, False),
+    "job.changes": (verb_job_changes, False),
+    "job.log": (verb_job_log, False),
+    "job.measure": (verb_job_measure, False),
+    "job.check": (verb_job_check, False),
+    "job.save": (verb_job_save, True),
+    "job.enable": (verb_job_enable, True),
+    "job.remove": (verb_job_remove, True),
+    "job.run": (verb_job_run, True),
 }
 
 

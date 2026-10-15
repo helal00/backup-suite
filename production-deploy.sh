@@ -396,6 +396,8 @@ install_swap_cap_dropin() {
 }
 install_swap_cap_dropin database-backup.service
 install_swap_cap_dropin database-size-check.service
+# The timers follow global.conf's schedule (the GUI changes it the same way).
+BACKUP_SUITE_CONFIG_DIR="$CONFIG_DIR" "$INSTALL_DIR/bin/apply-schedule.sh" --no-reload
 systemctl daemon-reload
 
 if [ -n "$REQUESTED_LIMITS" ]; then

@@ -7,30 +7,48 @@ the acceptance checks are in [GUI-SPECIFICATION.md](GUI-SPECIFICATION.md).
 
 ## What it shows
 
-- **Left panel: backup entries.** One card per line of `file-sources.conf`
-  (enabled, state, source, mapping, last run, changed and changing files), with a
-  filter for enabled entries or those needing attention. **Home** above them shows
-  the whole system: a verdict, what runs now, live server and backup resources, every
-  entry's state, database backups and the latest ntfy notifications.
-- **An entry's page:** Overview (what is backed up and where, previous versions,
-  when it last ran and was last backed up, when the next run reaches it), Projects
-  (one per child directory with `children`), Changed files (new, updated, removed in
-  each project's last run), Changing files, Excludes & stop files, Runs, Log, and
+- **Left panel: backup jobs.** **+ New job**, a Home card, then one card per job
+  (one line of `file-sources.conf`): enabled, state, source, mapping, last run,
+  changed and changing files. A filter shows all jobs, enabled ones, or those needing
+  attention. **Home** shows the whole system: a verdict, what runs now, live server and
+  backup resources, every job's state, database backups and the latest ntfy
+  notifications.
+- **A job's page:** **Back up now** (this job only), **Edit…**, **Enable/Disable…**,
+  **Remove…**, and eight tabs: Overview, Projects (one per child folder with
+  `children`), Changed files, Changing files, Excludes & stop files, Runs, Log, and
   Source & destination (sizes measured on request).
-- **Admin** (modal): everything that is not about one entry: actions and schedule,
-  runs and failures, profiles and limits, watchdog, ntfy, server settings, the
-  sources file, logs, activity and audit.
+- **Job editor:** name, enabled, source folder, projects (single or children),
+  destination mode and folder, stop file, and the job's own exclude and volatile
+  patterns (`<config>/jobs/<name>.excludes` and `.volatile`, applied to every project
+  of the job). The server checks the draft as you type.
+- **Admin** (modal): actions and schedule, runs and failures, profiles and limits,
+  watchdog, ntfy, **All settings** (every `global.conf` key, grouped; schedule changes
+  are applied to the timers at once through `bin/apply-schedule.sh`), the sources
+  file, logs, activity and audit.
 - **Bell:** the notifications sent to ntfy, each with what happened to the push
   (sent, failed, ntfy off, or held back as already reported), and all activity.
 - **Resource warning:** a popup when the server or the backup runs short, once per
   condition until it clears.
 - ⚙ holds this GUI's own settings only.
 
-Per-entry data comes from `file-backup.sh`: one row per project and run in
+Per-job data comes from `file-backup.sh`: one row per project and run in
 `<state>/projects/history.tsv` (bounded to 20000 lines) and each project's changed
 files from its last run in `<state>/projects/changes/<key>.tsv` (from rclone's
-per-file lines, kept out of the logs). Until the first run after a deploy, entry pages
+per-file lines, kept out of the logs). Until the first run after a deploy, job pages
 use the latest run's log.
+
+### What the GUI may change
+
+- A job may only back up a folder under `FILE_JOB_SOURCE_ROOTS` (default
+  `/home /var/www /srv /opt`), never a system folder (`/etc`, `/root`, `/usr`,
+  `/var/lib`, …) nor one holding Backup Suite's own install, config or state. Only the
+  server's administrator sets `FILE_JOB_SOURCE_ROOTS`, in `global.conf`.
+- Programs and paths the backup runs or reads as root (rclone binary, extra rclone
+  flags, config, state and unit paths) and install options are shown but read-only:
+  from the GUI they could make root run anything.
+- Every change is confirmed, refused if the file changed since it was read, backed up
+  under `<state>/gui/config-backups/`, and audited. Removing a job deletes nothing on
+  the remote.
 
 ## How it runs
 
@@ -54,8 +72,9 @@ use the latest run's log.
 
 Trade-off in system mode: any process running as a GUI admin login can use the
 control verbs, exactly as it can use the GUI. On this server that login also runs
-the AI agent sessions. The verbs are a fixed list; none returns secrets, none writes
-`file-sources.conf`, and every change is audited.
+the AI agent sessions. The verbs are a fixed list; none returns secrets, a job may
+only back up folders under `FILE_JOB_SOURCE_ROOTS` (set on the server, never from
+the GUI), root-run programs and paths are read-only, and every change is audited.
 
 ## Install
 

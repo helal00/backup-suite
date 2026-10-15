@@ -473,6 +473,8 @@ if is_enabled_value_local "${INSTALL_SYSTEMD_UNITS:-1}"; then
     render_unit "$READ_SOURCE_DIR/systemd/backup-suite-watchdog@.service.template" "$SYSTEMD_UNIT_DIR/backup-suite-watchdog@.service" ""
 
     run_cmd chmod 644 "$SYSTEMD_UNIT_DIR/file-backup.service" "$SYSTEMD_UNIT_DIR/file-backup.timer" "$SYSTEMD_UNIT_DIR/database-backup.service" "$SYSTEMD_UNIT_DIR/database-backup.timer" "$SYSTEMD_UNIT_DIR/database-size-check.service" "$SYSTEMD_UNIT_DIR/database-size-check.timer" "$SYSTEMD_UNIT_DIR/backup-suite-notify@.service" "$SYSTEMD_UNIT_DIR/backup-suite-watchdog@.service"
+    # The timers follow global.conf's schedule (the GUI changes it the same way).
+    run_cmd env BACKUP_SUITE_CONFIG_DIR="$CONFIG_DIR" "$INSTALL_DIR/bin/apply-schedule.sh" --no-reload
     run_cmd "${SYSTEMCTL_COMMAND[@]}" daemon-reload
     # Writes the file-backup resource-profile drop-in and reloads systemd.
     run_cmd env BACKUP_SUITE_CONFIG_DIR="$CONFIG_DIR" "$INSTALL_DIR/bin/backup-profile.sh" apply

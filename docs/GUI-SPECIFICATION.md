@@ -584,3 +584,14 @@ verbs (read-only): `entries`, `entry`, `entry.changes`, `entry.log`,
 `entry.measure` (source walk or `rclone size`, at most 90 s). Events carry
 `ntfy` = sent | failed | off | held | "" (GUI only). See docs/GUI.md.
 
+## Revision 5 (2026-10-15): backup jobs and every setting
+
+Entries are called backup jobs. New change verbs: `job.save` (add or edit, with the
+job's own exclude and volatile patterns), `job.enable`, `job.remove`, `job.run` (back
+up one job now: `run/job-request.env`, used once within 10 minutes, then
+`systemctl start file-backup.service`), and the read verb `job.check`. Sources are
+limited to `FILE_JOB_SOURCE_ROOTS` minus system and Backup Suite folders. `config.get`
+lists every `global.conf` key in groups; programs, paths and install options are
+read-only; schedule keys are applied through `bin/apply-schedule.sh` (also run by
+production-deploy.sh and setup.sh).
+

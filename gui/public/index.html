@@ -43,21 +43,22 @@
   </header>
 
   <div class="layout" id="layout">
-    <nav class="sidebar panel" id="sidebar" aria-label="Backup entries">
+    <nav class="sidebar panel" id="sidebar" aria-label="Backup jobs">
       <div class="panel-titlebar">
-        <h2>Backup entries</h2>
+        <h2>Backup jobs</h2>
         <div class="titlebar-actions">
-          <button class="help-button" type="button" data-help="navigation" aria-label="Help: backup entries">?</button>
+          <button class="help-button" type="button" data-help="navigation" aria-label="Help: backup jobs">?</button>
         </div>
       </div>
       <div class="sidebar-tools">
+        <button type="button" id="new-job-button" class="primary-button">+ New job</button>
         <button type="button" id="home-button" class="home-card" aria-current="page">
           <strong>Home</strong>
           <span id="home-card-note" class="muted">System condition</span>
         </button>
-        <label class="sr-only" for="entry-filter">Show entries</label>
+        <label class="sr-only" for="entry-filter">Show jobs</label>
         <select id="entry-filter">
-          <option value="all">All entries</option>
+          <option value="all">All jobs</option>
           <option value="enabled">Enabled only</option>
           <option value="attention">Needing attention</option>
         </select>
@@ -92,7 +93,7 @@
   </div>
 
   <nav class="responsive-switcher" aria-label="Panels">
-    <button type="button" data-show-panel="sidebar">Entries</button>
+    <button type="button" data-show-panel="sidebar">Jobs</button>
     <button type="button" data-show-panel="main" class="active">Main</button>
     <button type="button" data-show-panel="details">Details</button>
   </nav>
@@ -270,7 +271,7 @@
   <dialog id="admin-dialog" class="dialog admin-dialog" aria-labelledby="admin-title">
     <div class="dialog-header">
       <div>
-        <p class="eyebrow">Backup Suite on this server · not specific to one entry</p>
+        <p class="eyebrow">Backup Suite on this server · not specific to one job</p>
         <h2 id="admin-title">Admin</h2>
       </div>
       <div class="titlebar-actions">
@@ -289,6 +290,69 @@
         <div class="panel-body" id="admin-details-body"></div>
       </aside>
     </div>
+  </dialog>
+
+  <dialog id="job-dialog" class="dialog job-dialog" aria-labelledby="job-dialog-title">
+    <form method="dialog" id="job-form" novalidate>
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Backup job · one line of file-sources.conf</p>
+          <h2 id="job-dialog-title">New backup job</h2>
+        </div>
+        <button class="icon-button small" type="submit" value="cancel" formnovalidate aria-label="Close">&#10005;</button>
+      </div>
+      <div class="job-form-grid">
+        <fieldset class="settings-option-group">
+          <legend>The job</legend>
+          <label>Name
+            <input name="label" type="text" required maxlength="64" autocomplete="off" spellcheck="false" placeholder="e.g. web10-native">
+          </label>
+          <p class="settings-help">Letters, digits, dots, dashes and underscores. Its history and change lists are kept under this name.</p>
+          <label class="inline-check"><input name="enabled" type="checkbox" checked><span>Enabled: scheduled runs back it up</span></label>
+          <label>Source folder on this server
+            <input name="source" type="text" required autocomplete="off" spellcheck="false" placeholder="/var/www/clients/client0/web10/web">
+          </label>
+          <p class="settings-help" id="job-roots-note"></p>
+          <fieldset class="radio-group">
+            <legend>Projects</legend>
+            <label class="inline-check"><input type="radio" name="isolation" value="single" checked><span>single: the whole folder is one project</span></label>
+            <label class="inline-check"><input type="radio" name="isolation" value="children"><span>children: each sub-folder is its own project (a failure in one never stops the others)</span></label>
+          </fieldset>
+        </fieldset>
+        <fieldset class="settings-option-group">
+          <legend>Where it goes</legend>
+          <label>Destination mode
+            <select name="destination_mode">
+              <option value="fixed">fixed: a folder you name under the remote root</option>
+              <option value="same-name">same-name: the source folder's own name</option>
+              <option value="default-root">default-root: under the default destination folder</option>
+            </select>
+          </label>
+          <label>Destination folder
+            <input name="destination_value" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. sites/web10">
+          </label>
+          <label>Stop file
+            <input name="stop_file" type="text" autocomplete="off" spellcheck="false" placeholder=".nosync (the global default)">
+          </label>
+          <p class="settings-help">A folder holding this file is skipped: in the source, the whole job; in a sub-folder (children), that project.</p>
+        </fieldset>
+        <fieldset class="settings-option-group">
+          <legend>What it skips</legend>
+          <label>Exclude patterns (one per line, relative to each project)
+            <textarea name="excludes" rows="5" spellcheck="false" placeholder="*.log&#10;cache/**&#10;node_modules/**"></textarea>
+          </label>
+          <label>Volatile patterns: may change during a sync without failing it
+            <textarea name="volatile" rows="3" spellcheck="false" placeholder="storage/*.sqlite"></textarea>
+          </label>
+          <p class="settings-help">rclone filter patterns. They add to the global patterns (Admin → All settings) and to .backup-excludes / .backup-volatile files inside the source.</p>
+        </fieldset>
+        <section class="job-check" id="job-check" aria-live="polite"><p class="muted">Fill in the form; it is checked on the server as you type.</p></section>
+      </div>
+      <div class="toolbar-row end">
+        <button value="cancel" type="submit" formnovalidate>Cancel</button>
+        <button id="job-save-button" value="save" type="submit" class="primary-button">Save job…</button>
+      </div>
+    </form>
   </dialog>
 
   <div id="resource-warning" class="resource-warning" role="alert" hidden>

@@ -64,6 +64,11 @@ project_deferred_active=0
 project_skipped_changed=0
 project_changes_file=""
 rclone_pass_info=0
+# "Back up this job now" from the GUI: run/job-request.env names the job(s) for the
+# next run, if it was written in the last few minutes; it is used once.
+job_filter=""
+job_request_file=$(join_path "$STATE_DIR" "run" "job-request.env")
+jobs_config_dir=$(join_path "$CONFIG_DIR" "jobs")
 run_progress_file=$(join_path "$STATE_DIR" "run" "progress.env")
 projects_total=0
 project_index=0
@@ -110,6 +115,8 @@ count_planned_projects() {
         [ -n "$enabled" ] || continue
         [[ "$enabled" == \#* ]] && continue
         is_enabled_value "$enabled" || continue
+        label=$(trim "$label")
+        job_selected "${label:-$source_path}" || continue
         [ -d "$source_path" ] || continue
         if [ "$isolation_mode" = "children" ]; then
             child_count=$(find "$source_path" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
@@ -195,6 +202,23 @@ finish() {
 
 trap finish EXIT
 
+job_selected() {
+    # job_selected <job name>: true when this run backs up that job.
+    [ -z "$job_filter" ] && return 0
+    printf '%s\n' "$job_filter" | tr ',' '\n' | grep -Fxq -- "$1"
+}
+
+job_pattern_lines() {
+    # The current job's own patterns (CONFIG_DIR/jobs/<job>.<excludes|volatile>).
+    local kind="$1"
+    local pattern_file
+
+    [[ "$current_entry_label" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || return 0
+    pattern_file=$(join_path "$jobs_config_dir" "${current_entry_label}.${kind}")
+    [ -f "$pattern_file" ] || return 0
+    grep -v '^[[:space:]]*#' "$pattern_file" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s|^/||' | grep -v '^$' || true
+}
+
 build_project_pattern_file() {
     local source_path="$1"
     local definition_filename="$2"
@@ -209,10 +233,21 @@ build_project_pattern_file() {
 
     [ -n "$definition_filename" ] || return 0
 
+    local job_kind=""
+    local job_patterns=""
+
     if [ "$definition_filename" = "${FILE_PROJECT_EXCLUDE_FILENAME:-.backup-excludes}" ]; then
         global_patterns="${FILE_GLOBAL_EXCLUDE_PATTERNS:-}"
+        job_kind="excludes"
     elif [ "$definition_filename" = "${FILE_VOLATILE_FILENAME:-.backup-volatile}" ]; then
         global_patterns="${FILE_GLOBAL_VOLATILE_PATTERNS:-}"
+        job_kind="volatile"
+    fi
+    if [ -n "$job_kind" ]; then
+        job_patterns=$(job_pattern_lines "$job_kind")
+        if [ -n "$job_patterns" ]; then
+            global_patterns="${global_patterns:+$global_patterns|}$(printf '%s' "$job_patterns" | tr '\n' '|')"
+        fi
     fi
 
     if [ -n "$global_patterns" ]; then
@@ -1004,6 +1039,18 @@ process_project_sync() {
 }
 
 echo "File backup started at ${run_started_at}"
+if [ -f "$job_request_file" ]; then
+    requested_jobs=$(sed -n 's/^jobs=//p' "$job_request_file" | head -n 1)
+    requested_at=$(sed -n 's/^requested_at=//p' "$job_request_file" | head -n 1)
+    requested_by=$(sed -n 's/^requested_by=//p' "$job_request_file" | head -n 1)
+    rm -f "$job_request_file"
+    if [[ "$requested_at" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - requested_at )) -le 600 ] && [ -n "$requested_jobs" ]; then
+        job_filter="$requested_jobs"
+        echo "Backing up only job(s) ${job_filter}, as requested from the GUI by ${requested_by:-unknown}."
+    else
+        echo "Ignoring an old job request (${requested_jobs:-none}); backing up every enabled job."
+    fi
+fi
 select_project_profile
 projects_total=$(count_planned_projects)
 write_run_progress running
@@ -1047,6 +1094,7 @@ while IFS='|' read -r enabled label source_path destination_mode destination_val
     [[ "$enabled" == \#* ]] && continue
     is_enabled_value "$enabled" || continue
     current_entry_label="${label:-$source_path}"
+    job_selected "$current_entry_label" || continue
 
     if [ -n "$unexpected_fields" ]; then
         failed_count=$((failed_count + 1))
