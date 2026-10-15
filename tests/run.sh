@@ -1158,6 +1158,15 @@ test_watchdog_unit_and_deploy_guards() {
     assert_contains "$deploy" '--stop-running'
     assert_contains "$deploy" 'install_swap_cap_dropin database-backup.service'
     assert_contains "$deploy" 'install_swap_cap_dropin database-size-check.service'
+    assert_contains "$deploy" 'install_runtime_preserve_dropin database-backup.service'
+    assert_contains "$deploy" 'install_runtime_preserve_dropin database-size-check.service'
+    # /run/backup-suite holds the GUI's control socket: no unit may delete it on stop.
+    local template
+    for template in "$ROOT_DIR"/systemd/*.template; do
+        if grep -q '^RuntimeDirectory=backup-suite' "$template"; then
+            grep -Fxq 'RuntimeDirectoryPreserve=yes' "$template" || fail_test "$(basename "$template") must keep /run/backup-suite"
+        fi
+    done
     assert_contains "$deploy" 'bin/apply-schedule.sh" --no-reload'
     assert_contains "$deploy" 'backup-watchdog.sh" "$SERVICE_UNIT" --self-test'
     assert_contains "$deploy" 'backup-profile.sh" set "$REQUESTED_PROFILE"'

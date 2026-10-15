@@ -9,6 +9,9 @@ Type=forking
 __USER_GROUP_DIRECTIVES__
 Environment=BACKUP_SUITE_CONFIG_DIR=__CONFIG_DIR__
 RuntimeDirectory=backup-suite
+# /run/backup-suite is shared (the GUI's control socket lives there too): keep it
+# when this unit stops, or systemd deletes the socket file under the listener.
+RuntimeDirectoryPreserve=yes
 PIDFile=%t/backup-suite/database-size-check.pid
 ExecStart=__INSTALL_DIR__/bin/systemd-fork-run.sh %t/backup-suite/database-size-check.pid /usr/bin/flock -n __LOCK_FILE__ __INSTALL_DIR__/bin/database-size-check.sh
 SuccessExitStatus=SIGTERM

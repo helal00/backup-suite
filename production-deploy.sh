@@ -396,6 +396,25 @@ install_swap_cap_dropin() {
 }
 install_swap_cap_dropin database-backup.service
 install_swap_cap_dropin database-size-check.service
+
+# /run/backup-suite is shared with the GUI's control socket: a database unit
+# that stops must not delete it (RuntimeDirectoryPreserve, as in the template).
+install_runtime_preserve_dropin() {
+    local unit_name="$1"
+    local template="$SOURCE_DIR/systemd/$unit_name.template"
+    local dropin_dir="$UNIT_DIR/$unit_name.d"
+
+    [ -f "$UNIT_DIR/$unit_name" ] || return 0
+    grep -Fxq 'RuntimeDirectoryPreserve=yes' "$template" || die "$template does not preserve its runtime directory."
+    install -d -m 755 -o 0 -g 0 "$dropin_dir"
+    printf '# Installed by production-deploy.sh from %s\n[Service]\nRuntimeDirectoryPreserve=yes\n' \
+        "$unit_name.template" > "$dropin_dir/41-runtime-preserve.conf.tmp"
+    chmod 644 "$dropin_dir/41-runtime-preserve.conf.tmp"
+    mv "$dropin_dir/41-runtime-preserve.conf.tmp" "$dropin_dir/41-runtime-preserve.conf"
+    log "$unit_name keeps /run/backup-suite when it stops."
+}
+install_runtime_preserve_dropin database-backup.service
+install_runtime_preserve_dropin database-size-check.service
 # The timers follow global.conf's schedule (the GUI changes it the same way).
 BACKUP_SUITE_CONFIG_DIR="$CONFIG_DIR" "$INSTALL_DIR/bin/apply-schedule.sh" --no-reload
 systemctl daemon-reload
@@ -443,6 +462,7 @@ fi
 assert_service_property Restart no
 assert_service_property KillMode control-group
 assert_service_property OOMPolicy stop
+assert_service_property RuntimeDirectoryPreserve yes
 systemctl show "$SERVICE_UNIT" -p Wants --value | grep -Fq "$WATCHDOG_INSTANCE_UNIT" || die "$SERVICE_UNIT does not pull in $WATCHDOG_INSTANCE_UNIT"
 log "systemd accepted the profile limits and the watchdog wiring."
 

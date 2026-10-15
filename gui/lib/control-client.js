@@ -83,7 +83,7 @@ function detectMode(preference = "auto", env = process.env) {
     mode = "user";
     reason = "user installation found";
   } else {
-    reason = "Backup Suite was not found for this user, and the system broker socket does not exist.";
+    reason = `Backup Suite was not found for this user, and the system broker socket (${brokerSocket(env)}) does not exist. If Backup Suite is installed on this server, recreate the socket with: sudo systemctl restart backup-suite-control.socket`;
   }
   return { mode, reason, both, userInstalled, systemInstalled, userConfig: userConfigFile(env), socket: brokerSocket(env), script: userControlScript(env) };
 }

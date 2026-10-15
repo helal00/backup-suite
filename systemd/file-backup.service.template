@@ -13,6 +13,9 @@ Environment=BACKUP_SUITE_CONFIG_DIR=__CONFIG_DIR__
 Environment=BACKUP_SUITE_FILE_BACKUP_MODE=normal
 EnvironmentFile=-/run/backup-suite/file-backup.env
 RuntimeDirectory=backup-suite
+# /run/backup-suite is shared (the GUI's control socket lives there too): keep it
+# when this unit stops, or systemd deletes the socket file under the listener.
+RuntimeDirectoryPreserve=yes
 ExecStart=__INSTALL_DIR__/bin/file-backup-service.sh __LOCK_FILE__
 SuccessExitStatus=SIGTERM 75
 OOMPolicy=stop
