@@ -258,7 +258,7 @@ BACKUP_EVENT_UNIT="$unit_name"
 if [ "$watchdog_already_notified" -eq 1 ]; then
     # The watchdog stopped this run and already pushed one message explaining
     # why; a second "failed" push for the same stop would only repeat it.
-    record_backup_event error run-failed "$title_prefix failure on $host_name: $unit_name" "$summary_message" "$unit_name"
+    record_backup_event error run-failed "$title_prefix failure on $host_name: $unit_name" "$summary_message" "$unit_name" held
     echo "Failure recorded without a push: the resource watchdog already notified about this stop."
     echo "Failure record retained at: $failure_log_path"
     exit 0

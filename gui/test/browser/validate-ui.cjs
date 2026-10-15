@@ -21,7 +21,13 @@ const playwrightModule = process.env.PLAYWRIGHT_MODULE || path.join(os.homedir()
 const chromiumPath = process.env.CHROMIUM_PATH || path.join(os.homedir(), ".cache/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-linux64/chrome-headless-shell");
 const { chromium } = require(playwrightModule);
 
-const SECTIONS = ["overview", "runs", "projects", "profiles", "watchdog", "notifications", "sources", "activity"];
+const crypto = require("crypto");
+
+// Home, every tab of one entry, and every Admin tab.
+const ENTRY_TABS = ["overview", "projects", "changes", "changing", "excludes", "runs", "log", "storage"];
+const ADMIN_TABS = ["actions", "runs", "profiles", "watchdog", "notifications", "server", "sources", "logs", "activity"];
+const PAGES = [["home", "#home", "#section-body"], ...ENTRY_TABS.map((tab) => [`entry-${tab}`, `#entry/workspace${tab === "overview" ? "" : `/${tab}`}`, "#section-body"]),
+  ...ADMIN_TABS.map((tab) => [`admin-${tab}`, `#admin/${tab}`, "#admin-body"])];
 
 function seed(fixture) {
   const { stateDir } = fixture;
@@ -36,6 +42,25 @@ function seed(fixture) {
   logLines.push("2026/10/14 10:30:00 ERROR : gamma/file.json: Failed to copy: googleapi: Error 403: Rate Limit Exceeded");
   logLines.push("Run summary: outcome=completed-with-errors profile=moderate synced=2 skipped=0 skipped_changed=0 deferred_active=2 failed=1");
   fs.writeFileSync(path.join(stateDir, "logs", "backup-file.log"), `${logLines.join("\n")}\n`);
+  // Entries: the fixture's "workspace" (children) plus a disabled single entry.
+  const sourceDir = path.join(path.dirname(stateDir), "source");
+  for (const name of ["alpha", "beta", "gamma", "paused"]) fs.mkdirSync(path.join(sourceDir, name), { recursive: true });
+  fs.writeFileSync(path.join(sourceDir, "paused", ".nosync"), "");
+  fs.writeFileSync(path.join(sourceDir, "alpha", ".backup-excludes"), "*.tmp\nnode_modules/**\n");
+  fs.appendFileSync(path.join(fixture.configDir, "file-sources.conf"), `0|web10-native|${sourceDir}/alpha|fixed|sites/web10|.nosync|single\n`);
+  const key = (destination) => crypto.createHash("sha256").update(destination).digest("hex");
+  const history = [];
+  for (const [run, offset] of [["2026-10-13T10:00:00Z", 0], ["2026-10-14T10:00:00Z", 1]]) {
+    for (const [name, result, counts] of [["alpha", "synced", [3, 2, 1]], ["beta", "synced-with-skips", [0, 1, 0]], ["gamma", offset ? "failed" : "synced", [0, 0, 0]], ["paused", "skipped-stop-file", [0, 0, 0]]]) {
+      const destination = `fake:/projects/workspace/${name}`;
+      history.push([run, run.replace("00:00Z", "01:00Z"), run.replace("00:00Z", "03:00Z"), "workspace", `workspace/${name}`, path.join(sourceDir, name), destination, key(destination), result,
+        name === "beta" ? 2 : 0, 0, ...counts].join("\t"));
+    }
+  }
+  fs.mkdirSync(path.join(stateDir, "projects", "changes"), { recursive: true });
+  fs.writeFileSync(path.join(stateDir, "projects", "history.tsv"), `${history.join("\n")}\n`);
+  fs.writeFileSync(path.join(stateDir, "projects", "changes", `${key("fake:/projects/workspace/alpha")}.tsv`),
+    "# run=2026-10-14T10:00:00Z project=workspace/alpha new=3 updated=2 removed=1\nnew\tsrc/a.php\nnew\tsrc/b.php\nnew\tREADME.md\nupdated\tconfig/app.php\nupdated\tpublic/index.php\nremoved\told/legacy.php\n");
   fs.writeFileSync(path.join(stateDir, "watchdog", "history.tsv"), [
     "started\tended\tunit\tprofile\tduration_s\tpeak_mem\tpeak_anon\tpeak_swap\tavg_cpu_pct\tpeak_cpu_pct\tpeak_tasks\tio_read\tio_write\tevents\toutcome",
     `2026-10-13T10:00:00Z\t2026-10-13T11:40:00Z\tfile-backup.service\tmoderate\t6000\t113246208\t52428800\t0\t2\t48\t22\t1048576000\t20971520\tnone\tcompleted`,
@@ -53,16 +78,16 @@ function seed(fixture) {
   fs.mkdirSync(path.join(stateDir, "run"), { recursive: true });
   fs.writeFileSync(path.join(stateDir, "run", "progress.env"), [
     "state=running", "outcome=", "started_at=2026-10-14 10:00:00 UTC", `updated_at=${iso(0)}`, "pid=1", "projects_total=12", "project_index=5",
-    "current_project=workspace/epsilon", "profile=moderate", "synced=3", "skipped=0", "skipped_changed=0", "deferred_active=2", "failed=1"
+    "current_project=workspace/beta", "current_entry=workspace", "profile=moderate", "synced=3", "skipped=0", "skipped_changed=0", "deferred_active=2", "failed=1"
   ].join("\n") + "\n");
   fs.mkdirSync(path.join(stateDir, "active-files"), { recursive: true });
-  fs.writeFileSync(path.join(stateDir, "active-files", "workspace_beta.tsv"), "14\tdata/cache.db\n2\tlogs/app.log\n");
+  fs.writeFileSync(path.join(stateDir, "active-files", `${key("fake:/projects/workspace/beta")}.tsv`), "14\tdata/cache.db\n2\tlogs/app.log\n");
   fs.mkdirSync(path.join(stateDir, "failures"), { recursive: true });
   fs.writeFileSync(path.join(stateDir, "failures", "20261014T103100Z-file-backup.service.log"), "file-backup.service failed on black\n\nWhat happened (most likely):\n- Google Drive's API rate limit was exceeded.\n");
   let seq = 0;
   for (const [severity, category, title] of [["info", "run-finished", "File backup finished: completed-successfully"], ["warning", "profile-step", "backup stepped down from moderate to slow"], ["error", "watchdog-stop", "backup stopped before OOM"]]) {
     seq += 1;
-    appendEvent(stateDir, { seq, id: `evt-${seq}-1`, created_at: iso(-600 + seq * 60), severity, category, title, message: `${title}. Details for the test.`, unit: "file-backup.service" });
+    appendEvent(stateDir, { seq, id: `evt-${seq}-1`, created_at: iso(-600 + seq * 60), severity, category, title, message: `${title}. Details for the test.`, unit: "file-backup.service", ntfy: category === "run-finished" ? "" : seq === 2 ? "held" : "sent" });
   }
 }
 
@@ -88,22 +113,38 @@ async function main() {
         const errors = [];
         page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
         page.on("pageerror", (error) => errors.push(error.message));
-        for (const section of SECTIONS) {
-          await page.goto(`${base}/#${section}`);
-          await page.waitForSelector("#section-body > div");
-          await page.waitForTimeout(section === "overview" ? 2500 : 1500);
-          if (section === "overview") {
+        for (const [name, hash, bodySelector] of PAGES) {
+          await page.goto(`${base}/${hash}`);
+          await page.waitForSelector(`${bodySelector} > div`);
+          await page.waitForTimeout(name === "home" ? 2500 : 1500);
+          if (name === "home") {
             const chip = await page.textContent("#state-chip");
             if (!/Running 5\/12/.test(chip)) failures.push(`${label}/${scheme}: state chip shows "${chip}"`);
+            const cards = await page.$$eval(".entry-card", (nodes) => nodes.map((node) => node.textContent));
+            if (cards.length !== 2) failures.push(`${label}/${scheme}: expected 2 entry cards, got ${cards.length}`);
           }
           const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-          if (overflow > 1) failures.push(`${label}/${scheme}/${section}: horizontal page scroll of ${overflow}px`);
-          const bodyText = await page.textContent("#section-body");
-          if (/\[object Object\]|undefined|NaN/.test(bodyText)) failures.push(`${label}/${scheme}/${section}: suspicious text in section`);
-          await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-${section}.png`), fullPage: label === "desktop" });
+          if (overflow > 1) failures.push(`${label}/${scheme}/${name}: horizontal page scroll of ${overflow}px`);
+          const bodyText = await page.textContent(bodySelector);
+          if (/\[object Object\]|undefined|NaN/.test(bodyText)) failures.push(`${label}/${scheme}/${name}: suspicious text: ${bodyText.match(/.{0,60}(\[object Object\]|undefined|NaN).{0,40}/)?.[0]}`);
+          await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-${name}.png`), fullPage: label === "desktop" && !name.startsWith("admin") });
+          if (name.startsWith("admin")) await page.keyboard.press("Escape");
+        }
+        // A project's details and the entry list on a phone.
+        await page.goto(`${base}/#entry/workspace/projects`);
+        await page.waitForSelector("#section-body table tbody tr");
+        await page.click("#section-body table tbody tr");
+        await page.waitForTimeout(1200);
+        const details = await page.textContent("#details-body");
+        if (!/config\/app\.php/.test(details)) failures.push(`${label}/${scheme}: project details lack its changed files`);
+        await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-project-details.png`) });
+        if (label === "phone") {
+          await page.click('[data-show-panel="sidebar"]');
+          await page.waitForTimeout(300);
+          await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-entries.png`) });
         }
         // Dialogs.
-        await page.goto(`${base}/#overview`);
+        await page.goto(`${base}/#home`);
         await page.waitForTimeout(800);
         await page.click("#settings-button");
         await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-settings.png`) });

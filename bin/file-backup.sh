@@ -50,6 +50,20 @@ file_active_window_seconds="${FILE_ACTIVE_WINDOW_SECONDS:-120}"
 file_active_max_deferrals="${FILE_ACTIVE_MAX_DEFERRALS:-12}"
 file_rclone_tuning_args=()
 active_profile_name=""
+# Per-project records for the GUI's per-entry pages (projects/history.tsv and the
+# last run's changed files per project in projects/changes/<key>.tsv).
+projects_state_dir=$(join_path "$STATE_DIR" "projects")
+project_history_file=$(join_path "$projects_state_dir" "history.tsv")
+project_history_keep_lines="${FILE_PROJECT_HISTORY_KEEP_LINES:-20000}"
+project_changes_keep_lines="${FILE_PROJECT_CHANGES_KEEP_LINES:-1000}"
+run_started_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+current_entry_label=""
+project_result=""
+project_started_iso=""
+project_deferred_active=0
+project_skipped_changed=0
+project_changes_file=""
+rclone_pass_info=0
 run_progress_file=$(join_path "$STATE_DIR" "run" "progress.env")
 projects_total=0
 project_index=0
@@ -73,6 +87,7 @@ write_run_progress() {
         printf 'projects_total=%s\n' "$projects_total"
         printf 'project_index=%s\n' "$project_index"
         printf 'current_project=%s\n' "${current_project_label//$'\n'/ }"
+        printf 'current_entry=%s\n' "${current_entry_label//$'\n'/ }"
         printf 'profile=%s\n' "${PROFILE_NAME:-}"
         printf 'synced=%s\nskipped=%s\nskipped_changed=%s\ndeferred_active=%s\nfailed=%s\n' \
             "$synced_count" "$skipped_count" "$skipped_changed_count" "$deferred_active_count" "$failed_count"
@@ -136,6 +151,16 @@ select_project_profile() {
 
 if [ -n "${FILE_RCLONE_EXTRA_FLAGS:-}" ]; then
     read -r -a file_extra_args <<< "$FILE_RCLONE_EXTRA_FLAGS"
+fi
+# rclone runs with -v so each project's changed files can be recorded; its per-file
+# INFO lines stay out of the logs unless verbose output was asked for.
+for extra_flag in "${file_extra_args[@]}"; do
+    case "$extra_flag" in
+        -v|-vv|--verbose|--verbose=*|--log-level=INFO|--log-level=DEBUG) rclone_pass_info=1 ;;
+    esac
+done
+if is_enabled_value "${BACKUP_SUITE_RCLONE_VERBOSE:-0}"; then
+    rclone_pass_info=1
 fi
 
 if is_enabled_value "${BACKUP_SUITE_RCLONE_VERBOSE:-0}"; then
@@ -452,6 +477,92 @@ migration_key_for_destination() {
     printf '%s' "$1" | sha256sum | cut -d ' ' -f 1
 }
 
+tsv_field() {
+    # One TSV field: tabs and line breaks become spaces.
+    printf '%s' "$1" | tr '\t\r\n' '   '
+}
+
+record_project_result() {
+    # Usage: record_project_result <entry> <project> <source> <destination> <key> <result>
+    # Appends one row to projects/history.tsv and, for a project that was synced or
+    # tried, keeps its changed files from this run in projects/changes/<key>.tsv.
+    # Never fails the run.
+    local entry="$1"
+    local project="$2"
+    local source_path="$3"
+    local destination_path="$4"
+    local state_key="$5"
+    local result="$6"
+    local ended_iso
+    local counts="0 0 0"
+    local changes_dir
+    local changes_target
+    local changes_tmp
+    local counted_new counted_updated counted_removed
+
+    ended_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    mkdir -p "$projects_state_dir" 2>/dev/null || return 0
+    chmod 750 "$projects_state_dir" 2>/dev/null || true
+    if [ -n "$state_key" ] && [ -n "$project_changes_file" ] && [ -f "$project_changes_file" ]; then
+        changes_dir=$(join_path "$projects_state_dir" "changes")
+        mkdir -p "$changes_dir" 2>/dev/null || true
+        changes_target=$(join_path "$changes_dir" "${state_key}.tsv")
+        changes_tmp="$changes_target.tmp.$$"
+        # Copied = uploaded; Moved = the previous remote version went to the archive.
+        # Copied and moved: updated. Copied only: new. Moved or deleted only: removed.
+        if LC_ALL=C awk -F '\t' -v keep="$project_changes_keep_lines" -v run="$run_started_iso" -v project="$(tsv_field "$project")" '
+            $1 == "copied" { copied[$2] = 1; if (!($2 in order)) { order[$2] = ++n; names[n] = $2 } }
+            $1 == "moved" || $1 == "deleted" { moved[$2] = 1; if (!($2 in order)) { order[$2] = ++n; names[n] = $2 } }
+            END {
+                new_count = 0; updated_count = 0; removed_count = 0
+                for (i = 1; i <= n; i++) {
+                    name = names[i]
+                    if ((name in copied) && (name in moved)) { kind[i] = "updated"; updated_count++ }
+                    else if (name in copied) { kind[i] = "new"; new_count++ }
+                    else { kind[i] = "removed"; removed_count++ }
+                }
+                printf "# run=%s project=%s new=%d updated=%d removed=%d\n", run, project, new_count, updated_count, removed_count
+                shown = 0
+                for (i = 1; i <= n && shown < keep; i++) { printf "%s\t%s\n", kind[i], names[i]; shown++ }
+                if (n > keep) printf "# truncated shown=%d total=%d\n", keep, n
+                printf "%d %d %d\n", new_count, updated_count, removed_count > "/dev/stderr"
+            }' "$project_changes_file" > "$changes_tmp" 2> "$changes_tmp.counts"; then
+            mv -f "$changes_tmp" "$changes_target" 2>/dev/null || true
+            counts=$(cat "$changes_tmp.counts" 2>/dev/null || printf '0 0 0')
+        fi
+        rm -f "$changes_tmp" "$changes_tmp.counts" 2>/dev/null || true
+    fi
+    read -r counted_new counted_updated counted_removed <<< "$counts"
+    {
+        printf '%s\t%s\t%s\t' "$run_started_iso" "${project_started_iso:-$ended_iso}" "$ended_iso"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t' "$(tsv_field "$entry")" "$(tsv_field "$project")" "$(tsv_field "$source_path")" "$(tsv_field "$destination_path")" "$state_key" "$result"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$project_deferred_active" "$project_skipped_changed" "${counted_new:-0}" "${counted_updated:-0}" "${counted_removed:-0}"
+    } >> "$project_history_file" 2>/dev/null || return 0
+    if [ "$(wc -l < "$project_history_file" 2>/dev/null || echo 0)" -gt $((project_history_keep_lines + 1000)) ]; then
+        tail -n "$project_history_keep_lines" "$project_history_file" > "$project_history_file.tmp.$$" 2>/dev/null \
+            && mv -f "$project_history_file.tmp.$$" "$project_history_file" 2>/dev/null
+        rm -f "$project_history_file.tmp.$$" 2>/dev/null || true
+    fi
+    return 0
+}
+
+record_skipped_project() {
+    # A project or entry that this run did not sync (stop file, bad config).
+    # Usage: record_skipped_project <entry> <project> <source> <destination-relative> <result>
+    local destination_path=""
+    local state_key=""
+
+    if [ -n "$4" ]; then
+        destination_path=$(join_path "$remote_base" "$4")
+        state_key=$(migration_key_for_destination "$destination_path")
+    fi
+    project_started_iso=""
+    project_deferred_active=0
+    project_skipped_changed=0
+    project_changes_file=""
+    record_project_result "$1" "$2" "$3" "$destination_path" "$state_key" "$5"
+}
+
 write_link_migration_report() {
     local source_path="$1"
     local destination_path="$2"
@@ -568,6 +679,9 @@ run_sync_attempt() {
         sync_args+=(--exclude-from "$changed_skip_file")
     fi
 
+    # Per-file INFO lines ("<path>: Copied (new)", "<path>: Moved (server-side) ...")
+    # go to the project's change list, and to the log only when verbose output was
+    # asked for; every other line is printed as before.
     "$RCLONE_BIN" sync "$source_path" "$destination_path" \
         --config "$RCLONE_CONFIG_PATH" \
         --create-empty-src-dirs \
@@ -575,7 +689,32 @@ run_sync_attempt() {
         --backup-dir "$attempt_archive_path" \
         "${file_rclone_tuning_args[@]}" \
         --retries 1 \
-        "${sync_args[@]}" 2>&1 | tee "$log_file"
+        -v \
+        "${sync_args[@]}" 2>&1 | tee "$log_file" | LC_ALL=C awk -v changes="${project_changes_file:-/dev/null}" -v pass="$rclone_pass_info" '
+            function record(kind, verb,    at, name) {
+                at = index($0, "INFO  : ")
+                name = substr($0, at + 8)
+                name = substr(name, 1, index(name, verb) - 1)
+                sub(/: $/, "", name)
+                gsub(/\t/, " ", name)
+                if (name != "") print kind "\t" name >> changes
+            }
+            # -v also prints the final stats as an empty INFO line followed by a
+            # block that ends with a blank line; it is dropped like the INFO lines.
+            in_stats {
+                if ($0 == "") in_stats = 0
+                if (pass == 1) { print; fflush() }
+                next
+            }
+            /INFO  : / {
+                if ($0 ~ /INFO  : $/) in_stats = 1
+                else if ($0 ~ /: Copied \((new|replaced existing)\)$/) record("copied", ": Copied (")
+                else if ($0 ~ /: Moved \(server-side\)/) record("moved", ": Moved (server-side)")
+                else if ($0 ~ /: Deleted$/) record("deleted", ": Deleted")
+                if (pass == 1) { print; fflush() }
+                next
+            }
+            { print; fflush() }'
 }
 
 mark_migration_complete() {
@@ -596,11 +735,32 @@ process_project() {
     local project_label="$1"
     local source_path="$2"
     local destination_relative="$3"
+    local status=0
+    local destination_path
 
     project_index=$((project_index + 1))
     current_project_label="$project_label"
     write_run_progress running
-    process_project_sync "$project_label" "$source_path" "$destination_relative"
+    project_result=""
+    project_started_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    project_deferred_active=0
+    project_skipped_changed=0
+    project_changes_file=$(mktemp)
+    temp_runtime_files+=("$project_changes_file")
+    process_project_sync "$project_label" "$source_path" "$destination_relative" || status=$?
+    if [ -z "$project_result" ]; then
+        case "$status" in
+            0) project_result="synced" ;;
+            2) project_result="migration-required" ;;
+            *) project_result="failed" ;;
+        esac
+    fi
+    destination_path=$(join_path "$remote_base" "$destination_relative")
+    record_project_result "$current_entry_label" "$project_label" "$source_path" "$destination_path" \
+        "$(migration_key_for_destination "$destination_path")" "$project_result"
+    rm -f "$project_changes_file" 2>/dev/null || true
+    project_changes_file=""
+    return "$status"
 }
 
 process_project_sync() {
@@ -636,6 +796,7 @@ process_project_sync() {
     if [ -n "${BACKUP_SUITE_PROJECT_FILTER_FILE:-}" ] && ! grep -Fxq "$project_label" "$BACKUP_SUITE_PROJECT_FILTER_FILE"; then
         skipped_count=$((skipped_count + 1))
         echo "Skipping '$project_label' because it is outside the explicit migration project filter."
+        project_result="skipped-filter"
         return 0
     fi
 
@@ -643,6 +804,7 @@ process_project_sync() {
         failed_count=$((failed_count + 1))
         failed_entries+=("${project_label}:missing-source")
         echo "Source path is missing or not a directory: $source_path"
+        project_result="missing-source"
         return 1
     fi
 
@@ -650,6 +812,7 @@ process_project_sync() {
         failed_count=$((failed_count + 1))
         failed_entries+=("${project_label}:unreadable-source")
         echo "Source path is not readable by user $(id -un): $source_path"
+        project_result="unreadable-source"
         return 1
     fi
 
@@ -663,6 +826,7 @@ process_project_sync() {
     if [ -f "$migration_marker_file" ] && { is_enabled_value "$BACKUP_SUITE_LINK_MIGRATION_REPORT" || is_enabled_value "$BACKUP_SUITE_CONFIRM_LINK_MIGRATION"; }; then
         skipped_count=$((skipped_count + 1))
         echo "Migration already confirmed for '$project_label'; skipping it in migration mode. Normal scheduled backups will continue to process it."
+        project_result="skipped-migrated"
         return 0
     fi
 
@@ -686,6 +850,7 @@ process_project_sync() {
             failed_count=$((failed_count + 1))
             failed_entries+=("${project_label}:migration-report")
         fi
+        project_result="migration-report"
         return 0
     fi
 
@@ -760,6 +925,7 @@ process_project_sync() {
     if [ -s "$active_paths_file" ]; then
         active_count=$(wc -l < "$active_paths_file")
         deferred_active_count=$((deferred_active_count + active_count))
+        project_deferred_active=$active_count
         echo "Deferring ${active_count} path(s) modified within the last ${file_active_window_seconds}s in '$project_label'; their previous remote versions stay in place until they settle."
         log_bounded_paths "Deferred active path" "$active_paths_file"
     fi
@@ -796,6 +962,7 @@ process_project_sync() {
         fi
         record_project_deferrals "$project_label" "$migration_key" "$active_paths_file"
         echo "File sync completed on stability retry for '$source_path'"
+        project_result="synced-retry"
         return 0
     fi
 
@@ -817,6 +984,8 @@ process_project_sync() {
 
         if run_sync_attempt "$source_path" "$destination_path" "$archive_path/attempt-3" "$attempt_three_log" "$deferred_filter_file" "${source_sync_args[@]}"; then
             skipped_changed_count=$((skipped_changed_count + changed_count))
+            project_skipped_changed=$changed_count
+            project_result="synced-with-skips"
             synced_count=$((synced_count + 1))
             if [ "$migration_applies" -eq 1 ]; then
                 mark_migration_complete "$migration_marker_file" "$source_path" "$destination_path"
@@ -877,11 +1046,13 @@ while IFS='|' read -r enabled label source_path destination_mode destination_val
     [ -z "$enabled" ] && continue
     [[ "$enabled" == \#* ]] && continue
     is_enabled_value "$enabled" || continue
+    current_entry_label="${label:-$source_path}"
 
     if [ -n "$unexpected_fields" ]; then
         failed_count=$((failed_count + 1))
         failed_entries+=("${label:-$source_path}:invalid-extra-fields")
         echo "Invalid extra fields in file source configuration for '${label:-$source_path}'."
+        record_skipped_project "$current_entry_label" "$current_entry_label" "$source_path" "" invalid-config
         continue
     fi
 
@@ -889,6 +1060,7 @@ while IFS='|' read -r enabled label source_path destination_mode destination_val
         failed_count=$((failed_count + 1))
         failed_entries+=("${label:-unnamed}:empty-source")
         echo "Source path is empty for label '$label'."
+        record_skipped_project "$current_entry_label" "$current_entry_label" "" "" invalid-config
         continue
     fi
 
@@ -896,6 +1068,7 @@ while IFS='|' read -r enabled label source_path destination_mode destination_val
         failed_count=$((failed_count + 1))
         failed_entries+=("${label:-$source_path}:missing-source")
         echo "Source path is missing or not a directory: $source_path"
+        record_skipped_project "$current_entry_label" "$current_entry_label" "$source_path" "" missing-source
         continue
     fi
 
@@ -906,6 +1079,7 @@ while IFS='|' read -r enabled label source_path destination_mode destination_val
     if [ -n "$sync_stop_file" ] && [ -f "$source_path/$sync_stop_file" ]; then
         skipped_count=$((skipped_count + 1))
         echo "Skipping source '$source_path' because $sync_stop_file is present"
+        record_skipped_project "$current_entry_label" "$current_entry_label" "$source_path" "" skipped-stop-file
         continue
     fi
 
@@ -918,6 +1092,7 @@ while IFS='|' read -r enabled label source_path destination_mode destination_val
                 failed_count=$((failed_count + 1))
                 failed_entries+=("${label:-$source_path}:missing-destination")
                 echo "destination_value is required for fixed mapping: $source_path"
+                record_skipped_project "$current_entry_label" "$current_entry_label" "$source_path" "" invalid-config
                 continue
             fi
             destination_base=$(strip_slashes "$destination_value")
@@ -931,6 +1106,7 @@ while IFS='|' read -r enabled label source_path destination_mode destination_val
             failed_count=$((failed_count + 1))
             failed_entries+=("${label:-$source_path}:invalid-destination-mode")
             echo "Invalid destination mode '$destination_mode' for source '$source_path'"
+            record_skipped_project "$current_entry_label" "$current_entry_label" "$source_path" "" invalid-config
             continue
             ;;
     esac
@@ -947,6 +1123,7 @@ while IFS='|' read -r enabled label source_path destination_mode destination_val
                 if [ -n "$sync_stop_file" ] && [ -f "$child_path/$sync_stop_file" ]; then
                     skipped_count=$((skipped_count + 1))
                     echo "Skipping isolated project '$child_path' because $sync_stop_file is present"
+                    record_skipped_project "$current_entry_label" "${label:-$(basename "$source_path")}/$child_name" "$child_path" "$(join_path "$destination_base" "$child_name")" skipped-stop-file
                     continue
                 fi
                 process_project "${label:-$(basename "$source_path")}/$child_name" "$child_path" "$(join_path "$destination_base" "$child_name")" || true
@@ -955,12 +1132,14 @@ while IFS='|' read -r enabled label source_path destination_mode destination_val
                 failed_count=$((failed_count + 1))
                 failed_entries+=("${label:-$source_path}:no-child-projects")
                 echo "No child project directories found under isolated source '$source_path'."
+                record_skipped_project "$current_entry_label" "$current_entry_label" "$source_path" "" no-child-projects
             fi
             ;;
         *)
             failed_count=$((failed_count + 1))
             failed_entries+=("${label:-$source_path}:invalid-isolation-mode")
             echo "Invalid isolation mode '$isolation_mode' for source '$source_path'."
+            record_skipped_project "$current_entry_label" "$current_entry_label" "$source_path" "" invalid-config
             ;;
     esac
 done < "$FILE_SOURCE_CONFIG_PATH"

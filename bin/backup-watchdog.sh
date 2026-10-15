@@ -728,7 +728,7 @@ MSG
     esac
     if [ "$push" != "1" ]; then
         echo "(event recorded without a push notification: already reported in this episode, or a routine step)"
-        record_backup_event "$(ntfy_priority_severity "$priority")" "$event_category" "$headline" "$message" "$monitored_unit"
+        record_backup_event "$(ntfy_priority_severity "$priority")" "$event_category" "$headline" "$message" "$monitored_unit" held
         return 0
     fi
 

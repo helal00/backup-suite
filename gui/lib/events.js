@@ -191,8 +191,8 @@ function toTunnelManagerEvent(event) {
     title: event.title,
     message: event.message,
     resource_id: event.unit || "",
-    url: "/#activity",
-    actions: [{ id: "open", label: "Open", kind: "url", target: "/#activity" }],
+    url: "/#bell",
+    actions: [{ id: "open", label: "Open", kind: "url", target: "/#bell" }],
     created_at: event.created_at
   };
 }

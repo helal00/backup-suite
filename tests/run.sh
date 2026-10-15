@@ -194,6 +194,90 @@ test_changing_file_policy() {
     rm -rf "$test_root"
 }
 
+test_project_records_and_changes() {
+    # Real rclone against a local alias remote: per-project rows in
+    # projects/history.tsv, and each project's changed files from the last run.
+    local test_root
+    local output_file
+    local history
+    local changes_file
+    test_root=$(mktemp -d)
+    output_file="$test_root/output.log"
+    mkdir -p "$test_root/workspace/alpha/sub" "$test_root/workspace/beta" "$test_root/workspace/paused" "$test_root/remote" "$test_root/single"
+    printf 'one\n' > "$test_root/workspace/alpha/keep.txt"
+    printf 'two\n' > "$test_root/workspace/alpha/sub/change.txt"
+    printf 'three\n' > "$test_root/workspace/alpha/remove.txt"
+    printf 'beta\n' > "$test_root/workspace/beta/b.txt"
+    printf 'x\n' > "$test_root/workspace/paused/p.txt"
+    touch "$test_root/workspace/paused/.nosync"
+    printf 'solo\n' > "$test_root/single/s.txt"
+    write_test_config "$test_root" rclone 'backup:'
+    printf '[backup]\ntype = alias\nremote = %s\n' "$test_root/remote" > "$test_root/config/rclone.conf"
+    {
+        printf '1|workspace|%s|fixed|projects/workspace|.nosync|children\n' "$test_root/workspace"
+        printf '1|single-entry|%s|fixed|tools/single|.nosync|single\n' "$test_root/single"
+        printf '1|gone|%s|fixed|tools/gone|.nosync|single\n' "$test_root/missing"
+    } > "$test_root/config/file-sources.conf"
+
+    run_backup "$test_root" > "$output_file" 2>&1 || true
+    history="$test_root/state/projects/history.tsv"
+    assert_file "$history"
+    awk -F '\t' '$5 == "workspace/alpha" && $4 == "workspace" && $9 == "synced" && $12 == 3 { found = 1 } END { exit !found }' "$history" \
+        || fail_test 'alpha first run: expected synced with 3 new files'
+    awk -F '\t' '$5 == "workspace/paused" && $9 == "skipped-stop-file" { found = 1 } END { exit !found }' "$history" \
+        || fail_test 'a child with .nosync is recorded as skipped-stop-file'
+    awk -F '\t' '$5 == "single-entry" && $4 == "single-entry" && $9 == "synced" { found = 1 } END { exit !found }' "$history" \
+        || fail_test 'a single entry is recorded'
+    awk -F '\t' '$4 == "gone" && $9 == "missing-source" { found = 1 } END { exit !found }' "$history" \
+        || fail_test 'a missing source is recorded'
+    # Per-file INFO lines go to the change list, not the log.
+    assert_not_contains "$output_file" 'Copied (new)'
+
+    sleep 1
+    printf 'two, changed\n' > "$test_root/workspace/alpha/sub/change.txt"
+    rm "$test_root/workspace/alpha/remove.txt"
+    printf 'brand new\n' > "$test_root/workspace/alpha/added.txt"
+    run_backup "$test_root" > "$output_file" 2>&1 || true
+    changes_file=$(awk -F '\t' '$5 == "workspace/alpha" { key = $8 } END { print key }' "$history")
+    changes_file="$test_root/state/projects/changes/$changes_file.tsv"
+    assert_file "$changes_file"
+    assert_contains "$changes_file" 'new=1 updated=1 removed=1'
+    grep -qxF "$(printf 'updated\tsub/change.txt')" "$changes_file" || fail_test 'updated file not listed'
+    grep -qxF "$(printf 'new\tadded.txt')" "$changes_file" || fail_test 'new file not listed'
+    grep -qxF "$(printf 'removed\tremove.txt')" "$changes_file" || fail_test 'removed file not listed'
+    [ "$(awk -F '\t' '$5 == "workspace/beta"' "$history" | wc -l)" -eq 2 ] || fail_test 'beta should have one row per run'
+    awk -F '\t' '$5 == "workspace/beta" { last = $12 + $13 + $14 } END { exit last != 0 }' "$history" \
+        || fail_test 'beta did not change in the second run'
+    grep -q '^current_entry=' "$test_root/state/run/progress.env" || fail_test 'progress.env has no current_entry'
+
+    # The control script's entry verbs read these records.
+    local reply
+    mkdir -p "$test_root/bin"
+    ln -s "$ROOT_DIR/tests/fixtures/fake-systemctl.sh" "$test_root/bin/systemctl"
+    reply=$(control_call "$test_root" '{"verb":"entries"}')
+    [ "$(json_field "$reply" 'len(d["data"]["entries"])')" = "3" ] || fail_test "entries: expected 3, got: $reply"
+    [ "$(json_field "$reply" '[e for e in d["data"]["entries"] if e["name"] == "workspace"][0]["last_run"]["synced"]')" = "2" ] || fail_test "workspace last run should have 2 synced projects: $reply"
+    [ "$(json_field "$reply" '[e for e in d["data"]["entries"] if e["name"] == "workspace"][0]["children"]')" = "3" ] || fail_test 'workspace has 3 children'
+    [ "$(json_field "$reply" '[e for e in d["data"]["entries"] if e["name"] == "workspace"][0]["destination"]')" = "backup:/projects/workspace" ] || fail_test "destination: $reply"
+    [ "$(json_field "$reply" '[e for e in d["data"]["entries"] if e["name"] == "gone"][0]["problem"]')" = "The source directory does not exist." ] || fail_test 'missing source problem'
+    reply=$(control_call "$test_root" '{"verb":"entry","args":{"name":"workspace"}}')
+    [ "$(json_field "$reply" 'sorted(p["name"] for p in d["data"]["projects"])')" = "['alpha', 'beta', 'paused']" ] || fail_test "entry projects: $reply"
+    [ "$(json_field "$reply" '[p for p in d["data"]["projects"] if p["name"] == "paused"][0]["stop_file_present"]')" = "True" ] || fail_test 'paused has .nosync'
+    [ "$(json_field "$reply" '[p for p in d["data"]["projects"] if p["name"] == "alpha"][0]["changes"]["updated"]')" = "1" ] || fail_test 'alpha changes header'
+    [ "$(json_field "$reply" 'len(d["data"]["runs"])')" = "2" ] || fail_test 'two runs of the entry'
+    reply=$(control_call "$test_root" '{"verb":"entry.changes","args":{"name":"workspace","project":"workspace/alpha"}}')
+    [ "$(json_field "$reply" 'sorted(f["kind"] + ":" + f["path"] for f in d["data"]["files"])')" = "['new:added.txt', 'removed:remove.txt', 'updated:sub/change.txt']" ] || fail_test "entry.changes: $reply"
+    reply=$(control_call "$test_root" '{"verb":"entry.log","args":{"name":"single-entry"}}')
+    [ "$(json_field "$reply" 'any("single-entry" in l for l in d["data"]["lines"]) and not any("workspace/alpha" in l for l in d["data"]["lines"])')" = "True" ] || fail_test "entry.log: $reply"
+    reply=$(control_call "$test_root" '{"verb":"entry.measure","args":{"name":"workspace","what":"source"}}')
+    [ "$(json_field "$reply" 'd["data"]["result"]["files"]')" = "6" ] || fail_test "entry.measure source: $reply"
+    reply=$(control_call "$test_root" '{"verb":"entry.measure","args":{"name":"workspace","what":"destination"}}')
+    [ "$(json_field "$reply" 'd["data"]["result"]["files"]')" = "4" ] || fail_test "entry.measure destination: $reply"
+    reply=$(control_call "$test_root" '{"verb":"entry","args":{"name":"../etc"}}')
+    [ "$(json_field "$reply" 'd["error"]["code"]')" = "not_found" ] || fail_test "unknown entry: $reply"
+    rm -rf "$test_root"
+}
+
 test_durable_failure_history() {
     local test_root
     local output_file
@@ -1595,6 +1679,7 @@ chmod 755 "$ROOT_DIR/tests/fixtures/fake-rclone.sh" "$ROOT_DIR/tests/fixtures/fa
 run_test 'symlink round-trip restore' test_symlink_round_trip
 run_test 'safe link migration gate and restore' test_link_migration_gate_and_restore
 run_test 'changing-file retry and bounded skip' test_changing_file_policy
+run_test 'per-project records and changed files' test_project_records_and_changes
 run_test 'project isolation and no delete on error' test_project_isolation_and_no_delete_on_error
 run_test 'overlap prevention' test_overlap_prevention
 run_test 'explicit migration project filter' test_explicit_project_filter

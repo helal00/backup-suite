@@ -224,7 +224,7 @@ test("Tunnel Manager events: baseline, delivery once, idempotent ack, TTL, no re
     now += 3000;
     const first = await store.handle({ action: "consume", consumer_id: "pc-1" });
     assert.deepStrictEqual(first.body.events.map((event) => event.id), ["evt-2", "evt-3"]);
-    assert.strictEqual(first.body.events[0].actions[0].target, "/#activity");
+    assert.strictEqual(first.body.events[0].actions[0].target, "/#bell");
     const again = await store.handle({ action: "consume", consumer_id: "pc-1" });
     assert.strictEqual(again.body.events.length, 2, "claimed but unacknowledged events are offered again");
     const ack = await store.handle({ action: "ack", consumer_id: "pc-1", event_ids: ["evt-2", "evt-3"] });

@@ -986,6 +986,605 @@ def verb_audit(request):
 
 
 # verb: (function, changes something)
+# --------------------------------------------------------------------------- source entries
+#
+# One "entry" is one line of file-sources.conf. Its projects are the entry itself
+# (isolation single) or each child directory (isolation children). file-backup.sh
+# records one row per project and run in projects/history.tsv and the changed files
+# of each project's last run in projects/changes/<key>.tsv, where <key> is the
+# sha256 of the project's remote destination (the same key as active-files/<key>.tsv).
+
+PROJECT_HISTORY_COLUMNS = ["run", "started", "ended", "entry", "project", "source", "destination", "key", "result",
+                           "deferred_active", "skipped_changed", "new", "updated", "removed"]
+PROJECT_HISTORY_READ_BYTES = 8 * 1024 * 1024
+ENTRY_RUNS_KEEP = 60
+CHILDREN_MAX = 2000
+CHANGES_LINES_MAX = 1000
+SYNCED_RESULTS = ("synced", "synced-retry", "synced-with-skips")
+REMOTE_BASE = ENV.get("BSC_REMOTE_BASE", "")
+ARCHIVE_FOLDER = ENV.get("BSC_ARCHIVE_FOLDER", "deleted_files")
+RETENTION = ENV.get("BSC_RETENTION", "21d")
+DEFAULT_STOP_FILE = ENV.get("BSC_STOP_FILE", ".nosync")
+DEFAULT_DESTINATION_ROOT = ENV.get("BSC_DEFAULT_DESTINATION_ROOT", "files")
+VOLATILE_FILENAME = ENV.get("BSC_VOLATILE_FILENAME", ".backup-volatile")
+GLOBAL_EXCLUDES = [part for part in ENV.get("BSC_GLOBAL_EXCLUDES", "").split("|") if part.strip()]
+GLOBAL_VOLATILE = [part for part in ENV.get("BSC_GLOBAL_VOLATILE", "").split("|") if part.strip()]
+RCLONE_BIN = ENV.get("BSC_RCLONE_BIN", "rclone")
+RCLONE_CONFIG = ENV.get("BSC_RCLONE_CONFIG", "")
+LABEL_RE = re.compile(r"^[^\x00-\x1f]{1,300}$")
+
+
+def strip_slashes(value):
+    if value.startswith("/"):
+        value = value[1:]
+    if value.endswith("/"):
+        value = value[:-1]
+    return value
+
+
+def join_path(*parts):
+    """file-backup.sh's join_path: one slash stripped at each end of every part."""
+    prefix = "/" if parts and parts[0].startswith("/") else ""
+    kept = [strip_slashes(part) for part in parts]
+    return prefix + "/".join(part for part in kept if part)
+
+
+def destination_key(destination):
+    return hashlib.sha256(destination.encode("utf-8")).hexdigest()
+
+
+def is_enabled_value(value):
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def entry_destination_relative(row):
+    mode = row["destination_mode"] or "default-root"
+    if mode == "same-name":
+        return os.path.basename(row["source"].rstrip("/"))
+    if mode == "fixed":
+        return strip_slashes(row["destination_value"]) if row["destination_value"] else ""
+    if mode == "default-root":
+        key = row["destination_value"] or row["label"] or os.path.basename(row["source"].rstrip("/"))
+        return join_path(DEFAULT_DESTINATION_ROOT, key)
+    return ""
+
+
+def describe_entry(row):
+    """The entry as file-backup.sh treats it."""
+    name = row["label"] or row["source"]
+    relative = entry_destination_relative(row)
+    stop_file = row["stop_file"] or DEFAULT_STOP_FILE
+    entry = {
+        "name": name, "line": row["line"], "label": row["label"], "enabled": is_enabled_value(row["enabled"]),
+        "source": row["source"], "source_exists": row["source_exists"], "isolation": row["isolation"],
+        "destination_mode": row["destination_mode"] or "default-root", "destination_value": row["destination_value"],
+        "destination": join_path(REMOTE_BASE, relative) if relative and REMOTE_BASE else "",
+        "destination_relative": relative, "stop_file": stop_file,
+        "stop_file_present": bool(row["source_exists"] and stop_file and os.path.isfile(os.path.join(row["source"], stop_file))),
+        "archive": join_path(REMOTE_BASE, ARCHIVE_FOLDER, "<run time>", "attempt-<n>", relative) if relative and REMOTE_BASE else "",
+        "retention": RETENTION, "problem": "",
+    }
+    if row["extra_fields"]:
+        entry["problem"] = "The line has more than 7 fields."
+    elif not row["source"]:
+        entry["problem"] = "The source path is empty."
+    elif not row["source_exists"]:
+        entry["problem"] = "The source directory does not exist."
+    elif not relative:
+        entry["problem"] = "No destination: fixed mode needs a destination value." if row["destination_mode"] == "fixed" else "Unknown destination mode."
+    elif row["isolation"] not in ("single", "children"):
+        entry["problem"] = "Unknown isolation mode %s." % row["isolation"]
+    return entry
+
+
+def entry_projects(entry):
+    """The projects this entry has now: [(project label, source path, destination, stop file present)]."""
+    if not entry["source_exists"] or entry["problem"]:
+        return [], False
+    if entry["isolation"] == "single":
+        return [(entry["name"], entry["source"], entry["destination"], entry["stop_file_present"])], False
+    children = []
+    truncated = False
+    try:
+        names = sorted(name for name in os.listdir(entry["source"])
+                       if os.path.isdir(os.path.join(entry["source"], name)) and not os.path.islink(os.path.join(entry["source"], name)))
+    except OSError:
+        names = []
+    if len(names) > CHILDREN_MAX:
+        names = names[:CHILDREN_MAX]
+        truncated = True
+    base_label = entry["label"] or os.path.basename(entry["source"].rstrip("/"))
+    for name in names:
+        path = os.path.join(entry["source"], name)
+        stop = bool(entry["stop_file"]) and os.path.isfile(os.path.join(path, entry["stop_file"]))
+        children.append(("%s/%s" % (base_label, name), path, join_path(entry["destination"], name) if entry["destination"] else "", stop))
+    return children, truncated
+
+
+def read_project_history():
+    text, truncated = read_text(state_path("projects", "history.tsv"), PROJECT_HISTORY_READ_BYTES)
+    rows = []
+    for line in text.splitlines():
+        fields = line.split("\t")
+        if len(fields) < len(PROJECT_HISTORY_COLUMNS):
+            continue
+        row = dict(zip(PROJECT_HISTORY_COLUMNS, fields))
+        for key in ("deferred_active", "skipped_changed", "new", "updated", "removed"):
+            try:
+                row[key] = int(row[key])
+            except ValueError:
+                row[key] = 0
+        rows.append(row)
+    return rows, truncated
+
+
+def legacy_project_rows():
+    """Before projects/history.tsv existed: the latest run's project results from the
+    durable log, so an entry page has something to show until the next run."""
+    text, _ = read_text(state_path("logs", "backup-file.log"), 8 * 1024 * 1024)
+    lines, starts = log_runs(text)
+    if not starts:
+        return []
+    run_text, first = starts[-1]
+    epoch = to_epoch(run_text)
+    run_iso = datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if epoch else run_text
+    rows = []
+    current = None
+    for line in lines[first:]:
+        match = re.match(r"^Syncing label='(.*)' source='(.*)' destination='(.*)'$", line)
+        if match:
+            current = {"run": run_iso, "started": "", "ended": "", "entry": match.group(1).split("/")[0], "project": match.group(1),
+                       "source": match.group(2), "destination": match.group(3), "key": destination_key(match.group(3)),
+                       "result": "running", "deferred_active": 0, "skipped_changed": 0, "new": None, "updated": None, "removed": None,
+                       "legacy": True}
+            rows.append(current)
+            continue
+        if not current:
+            continue
+        if line.startswith("File sync completed with changing paths"):
+            current["result"] = "synced-with-skips"
+        elif line.startswith("File sync completed on stability retry"):
+            current["result"] = "synced-retry"
+        elif line.startswith("File sync completed for"):
+            current["result"] = "synced"
+        elif line.startswith("File sync failed"):
+            current["result"] = "failed"
+        elif line.startswith("Migration confirmation required"):
+            current["result"] = "migration-required"
+        deferred = re.match(r"^Deferring ([0-9]+) path", line)
+        if deferred:
+            current["deferred_active"] = int(deferred.group(1))
+    return rows
+
+
+def deferral_counts():
+    """{key: (paths, never-settling paths)} from active-files/<key>.tsv."""
+    try:
+        max_deferrals = int(ENV.get("BSC_ACTIVE_MAX_DEFERRALS", "12"))
+    except ValueError:
+        max_deferrals = 12
+    counts = {}
+    directory = state_path("active-files")
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        names = []
+    for name in names:
+        if not name.endswith(".tsv"):
+            continue
+        total = stale = 0
+        try:
+            with open(os.path.join(directory, name), "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    parts = line.split("\t", 1)
+                    if len(parts) == 2 and parts[0].isdigit():
+                        total += 1
+                        if int(parts[0]) >= max_deferrals:
+                            stale += 1
+        except OSError:
+            continue
+        counts[name[:-4]] = (total, stale)
+    return counts, max_deferrals
+
+
+def run_state():
+    progress = read_key_values(state_path("run", "progress.env")) or {}
+    code, out, _ = systemctl("show", "file-backup.service", "-p", "Id,ActiveState")
+    active = parse_show_blocks(out).get("file-backup.service", {}).get("ActiveState", "") if code == 0 else ""
+    running = active in ("active", "activating", "deactivating") and progress.get("state") == "running"
+    timer = {}
+    code, out, _ = systemctl("show", "file-backup.timer", "-p", "NextElapseUSecRealtime,LastTriggerUSec")
+    if code == 0:
+        for line in out.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                timer[key] = value
+    return {"running": running, "active_state": active, "current_entry": progress.get("current_entry", "") if running else "",
+            "current_project": progress.get("current_project", "") if running else "",
+            "run_started": progress.get("started_at", "") if running else "",
+            "next_run": timer.get("NextElapseUSecRealtime", ""), "last_trigger": timer.get("LastTriggerUSec", "")}
+
+
+def summarize_rows(rows):
+    """One run of one entry: counts by result and changed files."""
+    summary = {"projects": len(rows), "synced": 0, "failed": 0, "skipped": 0, "other": 0, "new": 0, "updated": 0, "removed": 0,
+               "deferred": 0, "started": "", "ended": "", "changes_known": True}
+    for row in rows:
+        result = row["result"]
+        if result in SYNCED_RESULTS:
+            summary["synced"] += 1
+        elif result in ("failed", "missing-source", "unreadable-source", "invalid-config", "no-child-projects"):
+            summary["failed"] += 1
+        elif result.startswith("skipped"):
+            summary["skipped"] += 1
+        else:
+            summary["other"] += 1
+        for key in ("new", "updated", "removed"):
+            if row.get(key) is None:
+                summary["changes_known"] = False
+            else:
+                summary[key] += row[key]
+        summary["deferred"] += row["deferred_active"] + row["skipped_changed"]
+        if row["started"] and (not summary["started"] or row["started"] < summary["started"]):
+            summary["started"] = row["started"]
+        if row["ended"] and row["ended"] > summary["ended"]:
+            summary["ended"] = row["ended"]
+    if summary["failed"]:
+        summary["outcome"] = "failed"
+    elif summary["other"]:
+        summary["outcome"] = "attention"
+    elif summary["synced"] and summary["deferred"]:
+        summary["outcome"] = "synced-with-skips"
+    elif summary["synced"]:
+        summary["outcome"] = "synced"
+    elif summary["skipped"]:
+        summary["outcome"] = "skipped"
+    else:
+        summary["outcome"] = "unknown"
+    return summary
+
+
+def rows_by_entry():
+    rows, truncated = read_project_history()
+    legacy = False
+    if not rows:
+        rows = legacy_project_rows()
+        legacy = bool(rows)
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row["entry"], []).append(row)
+    return grouped, legacy, truncated
+
+
+def entry_overview(entry, entry_rows, deferrals, current):
+    """The card for one entry: last run, last success, changes, deferrals, running now."""
+    runs = {}
+    for row in entry_rows:
+        runs.setdefault(row["run"], []).append(row)
+    run_keys = sorted(runs)
+    last = summarize_rows(runs[run_keys[-1]]) if run_keys else None
+    if last:
+        last["run"] = run_keys[-1]
+    last_success = ""
+    for key in reversed(run_keys):
+        if any(row["result"] in SYNCED_RESULTS for row in runs[key]):
+            last_success = max((row["ended"] or key) for row in runs[key] if row["result"] in SYNCED_RESULTS)
+            break
+    last_change = ""
+    for row in reversed(entry_rows):
+        if (row.get("new") or 0) + (row.get("updated") or 0) + (row.get("removed") or 0) > 0:
+            last_change = row["ended"] or row["run"]
+            break
+    keys = {row["key"] for row in entry_rows if row["key"]}
+    changing = sum(deferrals.get(key, (0, 0))[0] for key in keys)
+    never_settles = sum(deferrals.get(key, (0, 0))[1] for key in keys)
+    overview = dict(entry)
+    overview.update({
+        "last_run": last, "last_success": last_success, "last_change": last_change, "runs_recorded": len(run_keys),
+        "changing_files": changing, "never_settles": never_settles,
+        "running": bool(current["running"] and current["current_entry"] == entry["name"]),
+        "current_project": current["current_project"] if current["running"] and current["current_entry"] == entry["name"] else "",
+    })
+    return overview
+
+
+def load_entries():
+    if not os.path.isfile(SOURCES_FILE):
+        raise ControlError("not_found", "Source config not found: %s" % SOURCES_FILE)
+    text, _ = read_text(SOURCES_FILE)
+    return [describe_entry(row) for row in parse_sources(text)]
+
+
+def verb_entries(request):
+    get_args(request, [])
+    entries = load_entries()
+    grouped, legacy, truncated = rows_by_entry()
+    deferrals, max_deferrals = deferral_counts()
+    current = run_state()
+    cards = [entry_overview(entry, grouped.get(entry["name"], []), deferrals, current) for entry in entries]
+    for card in cards:
+        if card["isolation"] == "children" and card["source_exists"]:
+            try:
+                card["children"] = sum(1 for name in os.listdir(card["source"]) if os.path.isdir(os.path.join(card["source"], name)))
+            except OSError:
+                card["children"] = None
+        else:
+            card["children"] = None
+    return {"entries": cards, "run": current, "legacy": legacy, "history_truncated": truncated,
+            "max_deferrals": max_deferrals, "remote_base": REMOTE_BASE, "archive_folder": ARCHIVE_FOLDER, "retention": RETENTION}
+
+
+def find_entry(args):
+    name = args.get("name")
+    if not isinstance(name, str) or not LABEL_RE.match(name):
+        invalid("name must be an entry label (or source path) from file-sources.conf.")
+    for entry in load_entries():
+        if entry["name"] == name:
+            return entry
+    raise ControlError("not_found", "No entry named %s in file-sources.conf." % name)
+
+
+def read_changes_header(key):
+    path = state_path("projects", "changes", "%s.tsv" % key)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            first = handle.readline().strip()
+    except OSError:
+        return None
+    match = re.match(r"^# run=(\S+) project=.* new=([0-9]+) updated=([0-9]+) removed=([0-9]+)$", first)
+    if not match:
+        return None
+    return {"run": match.group(1), "new": int(match.group(2)), "updated": int(match.group(3)), "removed": int(match.group(4))}
+
+
+def pattern_files(source, filename, limit=200, seconds=5):
+    """The exclude or volatile definition files under an entry's source."""
+    files = []
+    truncated = False
+    deadline = time.monotonic() + seconds
+    for directory, subdirs, names in os.walk(source):
+        subdirs[:] = [name for name in subdirs if name not in (".git", "node_modules", "vendor")]
+        if filename in names:
+            path = os.path.join(directory, filename)
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    lines = [line.rstrip("\n") for index, line in enumerate(handle) if index < 200]
+                files.append({"path": path, "relative": os.path.relpath(path, source), "lines": lines})
+            except OSError:
+                continue
+        if len(files) >= limit or time.monotonic() > deadline:
+            truncated = True
+            break
+    return files, truncated
+
+
+def verb_entry(request):
+    args = get_args(request, ["name"])
+    entry = find_entry(args)
+    grouped, legacy, truncated = rows_by_entry()
+    entry_rows = grouped.get(entry["name"], [])
+    deferrals, max_deferrals = deferral_counts()
+    current = run_state()
+    overview = entry_overview(entry, entry_rows, deferrals, current)
+
+    by_project = {}
+    for row in entry_rows:
+        by_project.setdefault(row["project"], []).append(row)
+    present, children_truncated = entry_projects(entry)
+    projects = []
+    seen = set()
+    for label, path, destination, stop in present:
+        seen.add(label)
+        history_rows = by_project.get(label, [])
+        last = history_rows[-1] if history_rows else None
+        # The key the backup recorded (it is what active-files and changes use);
+        # the key from the current config only for a project never recorded.
+        key = (last["key"] if last and last["key"] else "") or (destination_key(destination) if destination else "")
+        last_success = next((row["ended"] or row["run"] for row in reversed(history_rows) if row["result"] in SYNCED_RESULTS), "")
+        changing, stale = deferrals.get(key, (0, 0))
+        projects.append({"project": label, "name": os.path.basename(path), "source": path, "destination": destination, "key": key,
+                         "stop_file_present": stop, "exists": True, "last": last, "last_success": last_success,
+                         "runs": len(history_rows), "changing_files": changing, "never_settles": stale,
+                         "changes": read_changes_header(key) if key else None,
+                         "running": current["running"] and current["current_project"] == label})
+    for label, history_rows in by_project.items():
+        if label in seen or label == entry["name"]:
+            continue
+        last = history_rows[-1]
+        projects.append({"project": label, "name": label.split("/")[-1], "source": last["source"], "destination": last["destination"],
+                         "key": last["key"], "stop_file_present": False, "exists": False, "last": last,
+                         "last_success": next((row["ended"] or row["run"] for row in reversed(history_rows) if row["result"] in SYNCED_RESULTS), ""),
+                         "runs": len(history_rows), "changing_files": 0, "never_settles": 0,
+                         "changes": read_changes_header(last["key"]) if last["key"] else None, "running": False})
+
+    runs = {}
+    for row in entry_rows:
+        runs.setdefault(row["run"], []).append(row)
+    run_list = []
+    for key in sorted(runs, reverse=True)[:ENTRY_RUNS_KEEP]:
+        summary = summarize_rows(runs[key])
+        summary["run"] = key
+        summary["results"] = [{"project": row["project"], "result": row["result"], "new": row["new"], "updated": row["updated"],
+                               "removed": row["removed"], "deferred": row["deferred_active"] + row["skipped_changed"],
+                               "started": row["started"], "ended": row["ended"]} for row in runs[key]]
+        run_list.append(summary)
+
+    keys = {project["key"] for project in projects if project["key"]}
+    changing_rows = []
+    directory = state_path("active-files")
+    for key in sorted(keys):
+        path = os.path.join(directory, "%s.tsv" % key)
+        project = next((item["project"] for item in projects if item["key"] == key), "")
+        try:
+            stat = os.stat(path)
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    parts = line.rstrip("\n").split("\t", 1)
+                    if len(parts) == 2 and parts[0].isdigit():
+                        changing_rows.append({"project": project, "path": parts[1], "count": int(parts[0]),
+                                              "updated": datetime.datetime.fromtimestamp(stat.st_mtime, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+        except OSError:
+            continue
+    changing_rows.sort(key=lambda row: -row["count"])
+
+    excludes, excludes_truncated = pattern_files(entry["source"], EXCLUDE_FILENAME) if entry["source_exists"] else ([], False)
+    volatile, volatile_truncated = pattern_files(entry["source"], VOLATILE_FILENAME) if entry["source_exists"] else ([], False)
+
+    # Where this entry comes in a run: its projects' start offsets in the last run
+    # that synced it, for an estimate of when the next run reaches it.
+    position = None
+    if run_list:
+        last_run = run_list[0]
+        run_epoch = to_epoch(last_run["run"])
+        starts = [to_epoch(item["started"]) for item in last_run["results"] if item["started"]]
+        ends = [to_epoch(item["ended"]) for item in last_run["results"] if item["ended"]]
+        starts = [value for value in starts if value]
+        ends = [value for value in ends if value]
+        if run_epoch and starts and ends:
+            position = {"offset_s": int(min(starts) - run_epoch), "duration_s": int(max(ends) - min(starts))}
+
+    return {"entry": overview, "projects": projects, "children_truncated": children_truncated, "runs": run_list,
+            "changing": changing_rows[:2000], "max_deferrals": max_deferrals, "run": current, "legacy": legacy,
+            "history_truncated": truncated, "position": position,
+            "excludes": {"filename": EXCLUDE_FILENAME, "files": excludes, "truncated": excludes_truncated, "global": GLOBAL_EXCLUDES},
+            "volatile": {"filename": VOLATILE_FILENAME, "files": volatile, "truncated": volatile_truncated, "global": GLOBAL_VOLATILE},
+            "active_window_s": int(ENV.get("BSC_ACTIVE_WINDOW", "120") or 120)}
+
+
+def verb_entry_changes(request):
+    args = get_args(request, ["name", "project"])
+    entry = find_entry(args)
+    project = args.get("project")
+    if not isinstance(project, str) or not LABEL_RE.match(project):
+        invalid("project must be a project label of this entry.")
+    rows, _ = read_project_history()
+    key = next((row["key"] for row in reversed(rows) if row["entry"] == entry["name"] and row["project"] == project and row["key"]), "")
+    if not key:
+        present, _ = entry_projects(entry)
+        destination = next((dest for label, _, dest, _ in present if label == project), "")
+        if not destination:
+            raise ControlError("not_found", "No project %s in entry %s." % (project, entry["name"]))
+        key = destination_key(destination)
+    text, truncated = read_text(state_path("projects", "changes", "%s.tsv" % key), 2 * 1024 * 1024)
+    header = None
+    files = []
+    note = ""
+    for line in text.splitlines():
+        if line.startswith("# run="):
+            header = read_changes_header(key)
+        elif line.startswith("# truncated"):
+            note = line[2:]
+        elif "\t" in line and len(files) < CHANGES_LINES_MAX:
+            kind, path = line.split("\t", 1)
+            files.append({"kind": kind, "path": path})
+    return {"project": project, "key": key, "header": header, "files": files, "note": note, "truncated": truncated}
+
+
+def verb_entry_log(request):
+    args = get_args(request, ["name", "run"])
+    entry = find_entry(args)
+    text, _ = read_text(state_path("logs", "backup-file.log"), 8 * 1024 * 1024)
+    lines, starts = log_runs(text)
+    if not starts:
+        return {"run": None, "lines": [], "truncated": False}
+    chosen = len(starts) - 1
+    wanted = args.get("run", "latest")
+    if wanted != "latest":
+        if not isinstance(wanted, str) or len(wanted) > 40:
+            invalid("run must be 'latest' or a start time.")
+        wanted_epoch = to_epoch(wanted)
+        if wanted_epoch is None:
+            invalid("run must be 'latest' or a start time like 2026-10-14T16:05:00Z.")
+        best = None
+        for index, (start, _) in enumerate(starts):
+            start_epoch = to_epoch(start)
+            if start_epoch is not None and abs(start_epoch - wanted_epoch) <= 180 and (best is None or abs(start_epoch - wanted_epoch) < best[0]):
+                best = (abs(start_epoch - wanted_epoch), index)
+        if best is None:
+            raise ControlError("not_found", "No run in the durable log started near %s." % wanted)
+        chosen = best[1]
+    first = starts[chosen][1]
+    last = starts[chosen + 1][1] if chosen + 1 < len(starts) else len(lines)
+    prefix = entry["name"]
+    own = []
+    inside = False
+    for line in lines[first:last]:
+        match = re.match(r"^Syncing label='(.*)' source=", line)
+        if match:
+            inside = match.group(1) == prefix or match.group(1).startswith(prefix + "/")
+        elif line.startswith(("Skipping source '%s'" % entry["source"], "Skipping isolated project '%s/" % entry["source"].rstrip("/"))):
+            own.append(line)
+            continue
+        elif line.startswith(("Run summary:", "File backup finished", "Cleaning archived")):
+            inside = False
+        if inside:
+            own.append(line)
+    truncated = len(own) > MAX_LOG_LINES
+    return {"run": starts[chosen][0], "lines": own[-MAX_LOG_LINES:], "truncated": truncated}
+
+
+MEASURE_SECONDS = 90
+
+
+def measure_source(path):
+    files = directories = size = 0
+    deadline = time.monotonic() + MEASURE_SECONDS - 10
+    complete = True
+    for directory, subdirs, names in os.walk(path):
+        directories += 1
+        for name in names:
+            try:
+                size += os.lstat(os.path.join(directory, name)).st_size
+                files += 1
+            except OSError:
+                continue
+        if time.monotonic() > deadline:
+            complete = False
+            break
+    return {"files": files, "directories": directories, "bytes": size, "complete": complete}
+
+
+def verb_entry_measure(request):
+    args = get_args(request, ["name", "what"])
+    entry = find_entry(args)
+    what = choice(args, "what", ["source", "destination"])
+    if what == "source":
+        if not entry["source_exists"]:
+            raise ControlError("not_found", "The source directory does not exist.")
+        result = measure_source(entry["source"])
+        result["note"] = "Everything under the source, before excludes and stop files."
+        return {"what": what, "path": entry["source"], "result": result, "at": now_iso()}
+    if not entry["destination"]:
+        raise ControlError("not_found", "This entry has no destination.")
+    command = [RCLONE_BIN, "size", "--json", entry["destination"]]
+    if RCLONE_CONFIG:
+        command += ["--config", RCLONE_CONFIG]
+    code, out, err = run(command, MEASURE_SECONDS)
+    if code != 0:
+        raise ControlError("remote_error", (err or out).strip()[-500:] or "rclone size failed.")
+    try:
+        measured = json.loads(out)
+    except ValueError:
+        raise ControlError("remote_error", "rclone size returned no JSON.")
+    listing = []
+    command = [RCLONE_BIN, "lsjson", "--max-depth", "1", "--no-mimetype", entry["destination"]]
+    if RCLONE_CONFIG:
+        command += ["--config", RCLONE_CONFIG]
+    try:
+        code, out, err = run(command, 30)
+        if code == 0:
+            for item in json.loads(out)[:500]:
+                listing.append({"name": item.get("Name", ""), "dir": bool(item.get("IsDir")), "size": item.get("Size"),
+                                "modified": item.get("ModTime", "")})
+    except (ControlError, ValueError):
+        pass
+    listing.sort(key=lambda item: (not item["dir"], item["name"].lower()))
+    return {"what": what, "path": entry["destination"], "at": now_iso(),
+            "result": {"files": measured.get("count"), "bytes": measured.get("bytes"), "complete": True,
+                       "note": "Current files only; replaced and deleted versions are kept apart under %s for %s." % (ARCHIVE_FOLDER, RETENTION)},
+            "listing": listing}
+
+
 VERBS = {
     "status": (verb_status, False),
     "history": (verb_history, False),
@@ -1010,6 +1609,11 @@ VERBS = {
     "events.since": (verb_events_since, False),
     "events.stat": (verb_events_stat, False),
     "audit": (verb_audit, False),
+    "entries": (verb_entries, False),
+    "entry": (verb_entry, False),
+    "entry.changes": (verb_entry_changes, False),
+    "entry.log": (verb_entry_log, False),
+    "entry.measure": (verb_entry_measure, False),
 }
 
 

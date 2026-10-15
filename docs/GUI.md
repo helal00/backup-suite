@@ -5,6 +5,33 @@ Manager. It shows what the backups are doing and how much of the server they use
 and offers the same controls as the command-line tools. The full requirements and
 the acceptance checks are in [GUI-SPECIFICATION.md](GUI-SPECIFICATION.md).
 
+## What it shows
+
+- **Left panel: backup entries.** One card per line of `file-sources.conf`
+  (enabled, state, source, mapping, last run, changed and changing files), with a
+  filter for enabled entries or those needing attention. **Home** above them shows
+  the whole system: a verdict, what runs now, live server and backup resources, every
+  entry's state, database backups and the latest ntfy notifications.
+- **An entry's page:** Overview (what is backed up and where, previous versions,
+  when it last ran and was last backed up, when the next run reaches it), Projects
+  (one per child directory with `children`), Changed files (new, updated, removed in
+  each project's last run), Changing files, Excludes & stop files, Runs, Log, and
+  Source & destination (sizes measured on request).
+- **Admin** (modal): everything that is not about one entry: actions and schedule,
+  runs and failures, profiles and limits, watchdog, ntfy, server settings, the
+  sources file, logs, activity and audit.
+- **Bell:** the notifications sent to ntfy, each with what happened to the push
+  (sent, failed, ntfy off, or held back as already reported), and all activity.
+- **Resource warning:** a popup when the server or the backup runs short, once per
+  condition until it clears.
+- ⚙ holds this GUI's own settings only.
+
+Per-entry data comes from `file-backup.sh`: one row per project and run in
+`<state>/projects/history.tsv` (bounded to 20000 lines) and each project's changed
+files from its last run in `<state>/projects/changes/<key>.tsv` (from rclone's
+per-file lines, kept out of the logs). Until the first run after a deploy, entry pages
+use the latest run's log.
+
 ## How it runs
 
 - The GUI is a Node.js server (standard library only, Node 18 or newer) that runs as

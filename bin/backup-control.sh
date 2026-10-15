@@ -89,6 +89,19 @@ export BSC_ACTIVE_MAX_DEFERRALS="${FILE_ACTIVE_MAX_DEFERRALS:-12}"
 export BSC_CALLER_UID="$caller_uid"
 export BSC_CALLER_LOGIN="${caller_login:-uid-$caller_uid}"
 export BSC_HOSTNAME="${REMOTE_HOSTNAME:-$(hostname)}"
+# What the per-entry pages need to describe a source entry the way file-backup.sh
+# treats it (destination, archive, stop and exclude files), and to measure one.
+export BSC_REMOTE_BASE="$( [ -n "${RCLONE_REMOTE_ROOT:-}" ] && remote_base_root)"
+export BSC_ARCHIVE_FOLDER="${FILE_ARCHIVE_FOLDER_NAME:-deleted_files}"
+export BSC_RETENTION="${FILE_RETENTION_DAYS:-21d}"
+export BSC_STOP_FILE="${FILE_SYNC_STOP_FILE:-.nosync}"
+export BSC_DEFAULT_DESTINATION_ROOT="${FILE_DEFAULT_DESTINATION_ROOT:-files}"
+export BSC_VOLATILE_FILENAME="${FILE_VOLATILE_FILENAME:-.backup-volatile}"
+export BSC_GLOBAL_EXCLUDES="${FILE_GLOBAL_EXCLUDE_PATTERNS:-}"
+export BSC_GLOBAL_VOLATILE="${FILE_GLOBAL_VOLATILE_PATTERNS:-}"
+export BSC_ACTIVE_WINDOW="${FILE_ACTIVE_WINDOW_SECONDS:-120}"
+export BSC_RCLONE_BIN="${RCLONE_BIN:-rclone}"
+export BSC_RCLONE_CONFIG="${RCLONE_CONFIG_PATH:-}"
 export BACKUP_SUITE_CONFIG_DIR
 
 exec python3 -I "$SCRIPT_DIR/backup-control.py"

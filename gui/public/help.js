@@ -2,41 +2,65 @@
 // Sources: docs/RESOURCES.md, docs/OPERATIONS.md and docs/GUI-SPECIFICATION.md.
 window.BACKUP_SUITE_HELP = {
   navigation: {
-    title: "Sections",
+    title: "Backup entries",
     sections: [
-      ["Overview", "What the backups are doing now, how much of the server they use, the schedule, and the main actions."],
-      ["Runs", "Every finished file backup with its duration, peak memory, CPU and watchdog events. Open a run to read its log."],
-      ["Projects & changing files", "The result of each project in the latest run, and files skipped because they kept changing."],
-      ["Profiles & limits", "How much CPU, memory, disk and network a backup may use: fixed slow, moderate or fast, or adaptive."],
-      ["Watchdog", "The guard that contains, pauses or stops a backup before it can harm the server, and its thresholds."],
-      ["Notifications (ntfy)", "Off-server alerts by ntfy. GUI notices (bell, Tunnel Manager, browser) are under Settings."],
-      ["Sources", "What gets backed up. Read-only in this version."],
-      ["Activity & audit", "Every event and every change made through the GUI."]
+      ["Home", "The whole system at a glance: is everything in order, what runs now, server and backup resources, every entry's state, database backups and the latest ntfy notifications."],
+      ["Entries", "One card per line of file-sources.conf: a source directory and where it is backed up. The card shows whether it is enabled, its state, its source, its mapping (destination mode, stop file, isolation) and when it last ran. Click a card for everything about that entry."],
+      ["Filter", "All entries, only enabled ones, or only those needing attention (failed, config problem, paused by a stop file, or files that never settle)."],
+      ["Admin", "Everything that is not about one entry: start and stop, schedule, profiles, watchdog, ntfy, server settings, all runs, logs and the audit log."]
     ]
   },
-  overview: {
-    title: "Overview",
+  home: {
+    title: "Home",
     sections: [
-      ["Status", "Idle, Running, Paused by the watchdog, Stopping, or Failed (last run). While running you see the current project and \"project N of M\"."],
-      ["Gauges", "Backup memory against its throttle (MemoryHigh) and hard limit (MemoryMax), memory that cannot be reclaimed, swap, CPU against its quota, tasks, and the server's free RAM and memory pressure. Green is normal; amber means the watchdog is about to contain the backup (80% by default); red means it may stop it (90%). The thin marks are the watchdog's thresholds."],
-      ["Actions", "Every action asks for confirmation first. Stopping a backup is safe for the remote copies: finished projects stay backed up, and the interrupted project is redone next run. Nothing on Google Drive is deleted by a stop."],
-      ["Schedule", "If file-backup.timer is disabled or inactive, scheduled backups do not run; an amber warning says so."]
+      ["Verdict", "Green when the schedule is on, the server has memory to spare and every enabled entry was backed up in its last run. Amber or red lists what needs a look."],
+      ["Gauges", "Backup memory against its throttle (MemoryHigh) and hard limit (MemoryMax), memory that cannot be reclaimed, swap, CPU against its quota, tasks, and the server's free RAM and memory pressure. The thin marks are the watchdog's thresholds."],
+      ["Entries table", "Each entry's state, last run, when it was last backed up, how many files changed last run, and how many files are being skipped because they keep changing. Click a row to open the entry."]
+    ]
+  },
+  entry: {
+    title: "An entry",
+    sections: [
+      ["Overview", "What is backed up and where, previous versions and how long they are kept, when the entry last ran and was last backed up, when the next run reaches it, and projects that need a look."],
+      ["Projects", "With isolation children each child directory is its own project: a failure in one never stops the others. Click a project for its paths, history and the files that changed in its last run."],
+      ["Changed files", "The files each project uploaded in its last run: new, updated (the previous version moved to the archive) and removed (moved to the archive)."],
+      ["Changing files", "Files modified moments before their project synced are skipped and tried again next run; their previous remote version stays. A file skipped many runs in a row never settles: exclude it or stop its writer briefly."],
+      ["Excludes & stop files", "The stop file (.nosync by default) pauses the entry or one project. .backup-excludes patterns are never uploaded; .backup-volatile patterns may change during a sync without failing it."],
+      ["Runs, Log, Source & destination", "This entry's runs with each project's result, its part of the run log, and on request the size of the source and of the destination."]
+    ]
+  },
+  admin: {
+    title: "Admin",
+    sections: [
+      ["What is here", "Backup Suite's settings and actions for the whole server, not for one entry: start and stop, the schedule, resource profiles, the watchdog, ntfy, server settings, every run, the sources file, logs and the audit log."],
+      ["Changes", "Every change asks for confirmation, is validated by the control script, and is recorded in the audit log."]
+    ]
+  },
+  actions: {
+    title: "Actions & schedule",
+    sections: [
+      ["File backup", "Start runs every enabled entry in file-sources.conf order. Stopping is safe for the remote copies: finished projects stay backed up and the interrupted project is redone next run."],
+      ["Schedule", "If file-backup.timer is off, scheduled backups do not run; Home then shows a warning."]
+    ]
+  },
+  server: {
+    title: "Server settings",
+    sections: [
+      ["global.conf", "Run time limit, how long previous versions are kept, and the changing-file rules. Each change is validated, confirmed, backed up and audited, and applies from the next run."]
+    ]
+  },
+  logs: {
+    title: "Logs",
+    sections: [
+      ["Journals", "The systemd journal of the file and database backups, the watchdog, and the GUI's control requests. An entry's own part of the run log is on its Log tab."]
     ]
   },
   runs: {
-    title: "Runs",
+    title: "Runs & failures",
     sections: [
       ["History", "One row per file backup run, from the watchdog's history (newest 500 runs). Peak RAM includes cache; non-reclaimable RAM is what could force an OOM kill."],
       ["Events", "contained: the watchdog reclaimed cache and halved CPU; server-pressure: it paused the backup; step-down/step-up: adaptive profile changes; memory-limit, server-critical, pause-timeout: it stopped the backup."],
       ["Run log", "The run's own part of the durable log, with search, download and copy. Failure records are the files sent as ntfy attachments."]
-    ]
-  },
-  projects: {
-    title: "Projects & changing files",
-    sections: [
-      ["Projects", "Read from the latest run's log: synced, synced on retry, synced with changing files kept for next run, deferred, failed, or waiting for a link-migration confirmation."],
-      ["Changing files", "Before each project, files modified in the last FILE_ACTIVE_WINDOW_SECONDS (120 s by default) are skipped because they are probably still being written. Their previous remote version stays in place and they are tried again next run."],
-      ["Highlighted rows", "A file skipped FILE_ACTIVE_MAX_DEFERRALS runs in a row (12 by default) never settles. Exclude it with .backup-excludes in its project, or stop its writer briefly."]
     ]
   },
   profiles: {
@@ -65,7 +89,7 @@ window.BACKUP_SUITE_HELP = {
     ]
   },
   sources: {
-    title: "Sources",
+    title: "Sources file",
     sections: [
       ["Read-only", "Sources decide what gets backed up, so this version only shows them. Edit file-sources.conf on the server; editing in the GUI arrives in a later version."],
       ["Columns", "enabled | label | source path | destination mode (same-name, fixed, default-root) | destination value | stop file | isolation (single, or children: each child folder is backed up on its own)."],
@@ -75,7 +99,7 @@ window.BACKUP_SUITE_HELP = {
   activity: {
     title: "Activity & audit",
     sections: [
-      ["Activity", "Every Backup Suite event: run finished, watchdog actions, profile steps, changing files, schedule changes, GUI actions and tests. Tunnel Manager shows warnings and errors as desktop notices; everything is listed here."],
+      ["Activity", "Every Backup Suite event: run finished, watchdog actions, profile steps, changing files, schedule changes, GUI actions and tests. Each ntfy notification shows what happened to its push. The bell lists the ntfy notifications on their own."],
       ["Audit", "Every change made through the GUI (or the control broker): when, by which login, what, and the result. Secrets appear only as [set]."]
     ]
   },
@@ -88,8 +112,7 @@ window.BACKUP_SUITE_HELP = {
   settings: {
     title: "Settings",
     sections: [
-      ["GUI settings", "General, Notifications, Tunnel Manager and GUI resource limits are this GUI's own settings, stored for your login."],
-      ["Server settings", "Change Backup Suite's global.conf through the control script. Each change is validated, confirmed, backed up and audited."]
+      ["GUI settings", "General, Notifications, Tunnel Manager and GUI resource limits are this GUI's own settings, stored for your login. Backup Suite's own settings are under Admin."]
     ]
   },
   connect: {

@@ -4,16 +4,6 @@
   "use strict";
 
   const PROFILE_ORDER = ["slow", "moderate", "fast"];
-  const SECTIONS = {
-    overview: "Overview",
-    runs: "Runs",
-    projects: "Projects & changing files",
-    profiles: "Profiles & limits",
-    watchdog: "Watchdog",
-    notifications: "Notifications (ntfy)",
-    sources: "Sources",
-    activity: "Activity & audit"
-  };
   const SETUP_CHOICES = [
     { id: "fixed-slow", label: "Fixed slow", args: { mode: "fixed", profile: "slow" }, note: "Lowest server impact, longest runs." },
     { id: "fixed-moderate", label: "Fixed moderate", args: { mode: "fixed", profile: "moderate" }, note: "Balanced; validated in production." },
@@ -43,7 +33,13 @@
     chart: [],
     events: [],
     tunnelManagerActive: false,
-    section: "overview",
+    view: { kind: "home" },
+    adminTab: "actions",
+    entriesData: null,
+    entriesError: null,
+    entriesLoadedAt: 0,
+    entryCache: {},
+    logSource: "file-backup",
     connected: false,
     sessionId: (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)).slice(0, 36),
     seenSeq: Number(storageGet(SEEN_KEY) || 0),
@@ -244,6 +240,13 @@
   }
 
   function showDetails(title, nodes) {
+    // Inside the Admin dialog, details open in its own side panel.
+    if ($("#admin-dialog").open) {
+      $("#admin-details-title").textContent = title;
+      append(clear($("#admin-details-body")), [nodes]);
+      $("#admin-details").hidden = false;
+      return;
+    }
     $("#details-title").textContent = title;
     append(clear($("#details-body")), [nodes]);
     $("#layout").classList.remove("details-closed");
@@ -515,7 +518,9 @@
 
   const renderers = {};
 
-  renderers.overview = (body) => {
+  // Admin: actions and schedule -----------------------------------------------
+
+  renderers.actions = (body) => {
     const status = state.status;
     if (!status) {
       body.append(state.statusError ? errorNode(state.statusError) : loadingNode());
@@ -523,89 +528,87 @@
       return;
     }
     const backupState = fileBackupState(status);
-    const progress = status.progress || {};
-    const service = status.services?.["file-backup.service"] || {};
     const running = backupState.key === "running" || backupState.key === "paused";
+    const progress = status.progress || {};
     const cards = h("div", { class: "cards" });
-
-    const statusRows = [["State", pill(backupState.label, backupState.key === "running" ? "info" : backupState.key === "failed" ? "bad" : backupState.key === "paused" ? "warn" : "ok")]];
-    if (running) {
-      const started = parseTime(progress.started_at) || parseTime(service.ExecMainStartTimestamp);
-      statusRows.push(["Started", h("span", {}, timeNode(progress.started_at || service.ExecMainStartTimestamp), started ? ` (${relative(started)})` : "")]);
-      if (progress.projects_total) statusRows.push(["Progress", `project ${progress.project_index || 0} of ${progress.projects_total}`]);
-      if (progress.current_project) statusRows.push(["Current project", h("code", {}, progress.current_project)]);
-      statusRows.push(["So far", `synced ${progress.synced || 0}, skipped ${progress.skipped || 0}, deferred ${(Number(progress.skipped_changed) || 0) + (Number(progress.deferred_active) || 0)}, failed ${progress.failed || 0}`]);
-      if (backupState.contained) statusRows.push(["Watchdog", pill("containing a memory surge", "warn")]);
-    } else {
-      statusRows.push(["Last finished", timeNode(service.ExecMainExitTimestamp || progress.updated_at)]);
-      if (progress.outcome) statusRows.push(["Last outcome", progress.outcome]);
-    }
-    const lastAction = status.watchdog_last_action;
-    if (lastAction?.reason) statusRows.push(["Last watchdog stop", h("span", {}, lastAction.reason, " ", timeNode(lastAction.at || lastAction.time))]);
-    cards.append(h("section", { class: "card" }, h("h3", {}, "File backup"), kv(statusRows)));
-
-    const timerEnabled = status.timers_enabled?.["file-backup.timer"];
-    const timer = status.timers?.["file-backup.timer"] || {};
-    const scheduleOff = timerEnabled !== "enabled" || timer.ActiveState !== "active";
-    const scheduleCard = h("section", { class: `card wide ${scheduleOff ? "alert-warn" : ""}` }, h("h3", {}, "Schedule"));
-    if (scheduleOff) scheduleCard.append(h("p", { class: "notice", role: "alert" }, "Scheduled file backups are OFF. Enable file-backup.timer to resume them."));
-    scheduleCard.append(timersTable(status));
-    cards.append(scheduleCard);
-
-    const profileCard = h("section", { class: "card" }, h("h3", {}, "Resource profile"));
-    if (state.profiles) {
-      const level = status.adaptive_level || state.profiles.current_level;
-      profileCard.append(kv([
-        ["Setup", state.profiles.mode === "adaptive" ? `Adaptive ${state.profiles.ladder.join(" ↔ ")}` : `Fixed: ${state.profiles.ladder[0]}`],
-        ["Now", state.profiles.mode === "adaptive" ? `${level}${progress.profile && running ? ` (this run: ${progress.profile})` : ""}` : state.profiles.ladder[0]],
-        ["Limits", state.profiles.limits_mode]
-      ]));
-    } else {
-      profileCard.append(loadingNode());
-    }
-    profileCard.append(h("div", { class: "toolbar-row tight" }, h("button", { type: "button", dataset: { key: "change-profile" }, onclick: () => navigate("profiles") }, "Change…")));
-    cards.append(profileCard);
-
-    const resources = h("section", { class: "card wide" }, h("h3", {}, "Resources (live)"), resourceGauges(status));
-    cards.append(resources);
-
-    cards.append(h("section", { class: "card wide" }, h("h3", {}, `Last ${state.settings?.general?.chartMinutes || 30} minutes`),
-      chartNode(state.chart),
-      h("div", { class: "legend" }, h("span", { class: "memory" }, "Backup memory (% of hard limit)"), h("span", { class: "cpu" }, "Backup CPU %"), h("span", { class: "available" }, "Server RAM available %"))));
-
-    const lastRun = state.history?.rows?.[0];
-    const runCard = h("section", { class: "card" }, h("h3", {}, "Last recorded run"));
-    if (lastRun) {
-      runCard.append(kv([
-        ["Started", timeNode(lastRun.started)],
-        ["Outcome", pill(lastRun.outcome, lastRun.outcome === "completed" ? "ok" : "bad")],
-        ["Duration", duration(lastRun.duration_s)],
-        ["Peak RAM", `${bytes(lastRun.peak_mem)} (${bytes(lastRun.peak_anon)} not reclaimable)`],
-        ["CPU", `avg ${lastRun.avg_cpu_pct ?? "—"}%, peak ${lastRun.peak_cpu_pct ?? "—"}%`],
-        ["Profile", lastRun.profile],
-        ["Watchdog events", lastRun.events.length ? lastRun.events.join(", ") : "none"]
-      ]), h("div", { class: "toolbar-row tight" }, h("button", { type: "button", dataset: { key: "open-last-run" }, onclick: () => openRun(lastRun) }, "Open run")));
-    } else {
-      runCard.append(h("p", { class: "muted" }, state.history ? "No run has been recorded by the watchdog yet." : "Loading…"));
-    }
-    cards.append(runCard);
-
+    cards.append(h("section", { class: "card" }, h("h3", {}, "File backup"), kv([
+      ["State", pill(backupState.label, backupState.key === "running" ? "info" : backupState.key === "failed" ? "bad" : backupState.key === "paused" ? "warn" : "ok")],
+      running && progress.current_entry ? ["Entry", progress.current_entry] : null,
+      running && progress.current_project ? ["Project", h("code", {}, progress.current_project)] : null,
+      status.watchdog_last_action?.reason ? ["Last watchdog stop", h("span", {}, status.watchdog_last_action.reason, " ", timeNode(status.watchdog_last_action.at || status.watchdog_last_action.time))] : null
+    ].filter(Boolean)),
+    h("div", { class: "toolbar-row tight" },
+      h("button", { type: "button", class: "primary-button", dataset: { key: "start-files" }, disabled: running, onclick: () => runAction("start-files") }, "Start file backup now"),
+      h("button", { type: "button", class: "danger-button", dataset: { key: "stop-files" }, disabled: !running, onclick: () => runAction("stop-files") }, "Stop file backup")),
+    h("p", { class: "muted" }, "A file backup always covers every enabled entry, in file-sources.conf order.")));
     const dbRows = ["database-backup.service", "database-size-check.service"].map((unit) => {
       const info = status.services?.[unit] || {};
       const ok = !info.Result || info.Result === "success";
       return [unit.replace(".service", ""), h("span", {}, pill(info.ActiveState === "active" ? "running" : ok ? "ok" : info.Result, info.ActiveState === "active" ? "info" : ok ? "ok" : "bad"), " last ", timeNode(info.ExecMainExitTimestamp || info.InactiveEnterTimestamp))];
     });
-    cards.append(h("section", { class: "card" }, h("h3", {}, "Database backups"), kv(dbRows)));
-
-    cards.append(h("section", { class: "card" }, h("h3", {}, "Actions"),
-      h("div", { class: "toolbar-row tight" },
-        h("button", { type: "button", class: "primary-button", dataset: { key: "start-files" }, disabled: running, onclick: () => runAction("start-files") }, "Start file backup now"),
-        h("button", { type: "button", class: "danger-button", dataset: { key: "stop-files" }, disabled: !running, onclick: () => runAction("stop-files") }, "Stop file backup")),
-      h("div", { class: "toolbar-row tight" },
-        h("button", { type: "button", dataset: { key: "start-databases" }, onclick: () => runAction("start-databases") }, "Start database backup now"),
-        h("button", { type: "button", dataset: { key: "notify-test" }, onclick: () => runAction("notify-test") }, "Send test notification"))));
-
+    cards.append(h("section", { class: "card" }, h("h3", {}, "Database backups"), kv(dbRows),
+      h("div", { class: "toolbar-row tight" }, h("button", { type: "button", dataset: { key: "start-databases" }, onclick: () => runAction("start-databases") }, "Start database backup now"))));
+    cards.append(h("section", { class: "card" }, h("h3", {}, "Notifications"),
+      h("p", { class: "muted" }, "Sends one ntfy message in the real alert format, with an attached detail file."),
+      h("div", { class: "toolbar-row tight" }, h("button", { type: "button", dataset: { key: "notify-test" }, onclick: () => runAction("notify-test") }, "Send test notification"))));
+    const timerEnabled = status.timers_enabled?.["file-backup.timer"];
+    const timer = status.timers?.["file-backup.timer"] || {};
+    const scheduleOff = timerEnabled !== "enabled" || timer.ActiveState !== "active";
+    const scheduleCard = h("section", { class: `card wide ${scheduleOff ? "alert-warn" : ""}` }, h("h3", {}, "Schedule"));
+    if (scheduleOff) scheduleCard.append(h("p", { class: "notice", role: "alert" }, "Scheduled file backups are OFF. Turn file-backup.timer on to resume them."));
+    scheduleCard.append(timersTable(status));
+    cards.append(scheduleCard);
     body.append(cards);
+  };
+
+  // Admin: server settings (global.conf) -----------------------------------------
+
+  renderers.server = async (body) => {
+    body.append(loadingNode());
+    let config;
+    try {
+      config = await control("config.get");
+    } catch (error) {
+      clear(body).append(errorNode(error));
+      return;
+    }
+    clear(body);
+    const byKey = Object.fromEntries(config.settings.map((entry) => [entry.key, entry]));
+    const form = h("div", { class: "threshold-grid" }, SERVER_KEYS.filter((key) => byKey[key]).map((key) => settingField(byKey[key])));
+    body.append(h("p", { class: "muted" }, "These change Backup Suite's global.conf on the server. Each save is confirmed, backed up and recorded in the audit log. Watchdog thresholds and ntfy have their own tabs."),
+      form,
+      h("div", { class: "toolbar-row end" }, h("button", { type: "button", class: "primary-button", onclick: async () => {
+        if (await saveConfig(collectChanges(form), config, { title: "Save server settings?", note: "They apply from the next backup run." })) renderAdmin();
+      } }, "Save server settings…")));
+  };
+
+  // Admin: logs -------------------------------------------------------------------
+
+  const LOG_SOURCES = [
+    ["file-backup", "File backup (journal)"], ["watchdog", "Watchdog"], ["database-backup", "Database backup"],
+    ["database-size-check", "Database size check"], ["control", "GUI control requests"]
+  ];
+
+  renderers.logs = (body) => {
+    const select = h("select", { "aria-label": "Log" }, LOG_SOURCES.map(([key, label]) => h("option", { value: key, selected: key === state.logSource }, label)));
+    const lines = h("select", { "aria-label": "Lines" }, [200, 500, 2000].map((count) => h("option", { value: String(count) }, `last ${count} lines`)));
+    const host = h("div", {});
+    const load = async () => {
+      state.logSource = select.value;
+      clear(host).append(loadingNode());
+      try {
+        const journal = await control("journal", { source: select.value, lines: Number(lines.value) });
+        clear(host).append(journal.truncated ? h("p", { class: "notice info" }, "Shortened to the last 1 MiB.") : null, textBlock(journal.lines, { fileName: `${select.value}.log` }));
+      } catch (error) {
+        clear(host).append(errorNode(error));
+      }
+    };
+    select.addEventListener("change", load);
+    lines.addEventListener("change", load);
+    body.append(h("div", { class: "filters" }, h("label", {}, "Log", select), h("label", {}, "Show", lines),
+      h("button", { type: "button", onclick: load }, "Reload"),
+      h("button", { type: "button", onclick: () => openRun({ started: "latest" }) }, "Latest run's full log")), host);
+    load();
   };
 
   function kv(rows) {
@@ -787,63 +790,6 @@
       showDetails("Failure record", errorNode(error));
     }
   }
-
-  // Projects -----------------------------------------------------------------
-
-  function parseProjects(lines) {
-    const projects = [];
-    let current = null;
-    let summary = "";
-    for (const line of lines) {
-      const sync = line.match(/^Syncing label='(.*)' source='(.*)' destination='(.*)'$/);
-      if (sync) {
-        current = { label: sync[1], source: sync[2], destination: sync[3], result: "running", note: "" };
-        projects.push(current);
-        continue;
-      }
-      if (line.startsWith("Run summary:")) summary = line.replace("Run summary: ", "");
-      if (!current) continue;
-      if (/^File sync completed with changing paths/.test(line)) current.result = "synced, changing files kept for next run";
-      else if (/^File sync completed on stability retry/.test(line)) current.result = "synced on retry";
-      else if (/^File sync completed for/.test(line)) current.result = current.result === "running" ? "synced" : current.result;
-      else if (/^File sync failed/.test(line)) current.result = "failed";
-      else if (/^Migration confirmation required/.test(line)) current.result = "migration confirmation required";
-      const deferred = line.match(/^Deferring (\d+) path/);
-      if (deferred) current.note = `${deferred[1]} recently changed path(s) deferred`;
-    }
-    return { projects, summary };
-  }
-
-  renderers.projects = async (body) => {
-    body.append(loadingNode());
-    let log;
-    let deferrals;
-    try {
-      [log, deferrals] = await Promise.all([control("runlog", { run: "latest", lines: 2000, filter: "projects" }), control("deferrals")]);
-    } catch (error) {
-      clear(body).append(errorNode(error));
-      return;
-    }
-    clear(body);
-    const parsed = parseProjects(log.lines);
-    body.append(h("h3", {}, "Latest run"), log.run ? h("p", { class: "muted" }, `Started ${log.run}. ${parsed.summary}`) : h("p", { class: "muted" }, "No run in the durable log yet."));
-    if (log.truncated) body.append(h("p", { class: "notice info" }, "The run has more project lines than shown; the oldest are left out."));
-    body.append(parsed.projects.length ? h("div", { class: "table-wrap" }, h("table", {},
-      h("thead", {}, h("tr", {}, h("th", {}, "Project"), h("th", {}, "Source"), h("th", {}, "Destination"), h("th", {}, "Result"), h("th", {}, "Notes"))),
-      h("tbody", {}, parsed.projects.map((project) => {
-        const kind = project.result === "failed" || project.result.startsWith("migration") ? "bad" : project.result === "running" ? "info" : project.result === "synced" || project.result === "synced on retry" ? "ok" : "warn";
-        return h("tr", {}, h("td", {}, project.label), h("td", {}, h("code", {}, project.source)), h("td", {}, h("code", {}, project.destination)), h("td", {}, pill(project.result, kind)), h("td", {}, project.note || "—"));
-      })))) : h("p", { class: "empty" }, "No projects in the latest run log."));
-
-    body.append(h("h3", {}, "Changing files"),
-      h("p", { class: "muted" }, `Files modified moments before a sync are skipped and tried again next run. Rows at or above ${deferrals.max_deferrals} runs in a row are highlighted: such a file never settles. Exclude it with .backup-excludes in its project, or stop its writer briefly.`));
-    body.append(deferrals.rows.length ? h("div", { class: "table-wrap" }, h("table", {},
-      h("thead", {}, h("tr", {}, h("th", {}, "Project"), h("th", {}, "Path"), h("th", { class: "num" }, "Runs skipped"), h("th", {}, "Last seen"))),
-      h("tbody", {}, deferrals.rows.map((row) => h("tr", { class: row.count >= deferrals.max_deferrals ? "highlight" : "" },
-        h("td", {}, row.project), h("td", {}, h("code", {}, row.path)),
-        h("td", { class: "num" }, row.count >= deferrals.max_deferrals ? h("span", {}, String(row.count), " ", pill("never settles", "warn")) : String(row.count)),
-        h("td", {}, timeNode(row.updated))))))) : h("p", { class: "empty" }, "No files are being skipped."));
-  };
 
   // Profiles -----------------------------------------------------------------
 
@@ -1180,14 +1126,6 @@
 
   // Activity -----------------------------------------------------------------
 
-  function eventItem(event, isNew) {
-    const date = parseTime(event.created_at);
-    return h("li", { class: `event-item severity-${event.severity} ${isNew ? "is-new" : ""}` },
-      h("header", {}, h("span", {}, pill(event.severity, event.severity === "error" ? "bad" : event.severity === "warning" ? "warn" : "info"), " ", event.category), timeNode(date ? date.toISOString() : event.created_at)),
-      h("strong", {}, event.title),
-      event.message ? h("details", {}, h("summary", {}, "Details"), h("p", {}, event.message)) : null);
-  }
-
   renderers.activity = async (body) => {
     body.append(loadingNode());
     let audit;
@@ -1212,13 +1150,695 @@
         h("td", {}, h("code", {}, JSON.stringify(entry.args || {}))), h("td", {}, pill(entry.ok ? "ok" : "failed", entry.ok ? "ok" : "bad"), " ", entry.ok ? "" : entry.result)))))) : h("p", { class: "empty" }, "No changes have been made through the GUI yet."));
   };
 
-  function markEventsSeen() {
-    const latest = state.events.reduce((max, event) => Math.max(max, event.seq), state.seenSeq);
-    state.seenSeq = latest;
-    storageSet(SEEN_KEY, String(latest));
-    updateChrome();
+  // ------------------------------------------------------------------ entries
+  //
+  // An entry is one line of file-sources.conf: a source directory backed up to one
+  // destination, as one project (isolation single) or one project per child
+  // directory (isolation children). The sidebar lists them as cards; each has its
+  // own page. Everything that is not about one entry is under Admin.
+
+  const RESULT_LABELS = {
+    synced: ["synced", "ok"],
+    "synced-retry": ["synced on retry", "ok"],
+    "synced-with-skips": ["synced, changing files kept", "warn"],
+    failed: ["failed", "bad"],
+    "migration-required": ["needs link-migration confirmation", "bad"],
+    "migration-report": ["migration report only", "info"],
+    "skipped-stop-file": ["paused by stop file", "warn"],
+    "skipped-filter": ["outside migration filter", ""],
+    "skipped-migrated": ["already migrated", ""],
+    "missing-source": ["source missing", "bad"],
+    "unreadable-source": ["source unreadable", "bad"],
+    "invalid-config": ["config error", "bad"],
+    "no-child-projects": ["no child projects", "bad"],
+    running: ["running", "info"],
+    attention: ["needs attention", "warn"],
+    skipped: ["skipped", "warn"],
+    unknown: ["no record yet", ""]
+  };
+
+  function resultPill(result) {
+    const [label, kind] = RESULT_LABELS[result] || [result || "—", ""];
+    return pill(label, kind);
   }
 
+  function entryHash(name, tab) {
+    return `#entry/${encodeURIComponent(name)}${tab && tab !== "overview" ? `/${tab}` : ""}`;
+  }
+
+  // The state an entry is in now, for its card and its page.
+  function entryCondition(entry) {
+    if (!entry.enabled) return { key: "disabled", label: "disabled", kind: "" };
+    if (entry.running) return { key: "running", label: "backing up now", kind: "info" };
+    if (entry.problem) return { key: "problem", label: "config problem", kind: "bad" };
+    if (entry.stop_file_present) return { key: "paused", label: `paused (${entry.stop_file})`, kind: "warn" };
+    const last = entry.last_run;
+    if (!last) return { key: "none", label: "no run recorded", kind: "" };
+    if (last.outcome === "failed") return { key: "failed", label: "last run failed", kind: "bad" };
+    if (entry.never_settles) return { key: "settle", label: `${entry.never_settles} file(s) never settle`, kind: "warn" };
+    if (last.outcome === "synced-with-skips") return { key: "skips", label: "synced, files kept for next run", kind: "warn" };
+    if (last.outcome === "synced") return { key: "ok", label: "backed up", kind: "ok" };
+    return { key: last.outcome, label: (RESULT_LABELS[last.outcome] || [last.outcome])[0], kind: "warn" };
+  }
+
+  function entryNeedsAttention(entry) {
+    return entry.enabled && ["problem", "failed", "settle", "paused"].includes(entryCondition(entry).key);
+  }
+
+  function nextRunDate() {
+    return parseTime(state.entriesData?.run?.next_run || state.status?.timers?.["file-backup.timer"]?.NextElapseUSecRealtime);
+  }
+
+  async function loadEntries({ quiet = false } = {}) {
+    try {
+      state.entriesData = await control("entries");
+      state.entriesError = null;
+    } catch (error) {
+      state.entriesError = error;
+      if (!quiet && error?.code !== "invalid_request") toast(`Entries: ${errorText(error)}`, "error");
+    }
+    state.entriesLoadedAt = Date.now();
+    renderEntryList();
+    if (state.view.kind === "home") renderMain();
+  }
+
+  // The entry verbs arrived with the per-entry pages; an older installed Backup Suite
+  // answers "Unknown verb" until it is deployed again.
+  function entriesErrorNode(error) {
+    if (error?.code === "invalid_request" && /Unknown verb/i.test(error.message || "")) {
+      return h("div", { class: "notice info" }, "The installed Backup Suite is older than this GUI: per-entry pages need the latest version. Deploy it (sudo ./production-deploy.sh …), then reload. Home and Admin work meanwhile.");
+    }
+    return errorNode(error);
+  }
+
+  function renderEntryList() {
+    const host = $("#entry-list");
+    const data = state.entriesData;
+    if (!data) {
+      clear(host).append(state.entriesError ? entriesErrorNode(state.entriesError) : loadingNode("Loading entries…"));
+      return;
+    }
+    const filter = $("#entry-filter").value;
+    const entries = data.entries.filter((entry) => filter === "all" || (filter === "enabled" ? entry.enabled : entryNeedsAttention(entry)));
+    const home = $("#home-button");
+    if (state.view.kind === "home") home.setAttribute("aria-current", "page");
+    else home.removeAttribute("aria-current");
+    const attention = data.entries.filter(entryNeedsAttention).length;
+    $("#home-card-note").textContent = attention ? `${attention} entr${attention === 1 ? "y needs" : "ies need"} attention` : "System condition";
+    const cards = entries.map((entry) => {
+      const condition = entryCondition(entry);
+      const selected = state.view.kind === "entry" && state.view.name === entry.name;
+      const last = entry.last_run;
+      return h("button", {
+        type: "button", class: `entry-card ${entry.enabled ? "" : "is-disabled"} condition-${condition.key}`,
+        "aria-current": selected ? "page" : null, dataset: { entry: entry.name },
+        onclick: () => openEntry(entry.name)
+      },
+      h("span", { class: "entry-card-head" }, h("strong", {}, entry.name), pill(entry.enabled ? "yes" : "no", entry.enabled ? "ok" : "")),
+      h("span", { class: "entry-card-status" }, pill(condition.label, condition.kind),
+        entry.running && entry.current_project ? h("span", { class: "muted" }, ` ${entry.current_project.split("/").pop()}`) : null),
+      h("code", { class: "entry-card-path" }, entry.source),
+      h("span", { class: "entry-card-meta" }, `${entry.destination_mode}${entry.destination_value ? `: ${entry.destination_value}` : ""} · ${entry.stop_file} · ${entry.isolation}${entry.children !== null && entry.children !== undefined ? ` (${entry.children})` : ""}`),
+      entry.enabled ? h("span", { class: "entry-card-meta" },
+        last ? h("span", {}, "last ", h("span", {}, relative(parseTime(last.ended || last.run)) || "—")) : "never run",
+        last && last.changes_known ? ` · ${last.new + last.updated + last.removed} changed` : "",
+        entry.changing_files ? ` · ${entry.changing_files} changing` : "") : null);
+    });
+    append(clear(host), [cards.length ? cards : h("p", { class: "empty" }, filter === "attention" ? "No entry needs attention." : "No entries.")]);
+    if (data.legacy) host.append(h("p", { class: "muted small-note" }, "Per-entry history starts with the next backup run; until then the latest run's log is used."));
+  }
+
+  function openEntry(name, tab = "overview") {
+    const hash = entryHash(name, tab);
+    if (location.hash !== hash) history.pushState(null, "", hash);
+    route();
+  }
+
+  function goHome() {
+    if (location.hash !== "#home") history.pushState(null, "", "#home");
+    route();
+  }
+
+  // ------------------------------------------------------------------ home
+
+  function systemVerdict(status, entriesData) {
+    const problems = [];
+    const notes = [];
+    if (!status) return { level: "unknown", problems, notes };
+    const backup = fileBackupState(status);
+    const timerEnabled = status.timers_enabled?.["file-backup.timer"];
+    if (timerEnabled && timerEnabled !== "enabled") problems.push("Scheduled file backups are OFF (file-backup.timer).");
+    if (backup.key === "paused") problems.push("The watchdog has paused the backup: the server is short of memory.");
+    if (backup.key === "failed") problems.push("The last file backup failed.");
+    if (backup.contained) notes.push("The watchdog is containing a memory surge in the backup.");
+    const watchdog = status.watchdog || {};
+    const available = numberOrNull(status.server?.available_percent);
+    const pausePercent = numberOrNull(watchdog.threshold_server_pause_percent) ?? 10;
+    if (available !== null && available < pausePercent) problems.push(`Server RAM available is ${available}% (the watchdog pauses below ${pausePercent}%).`);
+    if (watchdog.server_pressure === "host-stall" && watchdog.server_pressure_note) notes.push(`Memory stall caused outside the backup: ${watchdog.server_pressure_note}.`);
+    for (const unit of ["database-backup.service", "database-size-check.service"]) {
+      const info = status.services?.[unit];
+      if (info && info.Result && info.Result !== "success") problems.push(`${unit.replace(".service", "")}: last result ${info.Result}.`);
+    }
+    if (entriesData) {
+      for (const entry of entriesData.entries.filter(entryNeedsAttention)) {
+        const condition = entryCondition(entry);
+        (condition.kind === "bad" ? problems : notes).push(`${entry.name}: ${condition.label}.`);
+      }
+    }
+    return { level: problems.length ? "bad" : notes.length ? "warn" : "ok", problems, notes };
+  }
+
+  function renderHome(body) {
+    const status = state.status;
+    if (!status) {
+      body.append(state.statusError ? errorNode(state.statusError) : loadingNode());
+      if (state.statusError?.code === "not_installed" || state.statusError?.code === "forbidden") body.append(installHelp());
+      return;
+    }
+    const verdict = systemVerdict(status, state.entriesData);
+    const backupState = fileBackupState(status);
+    const progress = status.progress || {};
+    const running = backupState.key === "running" || backupState.key === "paused";
+    const cards = h("div", { class: "cards" });
+
+    const verdictCard = h("section", { class: `card wide verdict verdict-${verdict.level}` },
+      h("h3", {}, verdict.level === "ok" ? "Everything is in order" : verdict.level === "warn" ? "Working, with notes" : verdict.level === "bad" ? "Needs attention" : "Checking…"));
+    if (verdict.problems.length) verdictCard.append(h("ul", {}, verdict.problems.map((line) => h("li", {}, line))));
+    if (verdict.notes.length) verdictCard.append(h("ul", { class: "muted" }, verdict.notes.map((line) => h("li", {}, line))));
+    if (!verdict.problems.length && !verdict.notes.length) verdictCard.append(h("p", { class: "muted" }, "The schedule is on, the server has memory to spare, and every enabled entry's last run was backed up."));
+    cards.append(verdictCard);
+
+    const next = nextRunDate();
+    const nowRows = [["File backup", pill(backupState.label, backupState.key === "running" ? "info" : backupState.key === "failed" ? "bad" : backupState.key === "paused" ? "warn" : "ok")]];
+    if (running) {
+      const started = parseTime(progress.started_at);
+      nowRows.push(["Started", h("span", {}, timeNode(progress.started_at), started ? ` (${relative(started)})` : "")]);
+      if (progress.current_entry) nowRows.push(["Entry", h("button", { type: "button", class: "link-button", onclick: () => openEntry(progress.current_entry) }, progress.current_entry)]);
+      if (progress.current_project) nowRows.push(["Project", h("code", {}, progress.current_project)]);
+      if (progress.projects_total) nowRows.push(["Progress", `project ${progress.project_index || 0} of ${progress.projects_total}`]);
+      nowRows.push(["So far", `synced ${progress.synced || 0}, skipped ${progress.skipped || 0}, kept while changing ${(Number(progress.skipped_changed) || 0) + (Number(progress.deferred_active) || 0)}, failed ${progress.failed || 0}`]);
+    } else {
+      nowRows.push(["Last finished", timeNode(status.services?.["file-backup.service"]?.ExecMainExitTimestamp || progress.updated_at)]);
+      if (progress.outcome) nowRows.push(["Last outcome", progress.outcome]);
+    }
+    nowRows.push(["Next run", next ? h("span", {}, timeNode(next.toISOString()), ` (${relative(next)})`) : "not scheduled"]);
+    cards.append(h("section", { class: "card" }, h("h3", {}, "Now"), kv(nowRows),
+      h("div", { class: "toolbar-row tight" }, h("button", { type: "button", onclick: () => openAdmin("actions") }, "Start, stop, schedule…"))));
+
+    const profile = state.profiles;
+    cards.append(h("section", { class: "card" }, h("h3", {}, "Resource profile"), profile ? kv([
+      ["Setup", profile.mode === "adaptive" ? `Adaptive ${profile.ladder.join(" ↔ ")}` : `Fixed: ${profile.ladder[0]}`],
+      ["Now", profile.mode === "adaptive" ? `${status.adaptive_level || profile.current_level}${progress.profile && running ? ` (this run: ${progress.profile})` : ""}` : profile.ladder[0]],
+      ["Limits", profile.limits_mode]
+    ]) : loadingNode(), h("div", { class: "toolbar-row tight" }, h("button", { type: "button", onclick: () => openAdmin("profiles") }, "Profiles & limits…"))));
+
+    cards.append(h("section", { class: "card wide" }, h("h3", {}, "Server and backup resources (live)"), resourceGauges(status)));
+    cards.append(h("section", { class: "card wide" }, h("h3", {}, `Last ${state.settings?.general?.chartMinutes || 30} minutes`),
+      chartNode(state.chart),
+      h("div", { class: "legend" }, h("span", { class: "memory" }, "Backup memory (% of hard limit)"), h("span", { class: "cpu" }, "Backup CPU %"), h("span", { class: "available" }, "Server RAM available %"))));
+
+    const data = state.entriesData;
+    const entriesCard = h("section", { class: "card wide" }, h("h3", {}, "Backup entries"));
+    if (data) {
+      entriesCard.append(h("div", { class: "table-wrap" }, h("table", {},
+        h("thead", {}, h("tr", {}, ["Entry", "State", "Last run", "Last backed up", "Changed last run", "Changing files"].map((label) => h("th", {}, label)))),
+        h("tbody", {}, data.entries.map((entry) => {
+          const condition = entryCondition(entry);
+          const last = entry.last_run;
+          return h("tr", { class: `clickable ${entry.enabled ? "" : "is-disabled"}`, tabindex: "0", onclick: () => openEntry(entry.name), onkeydown: (event) => { if (event.key === "Enter") openEntry(entry.name); } },
+            h("td", {}, h("strong", {}, entry.name)), h("td", {}, pill(condition.label, condition.kind)),
+            h("td", {}, last ? timeNode(last.run) : "—"), h("td", {}, entry.last_success ? timeNode(entry.last_success) : "—"),
+            h("td", { class: "num" }, last && last.changes_known ? String(last.new + last.updated + last.removed) : "—"),
+            h("td", { class: "num" }, entry.changing_files ? h("span", {}, String(entry.changing_files), entry.never_settles ? h("span", {}, " ", pill(`${entry.never_settles} never settle`, "warn")) : "") : "0"));
+        })))));
+      entriesCard.append(h("p", { class: "muted" }, `Destination root ${data.remote_base || "—"}; replaced and deleted files are kept under ${data.archive_folder} for ${data.retention}.`));
+    } else {
+      entriesCard.append(state.entriesError ? entriesErrorNode(state.entriesError) : loadingNode());
+    }
+    cards.append(entriesCard);
+
+    const lastRun = state.history?.rows?.[0];
+    cards.append(h("section", { class: "card" }, h("h3", {}, "Last recorded run"), lastRun ? [kv([
+      ["Started", timeNode(lastRun.started)],
+      ["Outcome", pill(lastRun.outcome, lastRun.outcome === "completed" ? "ok" : "bad")],
+      ["Duration", duration(lastRun.duration_s)],
+      ["Peak RAM", `${bytes(lastRun.peak_mem)} (${bytes(lastRun.peak_anon)} not reclaimable)`],
+      ["Watchdog events", lastRun.events.length ? lastRun.events.join(", ") : "none"]
+    ]), h("div", { class: "toolbar-row tight" }, h("button", { type: "button", onclick: () => openAdmin("runs") }, "All runs…"))] : h("p", { class: "muted" }, state.history ? "No run recorded by the watchdog yet." : "Loading…")));
+
+    const dbRows = ["database-backup.service", "database-size-check.service"].map((unit) => {
+      const info = status.services?.[unit] || {};
+      const ok = !info.Result || info.Result === "success";
+      return [unit.replace(".service", ""), h("span", {}, pill(info.ActiveState === "active" ? "running" : ok ? "ok" : info.Result, info.ActiveState === "active" ? "info" : ok ? "ok" : "bad"), " last ", timeNode(info.ExecMainExitTimestamp || info.InactiveEnterTimestamp))];
+    });
+    cards.append(h("section", { class: "card" }, h("h3", {}, "Database backups"), kv(dbRows)));
+
+    const pushed = ntfyEvents().slice(-5).reverse();
+    cards.append(h("section", { class: "card" }, h("h3", {}, "Latest ntfy notifications"),
+      pushed.length ? h("ul", { class: "event-list compact" }, pushed.map((event) => eventItem(event, false))) : h("p", { class: "muted" }, "None yet."),
+      h("div", { class: "toolbar-row tight" }, h("button", { type: "button", onclick: openBell }, "Open notifications"))));
+    body.append(cards);
+  }
+
+  // ------------------------------------------------------------------ entry page
+
+  const ENTRY_TABS = [
+    ["overview", "Overview"], ["projects", "Projects"], ["changes", "Changed files"], ["changing", "Changing files"],
+    ["excludes", "Excludes & stop files"], ["runs", "Runs"], ["log", "Log"], ["storage", "Source & destination"]
+  ];
+
+  async function renderEntry(body, name, tab) {
+    let data = state.entryCache[name];
+    if (!data) body.append(loadingNode());
+    try {
+      data = await control("entry", { name });
+      state.entryCache[name] = data;
+    } catch (error) {
+      if (!data) {
+        clear(body).append(entriesErrorNode(error), h("div", { class: "toolbar-row tight" }, h("button", { type: "button", onclick: goHome }, "Back to Home")));
+        return;
+      }
+      toast(`Showing the last loaded view: ${errorText(error)}`, "warn");
+    }
+    clear(body);
+    const entry = data.entry;
+    const condition = entryCondition(entry);
+    $("#section-title").textContent = entry.name;
+    body.append(h("div", { class: "entry-headline" },
+      pill(entry.enabled ? "enabled" : "disabled", entry.enabled ? "ok" : ""), " ", pill(condition.label, condition.kind),
+      h("span", { class: "muted" }, ` line ${entry.line} of file-sources.conf · ${entry.isolation === "children" ? `one project per child directory (${data.projects.length})` : "one project"}`)));
+    if (data.legacy) body.append(h("p", { class: "notice info" }, "Per-entry history is recorded from the next backup run on. Until then this page shows what the latest run's log says."));
+    const tabBar = h("div", { class: "settings-tabs entry-tabs", role: "tablist", "aria-label": `${entry.name} sections` },
+      ENTRY_TABS.map(([key, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(key === tab), onclick: () => openEntry(name, key) }, label)));
+    const panel = h("div", { class: "entry-panel", role: "tabpanel" });
+    body.append(tabBar, panel);
+    const builder = ENTRY_RENDERERS[tab] || ENTRY_RENDERERS.overview;
+    await builder(panel, data);
+  }
+
+  function projectRowNodes(project, data) {
+    const last = project.last;
+    const changes = project.changes;
+    return h("tr", { class: `clickable ${project.exists ? "" : "is-disabled"}`, tabindex: "0", onclick: () => openProject(data, project), onkeydown: (event) => { if (event.key === "Enter") openProject(data, project); } },
+      h("td", {}, h("strong", {}, project.name), project.exists ? "" : h("span", {}, " ", pill("gone from source", "warn")), project.running ? h("span", {}, " ", pill("now", "info")) : ""),
+      h("td", {}, project.stop_file_present ? pill(`paused (${data.entry.stop_file})`, "warn") : last ? resultPill(last.result) : resultPill("unknown")),
+      h("td", {}, last ? timeNode(last.ended || last.run) : "—"),
+      h("td", {}, project.last_success ? timeNode(project.last_success) : "—"),
+      h("td", { class: "num" }, changes ? `${changes.new} / ${changes.updated} / ${changes.removed}` : "—"),
+      h("td", { class: "num" }, project.changing_files ? h("span", {}, String(project.changing_files), project.never_settles ? h("span", {}, " ", pill("never settles", "warn")) : "") : "0"));
+  }
+
+  function projectsTable(data, projects) {
+    return h("div", { class: "table-wrap" }, h("table", {},
+      h("thead", {}, h("tr", {}, ["Project", "Last result", "Last run", "Last backed up", "New / updated / removed", "Changing files"].map((label) => h("th", {}, label)))),
+      h("tbody", {}, projects.map((project) => projectRowNodes(project, data)))));
+  }
+
+  async function openProject(data, project) {
+    const title = `Project ${project.name}`;
+    const head = kv([
+      ["Source", h("code", {}, project.source)],
+      ["Destination", h("code", {}, project.destination || "—")],
+      ["Last result", project.last ? resultPill(project.last.result) : "no record yet"],
+      ["Last run", project.last ? timeNode(project.last.ended || project.last.run) : "—"],
+      ["Last backed up", project.last_success ? timeNode(project.last_success) : "—"],
+      ["Runs recorded", String(project.runs)],
+      ["Stop file", project.stop_file_present ? `${data.entry.stop_file} is present: this project is skipped` : "not present"]
+    ]);
+    showDetails(title, [head, loadingNode("Loading this project's changed files…")]);
+    try {
+      const changes = await control("entry.changes", { name: data.entry.name, project: project.project });
+      showDetails(title, [head, changesView(changes)]);
+    } catch (error) {
+      showDetails(title, [head, h("h3", {}, "Changed files"), h("p", { class: "muted" }, error.code === "not_found" ? "No changes recorded for this project yet." : errorText(error))]);
+    }
+  }
+
+  function changesView(changes) {
+    const header = changes.header;
+    const nodes = [h("h3", {}, "Changed files in its last run")];
+    if (!header) {
+      nodes.push(h("p", { class: "muted" }, "No change list recorded yet (it starts with the next run)."));
+      return nodes;
+    }
+    nodes.push(h("p", {}, `Run ${header.run}: ${header.new} new, ${header.updated} updated, ${header.removed} removed (moved to the archive).`));
+    if (changes.note) nodes.push(h("p", { class: "notice info" }, `Only part of the list is kept: ${changes.note}.`));
+    if (!changes.files.length) {
+      nodes.push(h("p", { class: "muted" }, "Nothing changed: the remote copy was already up to date."));
+      return nodes;
+    }
+    nodes.push(textBlock(changes.files.map((file) => `${file.kind.padEnd(8)} ${file.path}`), { fileName: `changes-${changes.project.replace(/[^A-Za-z0-9._-]+/g, "_")}.txt` }));
+    return nodes;
+  }
+
+  const ENTRY_RENDERERS = {
+    overview: (panel, data) => {
+      const entry = data.entry;
+      const last = entry.last_run;
+      const next = nextRunDate();
+      const cards = h("div", { class: "cards" });
+      if (entry.problem) cards.append(h("section", { class: "card wide alert-bad" }, h("h3", {}, "Problem"), h("p", {}, entry.problem)));
+      if (entry.stop_file_present) cards.append(h("section", { class: "card wide alert-warn" }, h("h3", {}, "Paused"), h("p", {}, `${entry.stop_file} exists in ${entry.source}: the whole entry is skipped until it is removed.`)));
+      cards.append(h("section", { class: "card wide" }, h("h3", {}, "What is backed up, and where"), kv([
+        ["Source", h("code", {}, entry.source)],
+        ["Destination", h("code", {}, entry.destination || "—")],
+        ["Mapping", `${entry.destination_mode}${entry.destination_value ? `: ${entry.destination_value}` : ""}`],
+        ["Projects", entry.isolation === "children" ? `each child directory is its own project (${data.projects.length}); a failure in one never stops the others` : "the whole source is one project"],
+        ["Stop file", `${entry.stop_file}: in the source pauses the entry${entry.isolation === "children" ? ", in a child pauses that project" : ""}`],
+        ["Previous versions", h("span", {}, "replaced and deleted files move to ", h("code", {}, entry.archive), ` and are kept ${entry.retention}`)]
+      ])));
+      const runRows = [
+        ["State now", entry.running ? h("span", {}, pill("backing up now", "info"), entry.current_project ? ` ${entry.current_project}` : "") : pill(entryCondition(entry).label, entryCondition(entry).kind)],
+        ["Last run", last ? h("span", {}, timeNode(last.run), " ", resultPill(last.outcome)) : "never"],
+        ["Last backed up", entry.last_success ? timeNode(entry.last_success) : "—"],
+        ["Last change uploaded", entry.last_change ? timeNode(entry.last_change) : "—"],
+        ["Next run", next ? h("span", {}, timeNode(next.toISOString()), ` (${relative(next)})`) : "not scheduled"]
+      ];
+      if (data.position && next) {
+        const reach = new Date(next.getTime() + data.position.offset_s * 1000);
+        runRows.push(["Reaches this entry", h("span", {}, "about ", timeNode(reach.toISOString()), ` and takes about ${duration(data.position.duration_s)} (as in the last run)`)]);
+      }
+      cards.append(h("section", { class: "card" }, h("h3", {}, "When"), kv(runRows)));
+      cards.append(h("section", { class: "card" }, h("h3", {}, "Last run of this entry"), last ? kv([
+        ["Projects", `${last.projects}: ${last.synced} synced, ${last.skipped} skipped, ${last.failed} failed${last.other ? `, ${last.other} other` : ""}`],
+        ["Files", last.changes_known ? `${last.new} new, ${last.updated} updated, ${last.removed} removed` : "not recorded (before per-entry history)"],
+        ["Kept while changing", String(last.deferred)],
+        ["Took", last.started && last.ended ? duration((parseTime(last.ended) - parseTime(last.started)) / 1000) : "—"]
+      ]) : h("p", { class: "muted" }, "No run recorded yet.")));
+      cards.append(h("section", { class: "card" }, h("h3", {}, "Changing files"), kv([
+        ["Being skipped now", String(entry.changing_files)],
+        ["Never settle", entry.never_settles ? pill(String(entry.never_settles), "warn") : "0"],
+        ["Rule", `files modified in the last ${data.active_window_s}s are skipped and tried again next run`]
+      ]), h("div", { class: "toolbar-row tight" }, h("button", { type: "button", onclick: () => openEntry(entry.name, "changing") }, "Open changing files"))));
+      const attention = data.projects.filter((project) => project.last && !["synced", "synced-retry", "synced-with-skips"].includes(project.last.result) || project.stop_file_present || project.never_settles);
+      if (attention.length) {
+        cards.append(h("section", { class: "card wide" }, h("h3", {}, "Projects needing a look"), projectsTable(data, attention.slice(0, 20))));
+      }
+      panel.append(cards);
+    },
+
+    projects: (panel, data) => {
+      if (!data.projects.length) {
+        panel.append(h("p", { class: "empty" }, data.entry.problem || "No projects."));
+        return;
+      }
+      const search = h("input", { type: "search", placeholder: "Filter projects", "aria-label": "Filter projects" });
+      const host = h("div", {});
+      const draw = () => {
+        const term = search.value.trim().toLowerCase();
+        append(clear(host), [projectsTable(data, data.projects.filter((project) => !term || project.name.toLowerCase().includes(term)))]);
+      };
+      search.addEventListener("input", draw);
+      panel.append(h("p", { class: "muted" }, "Click a project for its paths, history and the files that changed in its last run."), h("div", { class: "search-row" }, search), host);
+      if (data.children_truncated) panel.append(h("p", { class: "notice info" }, "Only the first 2000 child directories are listed."));
+      draw();
+    },
+
+    changes: async (panel, data) => {
+      const changed = data.projects.filter((project) => project.changes && project.changes.new + project.changes.updated + project.changes.removed > 0);
+      const totals = data.projects.reduce((sum, project) => {
+        if (project.changes) for (const key of ["new", "updated", "removed"]) sum[key] += project.changes[key];
+        return sum;
+      }, { new: 0, updated: 0, removed: 0 });
+      panel.append(h("p", {}, `In each project's last run: ${totals.new} new, ${totals.updated} updated and ${totals.removed} removed file(s), in ${changed.length} project(s). Removed and replaced versions are kept under the archive for ${data.entry.retention}.`));
+      if (!changed.length) {
+        panel.append(h("p", { class: "empty" }, data.legacy ? "Changed files are recorded from the next run on." : "No files changed in the last run."));
+        return;
+      }
+      const host = h("div", {});
+      panel.append(host);
+      for (const project of changed.slice(0, 30)) {
+        const section = h("details", { class: "changes-block" }, h("summary", {}, h("strong", {}, project.name), ` · ${project.changes.new} new, ${project.changes.updated} updated, ${project.changes.removed} removed · run ${project.changes.run}`));
+        let loaded = false;
+        section.addEventListener("toggle", async () => {
+          if (!section.open || loaded) return;
+          loaded = true;
+          const target = h("div", {}, loadingNode());
+          section.append(target);
+          try {
+            const changes = await control("entry.changes", { name: data.entry.name, project: project.project });
+            append(clear(target), changesView(changes).slice(1));
+          } catch (error) {
+            clear(target).append(errorNode(error));
+          }
+        });
+        host.append(section);
+      }
+      if (changed.length > 30) panel.append(h("p", { class: "muted" }, `${changed.length - 30} more project(s) changed; open them from the Projects tab.`));
+    },
+
+    changing: (panel, data) => {
+      panel.append(h("p", { class: "muted" }, `A file modified in the last ${data.active_window_s}s before its project syncs, or seen changing during the upload, is skipped: its previous remote version stays in place and it is tried again next run. A file skipped ${data.max_deferrals} runs in a row never settles; exclude it with ${data.excludes.filename} or stop its writer briefly.`));
+      panel.append(data.changing.length ? h("div", { class: "table-wrap" }, h("table", {},
+        h("thead", {}, h("tr", {}, h("th", {}, "Project"), h("th", {}, "Path"), h("th", { class: "num" }, "Runs skipped in a row"), h("th", {}, "Last seen"))),
+        h("tbody", {}, data.changing.map((row) => h("tr", { class: row.count >= data.max_deferrals ? "highlight" : "" },
+          h("td", {}, row.project.split("/").pop()), h("td", {}, h("code", {}, row.path)),
+          h("td", { class: "num" }, row.count >= data.max_deferrals ? h("span", {}, String(row.count), " ", pill("never settles", "warn")) : String(row.count)),
+          h("td", {}, timeNode(row.updated))))))) : h("p", { class: "empty" }, "No file of this entry is being skipped."));
+    },
+
+    excludes: (panel, data) => {
+      const entry = data.entry;
+      const stopped = data.projects.filter((project) => project.stop_file_present);
+      panel.append(h("h3", {}, "Stop file"), h("p", {}, `${entry.stop_file} in ${entry.isolation === "children" ? "the source skips the whole entry; in a child directory it skips that project" : "the source skips this entry"}.`),
+        entry.stop_file_present ? h("p", { class: "notice" }, `Present in the source: the entry is paused.`) : null,
+        stopped.length ? h("ul", {}, stopped.map((project) => h("li", {}, h("code", {}, project.source), " is paused"))) : h("p", { class: "muted" }, "No project is paused by a stop file."));
+      const patternSection = (title, block, explanation) => {
+        panel.append(h("h3", {}, title), h("p", { class: "muted" }, explanation));
+        if (block.global.length) panel.append(h("details", {}, h("summary", {}, `Global patterns for every project (${block.global.length})`), h("pre", {}, block.global.join("\n"))));
+        if (block.truncated) panel.append(h("p", { class: "notice info" }, "The search stopped early; not every file is listed."));
+        if (!block.files.length) panel.append(h("p", { class: "muted" }, `No ${block.filename} file in this entry.`));
+        for (const file of block.files) panel.append(h("details", {}, h("summary", {}, h("code", {}, file.relative), ` (${file.lines.length} line(s))`), h("pre", {}, file.lines.join("\n") || "(empty)")));
+      };
+      patternSection("Excluded files", data.excludes, `Patterns in ${data.excludes.filename} files are never uploaded (relative to the folder that holds the file).`);
+      patternSection("Volatile files", data.volatile, `Patterns in ${data.volatile.filename} files are allowed to change during a sync: if they change, they are left for the next run instead of failing the project.`);
+    },
+
+    runs: (panel, data) => {
+      if (!data.runs.length) {
+        panel.append(h("p", { class: "empty" }, "No run of this entry recorded yet."));
+        return;
+      }
+      panel.append(h("p", { class: "muted" }, "Each backup run of this entry, newest first. Click a run for each project's result and the entry's part of the log."));
+      panel.append(h("div", { class: "table-wrap" }, h("table", {},
+        h("thead", {}, h("tr", {}, ["Run", "Result", "Projects", "New / updated / removed", "Kept while changing", "Took"].map((label) => h("th", {}, label)))),
+        h("tbody", {}, data.runs.map((run) => h("tr", { class: "clickable", tabindex: "0", onclick: () => openEntryRun(data, run), onkeydown: (event) => { if (event.key === "Enter") openEntryRun(data, run); } },
+          h("td", {}, timeNode(run.run)), h("td", {}, resultPill(run.outcome)),
+          h("td", {}, `${run.synced} synced${run.skipped ? `, ${run.skipped} skipped` : ""}${run.failed ? `, ${run.failed} failed` : ""}`),
+          h("td", { class: "num" }, run.changes_known ? `${run.new} / ${run.updated} / ${run.removed}` : "—"),
+          h("td", { class: "num" }, String(run.deferred)),
+          h("td", {}, run.started && run.ended ? duration((parseTime(run.ended) - parseTime(run.started)) / 1000) : "—")))))));
+    },
+
+    log: async (panel, data) => {
+      panel.append(loadingNode());
+      try {
+        const log = await control("entry.log", { name: data.entry.name });
+        clear(panel).append(h("p", { class: "muted" }, log.run ? `This entry's lines of the run started ${log.run}.` : "No run in the durable log yet."),
+          log.truncated ? h("p", { class: "notice info" }, "Only the last 2000 lines are shown.") : null,
+          textBlock(log.lines, { fileName: `${data.entry.name.replace(/[^A-Za-z0-9._-]+/g, "_")}-log.txt` }));
+      } catch (error) {
+        clear(panel).append(errorNode(error));
+      }
+    },
+
+    storage: (panel, data) => {
+      const entry = data.entry;
+      const resultHost = { source: h("div", {}), destination: h("div", {}) };
+      const measure = async (what) => {
+        const host = resultHost[what];
+        clear(host).append(loadingNode(what === "source" ? "Counting files in the source (up to 90 s)…" : "Asking the remote for the destination's size (up to 90 s)…"));
+        try {
+          const result = await control("entry.measure", { name: entry.name, what });
+          const r = result.result;
+          clear(host).append(kv([
+            ["Measured", timeNode(result.at)],
+            ["Files", r.files === null || r.files === undefined ? "—" : String(r.files)],
+            ["Size", bytes(r.bytes)],
+            r.directories !== undefined ? ["Folders", String(r.directories)] : null
+          ].filter(Boolean)), r.complete ? null : h("p", { class: "notice info" }, "Stopped at the time limit: the numbers are partial."), h("p", { class: "muted" }, r.note));
+          if (result.listing?.length) {
+            host.append(h("h4", {}, "Top level of the destination"), h("div", { class: "table-wrap" }, h("table", {},
+              h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", { class: "num" }, "Size"), h("th", {}, "Modified"))),
+              h("tbody", {}, result.listing.map((item) => h("tr", {}, h("td", {}, item.dir ? `${item.name}/` : item.name), h("td", { class: "num" }, item.dir ? "—" : bytes(item.size)), h("td", {}, item.modified ? timeNode(item.modified) : "—")))))));
+          }
+        } catch (error) {
+          clear(host).append(errorNode(error));
+        }
+      };
+      panel.append(h("div", { class: "cards" },
+        h("section", { class: "card" }, h("h3", {}, "Source on this server"), kv([["Path", h("code", {}, entry.source)], ["Exists", entry.source_exists ? "yes" : pill("no", "bad")]]),
+          h("div", { class: "toolbar-row tight" }, h("button", { type: "button", disabled: !entry.source_exists, onclick: () => measure("source") }, "Measure source")), resultHost.source),
+        h("section", { class: "card" }, h("h3", {}, "Destination"), kv([["Path", h("code", {}, entry.destination || "—")], ["Previous versions", h("code", {}, entry.archive || "—")], ["Kept for", entry.retention]]),
+          h("div", { class: "toolbar-row tight" }, h("button", { type: "button", disabled: !entry.destination, onclick: () => measure("destination") }, "Measure destination")), resultHost.destination)),
+        h("p", { class: "muted" }, "Measuring reads the whole tree (the destination through rclone), so it runs only when you press the button."));
+    }
+  };
+
+  async function openEntryRun(data, run) {
+    const title = `${data.entry.name} · run ${run.run}`;
+    const table = h("div", { class: "table-wrap" }, h("table", {},
+      h("thead", {}, h("tr", {}, ["Project", "Result", "New / updated / removed", "Kept while changing"].map((label) => h("th", {}, label)))),
+      h("tbody", {}, run.results.map((item) => h("tr", {}, h("td", {}, item.project.split("/").pop()), h("td", {}, resultPill(item.result)),
+        h("td", { class: "num" }, item.new === null || item.new === undefined ? "—" : `${item.new} / ${item.updated} / ${item.removed}`), h("td", { class: "num" }, String(item.deferred)))))));
+    showDetails(title, [table, loadingNode("Loading the log…")]);
+    try {
+      const log = await control("entry.log", { name: data.entry.name, run: run.run });
+      showDetails(title, [table, h("h3", {}, "This entry's lines of the run log"), textBlock(log.lines, { fileName: `${data.entry.name.replace(/[^A-Za-z0-9._-]+/g, "_")}-${run.run.replace(/[^0-9]/g, "")}.log` })]);
+    } catch (error) {
+      showDetails(title, [table, h("p", { class: "muted" }, `Log: ${errorText(error)}`)]);
+    }
+  }
+
+  // ------------------------------------------------------------------ main view
+
+  let mainToken = 0;
+  async function renderMain() {
+    const token = ++mainToken;
+    const body = $("#section-body");
+    const fresh = h("div", {});
+    if (state.view.kind === "entry") {
+      $("#section-title").textContent = state.view.name;
+      $("#section-help").dataset.help = "entry";
+      clear(body).append(fresh);
+      await renderEntry(fresh, state.view.name, state.view.tab);
+      return;
+    }
+    $("#section-title").textContent = "Home";
+    $("#section-help").dataset.help = "home";
+    const focusedKey = document.activeElement?.dataset?.key;
+    renderHome(fresh);
+    if (token !== mainToken) return;
+    clear(body).append(fresh);
+    if (focusedKey) body.querySelector(`[data-key="${CSS.escape(focusedKey)}"]`)?.focus();
+  }
+
+  // ------------------------------------------------------------------ admin
+
+  const ADMIN_TABS = {
+    actions: "Actions & schedule",
+    runs: "Runs & failures",
+    profiles: "Profiles & limits",
+    watchdog: "Watchdog",
+    notifications: "Notifications (ntfy)",
+    server: "Server settings",
+    sources: "Sources file",
+    logs: "Logs",
+    activity: "Activity & audit"
+  };
+
+  function adminOpen() {
+    return $("#admin-dialog").open;
+  }
+
+  function openAdmin(tab = state.adminTab || "actions") {
+    state.adminTab = ADMIN_TABS[tab] ? tab : "actions";
+    const dialog = $("#admin-dialog");
+    const tabs = clear($("#admin-tabs"));
+    for (const [key, label] of Object.entries(ADMIN_TABS)) {
+      tabs.append(h("button", { type: "button", role: "tab", "aria-selected": String(key === state.adminTab), onclick: () => openAdmin(key) }, label));
+    }
+    $("#admin-help").dataset.help = state.adminTab;
+    if (!dialog.open) dialog.showModal();
+    const hash = `#admin/${state.adminTab}`;
+    if (location.hash !== hash) history.replaceState(null, "", hash);
+    renderAdmin();
+  }
+
+  function closeAdmin() {
+    const dialog = $("#admin-dialog");
+    if (dialog.open) dialog.close();
+  }
+
+  let adminToken = 0;
+  async function renderAdmin() {
+    const token = ++adminToken;
+    const body = $("#admin-body");
+    const fresh = h("div", {});
+    const result = renderers[state.adminTab](fresh);
+    if (result && typeof result.then === "function") {
+      clear(body).append(fresh);
+      await result;
+      return;
+    }
+    if (token !== adminToken) return;
+    clear(body).append(fresh);
+  }
+
+  // Re-renders whatever shows server data after a change.
+  function renderSection() {
+    if (adminOpen()) renderAdmin();
+    renderMain();
+  }
+
+  // ------------------------------------------------------------------ resource warning
+  //
+  // Like agentw-gui's resource warning: a small card that pops up when the server or
+  // the backup runs short, once per condition until it clears.
+
+  const shownWarnings = new Set();
+  function checkResourceWarning(status) {
+    if (!status) return;
+    const watchdog = status.watchdog || {};
+    const server = status.server || {};
+    const available = numberOrNull(server.available_percent);
+    const pausePercent = numberOrNull(watchdog.threshold_server_pause_percent) ?? 10;
+    const backup = fileBackupState(status);
+    const warnings = [];
+    if (backup.key === "paused") warnings.push({ key: "paused", severity: "critical", text: "The watchdog paused the backup because the server is short of memory.", meta: `Server RAM available ${available ?? "?"}%` });
+    if (available !== null && available < pausePercent + 5) warnings.push({ key: "low-ram", severity: available < pausePercent ? "critical" : "warning", text: `Server RAM available is ${available}% (${bytes(server.available_bytes)}).`, meta: `The watchdog pauses the backup below ${pausePercent}%.` });
+    if (backup.contained) warnings.push({ key: "contained", severity: "warning", text: "The backup is near its memory limit; the watchdog is containing it.", meta: `${bytes(watchdog.memory_bytes)} of ${bytes(watchdog.memory_max_bytes)}` });
+    if (watchdog.server_pressure === "host-stall" && watchdog.server_pressure_note) warnings.push({ key: "host-stall", severity: "warning", text: `Memory stall from ${watchdog.server_pressure_note}.`, meta: "Not caused by the backup; the backup keeps running." });
+    const active = new Set(warnings.map((warning) => warning.key));
+    for (const key of [...shownWarnings]) if (!active.has(key)) shownWarnings.delete(key);
+    const fresh = warnings.find((warning) => !shownWarnings.has(warning.key));
+    if (!fresh) return;
+    shownWarnings.add(fresh.key);
+    const card = $("#resource-warning");
+    card.className = `resource-warning severity-${fresh.severity}`;
+    $("#resource-warning-title").textContent = fresh.severity === "critical" ? "Resource warning: critical" : "Resource warning";
+    $("#resource-warning-text").textContent = fresh.text;
+    $("#resource-warning-meta").textContent = fresh.meta || "";
+    card.hidden = false;
+    clearTimeout(checkResourceWarning.timer);
+    checkResourceWarning.timer = setTimeout(() => { card.hidden = true; }, 18000);
+  }
+
+  // ------------------------------------------------------------------ bell
+  //
+  // The bell lists the notifications Backup Suite sends to ntfy (each with what
+  // happened to the push), and every event under All activity. More channels can
+  // be added later the same way.
+
+  const LEGACY_GUI_ONLY = new Set(["run-finished"]);
+  function isNtfyEvent(event) {
+    if (event.ntfy !== undefined) return event.ntfy !== "";
+    return !LEGACY_GUI_ONLY.has(event.category);
+  }
+
+  function ntfyEvents() {
+    return state.events.filter(isNtfyEvent);
+  }
+
+  const NTFY_DELIVERY = {
+    sent: ["sent to ntfy", "ok"],
+    failed: ["ntfy delivery failed", "bad"],
+    off: ["ntfy is off: not sent", "warn"],
+    held: ["not pushed again: already reported", ""]
+  };
+
+  function eventItem(event, isNew) {
+    const date = parseTime(event.created_at);
+    const delivery = NTFY_DELIVERY[event.ntfy];
+    return h("li", { class: `event-item severity-${event.severity} ${isNew ? "is-new" : ""}` },
+      h("header", {}, h("span", {}, pill(event.severity, event.severity === "error" ? "bad" : event.severity === "warning" ? "warn" : "info"), " ", event.category,
+        delivery ? h("span", {}, " ", pill(delivery[0], delivery[1])) : ""), timeNode(date ? date.toISOString() : event.created_at)),
+      h("strong", {}, event.title),
+      event.message ? h("details", {}, h("summary", {}, "Details"), h("p", { class: "event-message" }, event.message)) : null);
+  }
+
+  let bellTab = "ntfy";
   async function openBell() {
     const panel = $("#bell-panel");
     const body = clear($("#bell-body"));
@@ -1226,16 +1846,27 @@
     $("#bell-button").setAttribute("aria-expanded", "true");
     body.append(loadingNode());
     try {
-      const list = await api("/api/events?limit=100");
+      const list = await api("/api/events?limit=500");
       state.events = list.events;
     } catch (error) {
       clear(body).append(errorNode(error));
       return;
     }
     const previousSeen = state.seenSeq;
-    clear(body);
-    body.append(state.events.length ? h("ul", { class: "event-list" }, state.events.slice().reverse().slice(0, 100).map((event) => eventItem(event, event.seq > previousSeen))) : h("p", { class: "empty" }, "No events yet."),
-      h("div", { class: "toolbar-row tight" }, h("button", { type: "button", onclick: () => { closeBell(); navigate("activity"); } }, "Open Activity & audit")));
+    const draw = () => {
+      const events = bellTab === "ntfy" ? ntfyEvents() : state.events;
+      append(clear(body), [
+        h("div", { class: "settings-tabs", role: "tablist", "aria-label": "Notification lists" },
+          h("button", { type: "button", role: "tab", "aria-selected": String(bellTab === "ntfy"), onclick: () => { bellTab = "ntfy"; draw(); } }, `ntfy (${ntfyEvents().length})`),
+          h("button", { type: "button", role: "tab", "aria-selected": String(bellTab === "all"), onclick: () => { bellTab = "all"; draw(); } }, `All activity (${state.events.length})`)),
+        h("p", { class: "muted" }, bellTab === "ntfy" ? "What Backup Suite sent to ntfy, with what happened to each push. Other channels can be added later." : "Every event, including runs that finished normally."),
+        events.length ? h("ul", { class: "event-list" }, events.slice().reverse().slice(0, 200).map((event) => eventItem(event, event.seq > previousSeen))) : h("p", { class: "empty" }, "Nothing yet."),
+        h("div", { class: "toolbar-row tight" },
+          h("button", { type: "button", onclick: () => { closeBell(); openAdmin("notifications"); } }, "ntfy settings…"),
+          h("button", { type: "button", onclick: () => { closeBell(); openAdmin("activity"); } }, "Activity & audit…"))
+      ]);
+    };
+    draw();
     markEventsSeen();
     $("#bell-close").focus();
   }
@@ -1245,40 +1876,52 @@
     $("#bell-button").setAttribute("aria-expanded", "false");
   }
 
-  // ------------------------------------------------------------------ navigation
-
-  function navigate(section) {
-    if (!SECTIONS[section]) section = "overview";
-    if (location.hash !== `#${section}`) history.replaceState(null, "", `#${section}`);
-    state.section = section;
-    for (const button of document.querySelectorAll("[data-section]")) {
-      if (button.dataset.section === section) button.setAttribute("aria-current", "page");
-      else button.removeAttribute("aria-current");
-    }
-    $("#section-title").textContent = SECTIONS[section];
-    $("#section-help").dataset.help = section;
-    if (window.matchMedia("(max-width: 960px)").matches) showPanel("main");
-    renderSection();
+  function markEventsSeen() {
+    const latest = state.events.reduce((max, event) => Math.max(max, event.seq), state.seenSeq);
+    state.seenSeq = latest;
+    storageSet(SEEN_KEY, String(latest));
+    updateChrome();
   }
 
-  let renderToken = 0;
-  async function renderSection() {
-    const token = ++renderToken;
-    const body = $("#section-body");
-    const focusedKey = document.activeElement?.dataset?.key;
-    const fresh = h("div", {});
-    const result = renderers[state.section](fresh);
-    if (result && typeof result.then === "function") {
-      clear(body).append(fresh);
-      await result;
-      return;
+  // ------------------------------------------------------------------ routing
+  //
+  // #home, #entry/<name>[/<tab>], #admin/<tab>, #bell. Older links (#overview,
+  // #runs, #activity, ...) open the matching Admin tab.
+
+  function route() {
+    const hash = decodeURIComponent(location.hash.slice(1));
+    const [kind, ...rest] = hash.split("/");
+    if (kind === "entry" && rest.length) {
+      let tab = "overview";
+      const last = rest[rest.length - 1];
+      if (rest.length > 1 && ENTRY_TABS.some(([key]) => key === last)) {
+        tab = last;
+        rest.pop();
+      }
+      const name = rest.join("/");
+      if (state.view.kind !== "entry" || state.view.name !== name) $("#layout").classList.add("details-closed");
+      state.view = { kind: "entry", name, tab };
+    } else {
+      state.view = { kind: "home" };
+      if (kind === "admin") openAdmin(rest[0]);
+      else if (ADMIN_TABS[kind]) openAdmin(kind);
+      else if (kind === "bell") openBell();
     }
-    if (token !== renderToken) return;
-    clear(body).append(fresh);
-    if (focusedKey) {
-      const again = body.querySelector(`[data-key="${CSS.escape(focusedKey)}"]`);
-      if (again) again.focus();
-    }
+    if (window.matchMedia("(max-width: 960px)").matches) showPanel("main");
+    renderEntryList();
+    renderMain();
+  }
+
+  // Called on every live status: re-render what shows it, and refresh the entries
+  // when the run moved to another project or ended.
+  function onStatusChanged(previous) {
+    checkResourceWarning(state.status);
+    const before = previous?.progress || {};
+    const now = state.status?.progress || {};
+    const moved = before.current_project !== now.current_project || before.state !== now.state;
+    if (moved || Date.now() - (state.entriesLoadedAt || 0) > 60000) loadEntries({ quiet: true });
+    if (state.view.kind === "home") renderMain();
+    if (adminOpen() && state.adminTab === "actions") renderAdmin();
   }
 
   // ------------------------------------------------------------------ live stream
@@ -1317,10 +1960,11 @@
       if (data.status) state.status = data.status;
       state.statusError = data.error;
       updateChrome();
-      if (state.section === "overview") renderSection();
+      onStatusChanged(null);
     });
     stream.addEventListener("status", (message) => {
       const data = JSON.parse(message.data);
+      const previous = state.status;
       const wasRunning = ["running", "paused"].includes(fileBackupState(state.status).key);
       state.status = data.status;
       state.statusError = null;
@@ -1332,12 +1976,12 @@
       const isRunning = ["running", "paused"].includes(fileBackupState(state.status).key);
       if (wasRunning && !isRunning) refreshHistory();
       updateChrome();
-      if (state.section === "overview") renderSection();
+      onStatusChanged(previous);
     });
     stream.addEventListener("status-error", (message) => {
       state.statusError = JSON.parse(message.data);
       updateChrome();
-      if (state.section === "overview" && !state.status) renderSection();
+      if (state.view.kind === "home" && !state.status) renderMain();
     });
     stream.addEventListener("events", (message) => {
       const data = JSON.parse(message.data);
@@ -1347,7 +1991,8 @@
         browserNotify(event);
       }
       updateChrome();
-      if (state.section === "activity") renderSection();
+      if (adminOpen() && state.adminTab === "activity") renderAdmin();
+      if (!$("#bell-panel").hidden) openBell();
     });
   }
 
@@ -1360,7 +2005,7 @@
       const notification = new Notification(event.title, { body: `${event.message || ""}\nOccurred: ${event.created_at}`.trim(), tag: event.id, icon: "/icons/icon-192.png" });
       notification.addEventListener("click", () => {
         window.focus();
-        navigate("activity");
+        openBell();
       });
     } catch {
       // Notifications can be blocked by the browser; the bell still lists the event.
@@ -1370,7 +2015,7 @@
   async function refreshHistory() {
     try {
       state.history = await control("history", { limit: 500 });
-      if (state.section === "overview") renderSection();
+      if (state.view.kind === "home") renderMain();
     } catch {
       // Overview shows "Loading…" for the last run until the next try.
     }
@@ -1387,7 +2032,6 @@
   function settingsTab(name) {
     for (const button of document.querySelectorAll("[data-settings-tab-button]")) button.setAttribute("aria-selected", String(button.dataset.settingsTabButton === name));
     for (const panel of document.querySelectorAll("[data-settings-tab]")) panel.hidden = panel.dataset.settingsTab !== name;
-    if (name === "server") loadServerSettings();
   }
 
   function fillSettingsForm() {
@@ -1438,23 +2082,6 @@
     button.disabled = false;
     button.textContent = Notification.permission === "granted" ? "Test browser notification" : "Enable browser notifications";
     status.textContent = Notification.permission === "denied" ? "Blocked in this browser's site settings." : "";
-  }
-
-  async function loadServerSettings() {
-    const host = clear($("#server-settings-body"));
-    host.append(loadingNode());
-    try {
-      const config = await control("config.get");
-      clear(host);
-      const byKey = Object.fromEntries(config.settings.map((entry) => [entry.key, entry]));
-      const form = h("div", { class: "threshold-grid" }, SERVER_KEYS.filter((key) => byKey[key]).map((key) => settingField(byKey[key])));
-      host.append(form);
-      $("#server-settings-save").onclick = async () => {
-        if (await saveConfig(collectChanges(form), config, { title: "Save server settings?", note: "They apply from the next backup run." })) loadServerSettings();
-      };
-    } catch (error) {
-      clear(host).append(errorNode(error));
-    }
   }
 
   function openSettings() {
@@ -1621,34 +2248,28 @@
       $("#layout").className = "layout";
       showPanel("main");
     });
-    const actionsButton = $("#actions-button");
-    const actionsMenu = $("#actions-menu");
-    const closeMenu = () => {
-      actionsMenu.hidden = true;
-      actionsButton.setAttribute("aria-expanded", "false");
-    };
-    actionsButton.addEventListener("click", () => {
-      const open = actionsMenu.hidden;
-      actionsMenu.hidden = !open;
-      actionsButton.setAttribute("aria-expanded", String(open));
-      if (open) actionsMenu.querySelector("button").focus();
+    $("#admin-button").addEventListener("click", () => openAdmin());
+    $("#admin-close").addEventListener("click", closeAdmin);
+    $("#admin-details-close").addEventListener("click", () => { $("#admin-details").hidden = true; });
+    $("#admin-dialog").addEventListener("close", () => {
+      $("#admin-details").hidden = true;
+      if (location.hash.startsWith("#admin")) history.replaceState(null, "", state.view.kind === "entry" ? entryHash(state.view.name, state.view.tab) : "#home");
     });
-    actionsMenu.addEventListener("click", (event) => {
-      const action = event.target.closest("[data-action]")?.dataset.action;
-      closeMenu();
-      if (action === "connect") openConnect();
-      else if (action) runAction(action);
+    $("#home-button").addEventListener("click", goHome);
+    $("#entry-filter").addEventListener("change", () => {
+      storageSet("backup-suite-gui-entry-filter", $("#entry-filter").value);
+      renderEntryList();
     });
-    document.addEventListener("click", (event) => {
-      if (!event.target.closest(".menu-anchor")) closeMenu();
+    $("#resource-warning-close").addEventListener("click", () => { $("#resource-warning").hidden = true; });
+    $("#resource-warning-open").addEventListener("click", () => {
+      $("#resource-warning").hidden = true;
+      openAdmin("watchdog");
     });
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
-      closeMenu();
       if (!$("#help-panel").hidden) $("#help-panel").hidden = true;
       if (!$("#bell-panel").hidden) closeBell();
     });
-    for (const button of document.querySelectorAll("[data-section]")) button.addEventListener("click", () => navigate(button.dataset.section));
     document.addEventListener("click", (event) => {
       const helpButton = event.target.closest("[data-help]");
       if (helpButton) showHelp(helpButton.dataset.help);
@@ -1691,7 +2312,8 @@
         toast(errorText(error), "error");
       }
     });
-    window.addEventListener("hashchange", () => navigate(location.hash.slice(1)));
+    window.addEventListener("hashchange", route);
+    window.addEventListener("popstate", route);
   }
 
   async function init() {
@@ -1710,8 +2332,11 @@
       $("#connection-banner").hidden = false;
       return;
     }
-    navigate(location.hash.slice(1) || "overview");
+    const savedFilter = storageGet("backup-suite-gui-entry-filter");
+    if (savedFilter) $("#entry-filter").value = savedFilter;
+    route();
     connectStream();
+    loadEntries({ quiet: true });
     try {
       const [profiles, history, events] = await Promise.all([
         control("profile.show").catch(() => null),
@@ -1723,7 +2348,7 @@
       state.events = events.events || [];
       if (!storageGet(SEEN_KEY)) markEventsSeen();
       updateChrome();
-      if (state.section === "overview") renderSection();
+      if (state.view.kind === "home") renderMain();
     } catch {
       // Each section loads what it needs on its own.
     }

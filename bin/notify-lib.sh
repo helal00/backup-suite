@@ -46,14 +46,17 @@ ntfy_priority_severity() {
 }
 
 record_backup_event() {
-    # Usage: record_backup_event <info|warning|error> <category> <title> <message> [unit]
+    # Usage: record_backup_event <info|warning|error> <category> <title> <message> [unit] [ntfy]
     # Appends one JSON line to STATE_DIR/events.jsonl for the GUI and Tunnel
-    # Manager. Never fails the caller.
+    # Manager. ntfy says what happened to the ntfy push: sent, failed, off (ntfy
+    # disabled), held (already reported in this episode), or empty (GUI only).
+    # Never fails the caller.
     local severity="$1"
     local category="$2"
     local title="$3"
     local message="$4"
     local unit="${5:-}"
+    local ntfy="${6:-}"
     local events_file
     local sequence_file
     local lock_file
@@ -67,6 +70,10 @@ record_backup_event() {
         info|warning|error) ;;
         *) severity="warning" ;;
     esac
+    case "$ntfy" in
+        sent|failed|off|held|"") ;;
+        *) ntfy="" ;;
+    esac
     message="${message:0:4000}"
     (
         flock -w 5 9 || exit 0
@@ -74,9 +81,9 @@ record_backup_event() {
         [[ "$sequence" =~ ^[0-9]+$ ]] || sequence=0
         sequence=$((sequence + 1))
         printf '%s\n' "$sequence" > "$sequence_file"
-        printf '{"seq":%s,"id":"evt-%s-%s","created_at":"%s","severity":"%s","category":"%s","title":"%s","message":"%s","unit":"%s"}\n' \
+        printf '{"seq":%s,"id":"evt-%s-%s","created_at":"%s","severity":"%s","category":"%s","title":"%s","message":"%s","unit":"%s","ntfy":"%s"}\n' \
             "$sequence" "$sequence" "$(date -u '+%s')" "$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')" "$severity" \
-            "$(json_escape "$category")" "$(json_escape "$title")" "$(json_escape "$message")" "$(json_escape "$unit")" >> "$events_file"
+            "$(json_escape "$category")" "$(json_escape "$title")" "$(json_escape "$message")" "$(json_escape "$unit")" "$ntfy" >> "$events_file"
         if [ "$(wc -l < "$events_file")" -gt $((BACKUP_EVENTS_KEEP_LINES + 100)) ]; then
             trimmed_file=$(mktemp)
             tail -n "$BACKUP_EVENTS_KEEP_LINES" "$events_file" > "$trimmed_file" && cat "$trimmed_file" > "$events_file"
@@ -88,7 +95,24 @@ record_backup_event() {
 
 ntfy_publish() {
     # Usage: ntfy_publish <title> <priority> <tags> <message> [attachment-file] [attachment-name] [event-category]
-    # Every call is also recorded as a GUI event, whether or not ntfy is on.
+    # Every call is also recorded as a GUI event, whether or not ntfy is on, with
+    # what happened to the push.
+    local status=0
+    local delivery
+
+    ntfy_deliver "$@" || status=$?
+    case "$status" in
+        0) delivery="sent" ;;
+        3) delivery="off" ;;
+        *) delivery="failed" ;;
+    esac
+    record_backup_event "$(ntfy_priority_severity "$2")" "${7:-alert}" "$1" "$4" "${BACKUP_EVENT_UNIT:-}" "$delivery"
+    [ "$status" -eq 3 ] && return 0
+    return "$status"
+}
+
+ntfy_deliver() {
+    # The ntfy push itself: 0 sent, 1 not delivered, 3 ntfy is off.
     local title="$1"
     local priority="$2"
     local tags="$3"
@@ -102,11 +126,9 @@ ntfy_publish() {
     local curl_common=()
     local token
 
-    record_backup_event "$(ntfy_priority_severity "$priority")" "$event_category" "$title" "$message" "${BACKUP_EVENT_UNIT:-}"
-
     if ! is_enabled_value "${NOTIFY_FAILURES_ENABLED:-0}"; then
         echo "ntfy notifications are disabled; not sending: $title"
-        return 0
+        return 3
     fi
 
     topic_url=$(trim "${NOTIFY_NTFY_TOPIC_URL:-}")

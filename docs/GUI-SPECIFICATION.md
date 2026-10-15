@@ -573,3 +573,14 @@ Automated items run in `tests/run.sh` (bash, control script) and
 | V22 | `Host: evil.example` → 403; `Host: 127.0.0.1:14399` and `localhost:<any>` and `[::1]:<any>` → allowed; changing request with foreign `Origin` or no CSRF token → 403; `POST /api/events` without CSRF → allowed | G-ARC-7 | automated |
 | V23 | Bundle: no `cursor_store`, actual `remote_socket` and unit, saved `backend_id`, `remote_service` `systemd-user` | G-CON-2 | automated |
 | V24 | Mode detection: user config only → user; socket only → system; both → system with switch offered; neither → "not found" page | G-ARC-4 | automated |
+
+## Revision 4 (2026-10-15): per-entry GUI
+
+The section navigation (Overview, Runs, Projects, …) is replaced by entry cards
+(one per `file-sources.conf` line) with a Home page and one page per entry; every
+backup-wide setting and action moved to an Admin modal; the bell lists ntfy
+notifications with their delivery; a resource-warning popup was added. New control
+verbs (read-only): `entries`, `entry`, `entry.changes`, `entry.log`,
+`entry.measure` (source walk or `rclone size`, at most 90 s). Events carry
+`ntfy` = sent | failed | off | held | "" (GUI only). See docs/GUI.md.
+
