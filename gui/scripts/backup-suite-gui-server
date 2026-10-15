@@ -5,9 +5,16 @@
 #   backup-suite-gui-server install     copy the GUI to ~/.local/share/backup-suite-gui/app,
 #                                       write and start the user units (run again to update)
 #   backup-suite-gui-server uninstall   stop and remove the user units (keeps settings)
-#   backup-suite-gui-server start|stop|restart|status
+#   backup-suite-gui-server start|stop|restart
+#   backup-suite-gui-server status [--backend user@host]
+#                                       unit state, the GUI watchdog, and every way to
+#                                       connect; saves the Tunnel Manager profile and the
+#                                       launchers in ~/.local/share/backup-suite-gui/client-launchers
 #   backup-suite-gui-server bundle [--backend user@host]
-#                                       print the Tunnel Manager bundle (first import)
+#                                       print the Tunnel Manager profile (first import)
+#   backup-suite-gui-server backend user@host
+#                                       save the user@host of your Tunnel Manager profile,
+#                                       used by the profile, the launchers and the GUI
 #   backup-suite-gui-server service-run run the server in the foreground (debugging)
 
 set -euo pipefail
@@ -23,7 +30,7 @@ UNIT_DIR="$CONFIG_HOME/systemd/user"
 NODE_MIN_MAJOR=18
 
 usage() {
-  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die() {
@@ -115,7 +122,8 @@ install_gui() {
   else
     echo "Linger is on: the GUI keeps running with nobody logged in."
   fi
-  echo "Tunnel Manager bundle: $0 bundle --backend $(id -un)@<this server as in your Tunnel Manager profile>"
+  echo "Ways to connect (Tunnel Manager profile, launchers, phone, manual): $0 status"
+  echo "Set the user@host of your Tunnel Manager profile first if it differs: $0 backend $(id -un)@<this server as in that profile>"
 }
 
 uninstall_gui() {
@@ -125,41 +133,55 @@ uninstall_gui() {
   echo "Removed $UNIT. Settings stay in $CONFIG_HOME/backup-suite-gui; the app copy in $APP_DIR."
 }
 
-print_bundle() {
-  local backend="" node app_dir="$APP_DIR"
+LAUNCHER_DIR="$DATA_HOME/backup-suite-gui/client-launchers"
+
+# connect_cli <command> [args...]: the GUI's own connection code (scripts/connect-cli.js),
+# from the installed copy when there is one.
+connect_cli() {
+  local node app_dir="$APP_DIR"
+  node=$(find_node) || die "Node.js $NODE_MIN_MAJOR or newer is required."
+  [ -f "$app_dir/scripts/connect-cli.js" ] || app_dir="$SOURCE_GUI_DIR"
+  "$node" "$app_dir/scripts/connect-cli.js" "$app_dir" "$@"
+}
+
+backend_option() {
+  # Prints the value of --backend from the arguments, or nothing.
+  local backend=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --backend) backend="${2:?--backend needs user@host}"; shift 2 ;;
       *) die "Unknown option: $1" ;;
     esac
   done
-  node=$(find_node) || die "Node.js $NODE_MIN_MAJOR or newer is required."
-  [ -f "$app_dir/server.js" ] || app_dir="$SOURCE_GUI_DIR"
-  "$node" -e '
-    const dir = process.argv[1];
-    const settingsStore = require(dir + "/lib/settings");
-    const listenConfig = require(dir + "/lib/listen-config");
-    const bundle = require(dir + "/lib/bundle");
-    const settings = settingsStore.load();
-    if (process.argv[2]) {
-      const merged = settingsStore.merge(settings, { tunnel: { backendId: process.argv[2] } });
-      if (merged.tunnel.backendId !== process.argv[2]) { console.error("Use the form login@host."); process.exit(64); }
-      Object.assign(settings, merged);
-    }
-    const listen = listenConfig.resolveListen({ settings });
-    process.stdout.write(bundle.tunnelManagerToml(bundle.profile(settings, listen, "backup-suite-gui-" + listenConfig.INSTANCE + ".service")));
-  ' "$app_dir" "$backend"
+  printf '%s' "$backend"
+}
+
+print_status() {
+  local backend state
+  backend=$(backend_option "$@")
+  state=$(systemctl --user is-active "$UNIT" 2>/dev/null || true)
+  echo "$UNIT: ${state:-unknown}"
+  if [ "$state" = "active" ]; then
+    echo "Service pid: $(systemctl --user show -p MainPID --value "$UNIT")"
+  else
+    echo "Start it with: backup-suite-gui-server start (Tunnel Manager also starts it when it connects)."
+  fi
+  echo "Service logs: journalctl --user -u $UNIT -f"
+  "$SOURCE_GUI_DIR/scripts/backup-suite-gui-watchdog" status || true
+  echo
+  connect_cli status "$LAUNCHER_DIR" $backend
 }
 
 case "${1:-}" in
   install) install_gui ;;
   uninstall) uninstall_gui ;;
   start|stop|restart) systemctl --user "$1" "$UNIT" ;;
-  status)
-    systemctl --user --no-pager status "$UNIT" || true
-    "$SOURCE_GUI_DIR/scripts/backup-suite-gui-watchdog" status
+  status) shift; print_status "$@" ;;
+  bundle) shift; connect_cli bundle $(backend_option "$@") ;;
+  backend)
+    [ -n "${2:-}" ] || die "Usage: backup-suite-gui-server backend user@host"
+    connect_cli save-backend "$2"
     ;;
-  bundle) shift; print_bundle "$@" ;;
   service-run)
     node=$(find_node) || die "Node.js $NODE_MIN_MAJOR or newer is required."
     exec "$node" "$SOURCE_GUI_DIR/server.js"

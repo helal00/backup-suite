@@ -64,7 +64,8 @@ function makeFixture() {
     BACKUP_SUITE_CONTROL_SCRIPT: path.join(REPO, "bin", "backup-control.sh"),
     BACKUP_SUITE_CONTROL_SOCKET: path.join(root, "no-broker.sock"),
     BACKUP_SUITE_GUI_CONFIG_DIR: path.join(root, "gui-config"),
-    BACKUP_SUITE_GUI_STATE_DIR: path.join(root, "gui-state")
+    BACKUP_SUITE_GUI_STATE_DIR: path.join(root, "gui-state"),
+    BACKUP_SUITE_GUI_STREAM_GRACE_MS: "1000"
   };
   fs.mkdirSync(env.HOME, { recursive: true });
   delete env.INVOCATION_ID;

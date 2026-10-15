@@ -48,7 +48,7 @@ function createApp({ env = process.env } = {}) {
   const csrfToken = guard.newToken();
   const client = new ControlClient({ env, getPreference: () => settings.general.backend });
   const events = new EventStore({ client, stateDir, getSettings: () => settings, log });
-  const live = new Live({ client, events, getSettings: () => settings, log });
+  const live = new Live({ client, events, getSettings: () => settings, log, idleStopMs: Number(env.BACKUP_SUITE_GUI_STREAM_GRACE_MS) || undefined });
   let listen = listenConfig.resolveListen({ env, settings });
 
   function sendJson(res, status, body) {
@@ -184,7 +184,7 @@ function createApp({ env = process.env } = {}) {
         Connection: "keep-alive"
       });
       res.write("retry: 3000\n\n");
-      live.addClient(res);
+      live.addClient(res, req.headers["last-event-id"]);
       req.on("close", () => live.removeClient(res));
       return undefined;
     }

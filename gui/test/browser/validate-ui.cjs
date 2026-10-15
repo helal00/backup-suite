@@ -109,7 +109,11 @@ async function main() {
         await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-settings.png`) });
         await page.keyboard.press("Escape");
         await page.click("#connect-button");
-        await page.waitForSelector("#connect-body h3");
+        await page.waitForSelector('#connect-body [role="tab"][aria-selected="true"]');
+        for (const tab of ["scripts", "mobile", "manual", "tunnel-manager"]) {
+          await page.click(`#connect-body [data-tab="${tab}"]`);
+          await page.waitForSelector(`#connect-body [data-tab="${tab}"][aria-selected="true"]`);
+        }
         await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-connect.png`) });
         await page.keyboard.press("Escape");
         await page.click("#bell-button");

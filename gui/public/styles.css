@@ -169,6 +169,7 @@ a.button-link {
   text-decoration: none;
 }
 a.button-link:hover { border-color: var(--text); }
+a.button-link.primary-button { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 
 .primary-button {
   background: var(--accent);
@@ -567,6 +568,12 @@ label.inline-check input { width: 1.05rem; height: 1.05rem; }
 .settings-footer { border-top: 1px solid var(--border); padding-top: 0.75rem; }
 
 .copy-row { display: flex; gap: 0.4rem; align-items: stretch; margin: 0.3rem 0 0.6rem; }
+.copy-row .copy-label { align-self: center; color: var(--muted); }
+.connect-dialog { width: min(48rem, calc(100vw - 1.5rem)); }
+.connect-steps { padding-left: 1.3rem; }
+.connect-steps li { margin: 0.35rem 0; }
+.connect-scripts { list-style: none; padding: 0; }
+.connect-scripts li { margin: 0.4rem 0; }
 .copy-row code, .copy-row input { flex: 1; min-width: 0; padding: 0.4rem 0.55rem; background: var(--panel-sunken); border: 1px solid var(--border); border-radius: 6px; overflow-wrap: anywhere; }
 
 /* Floating help and bell panels */

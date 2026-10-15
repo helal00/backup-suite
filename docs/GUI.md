@@ -48,15 +48,30 @@ linger is on. Run it again to update the GUI. If linger is off, run once:
 User mode: install Backup Suite with `./setup.sh` as the user, then run
 `gui/scripts/backup-suite-gui-server install`.
 
-## Connect with Tunnel Manager
+## Connect
 
-1. Print the bundle with your Tunnel Manager profile's exact `user@host`:
-   `gui/scripts/backup-suite-gui-server bundle --backend user@137.74.7.68 > backup-suite-gui.toml`
-2. In Tunnel Manager, in your existing profile for this server, Import that file and
-   press Start. Tunnel Manager starts the GUI unit if it is stopped, checks
-   `/api/health` for `backup-suite-gui`, and opens the app window.
-3. Later bundles, launchers for Windows/macOS/Linux/Android and the manual `ssh -L`
-   line are in the GUI's ⇩ **Ways to connect** dialog.
+Every way to connect is in the GUI's ⇩ **Ways to connect** dialog (also under
+Actions) and in `gui/scripts/backup-suite-gui-server status`, made by the same code:
+
+- **Tunnel Manager** (recommended): download `backup-suite-gui-tunnel-manager.toml`
+  and Import it in your Tunnel Manager profile for this server, then Start. Tunnel
+  Manager starts the GUI unit if it is stopped, checks `/api/health` for
+  `backup-suite-gui`, and opens the app window.
+- **Launcher scripts** for Windows, macOS and Linux: open the tunnel, wait for the
+  GUI, open the browser and reconnect on drops.
+- **Phone or tablet**: Termux on Android, Blink Shell on iPhone/iPad.
+- **Manual**: one `ssh -N -L 127.0.0.1:14337:<socket> user@host` line.
+
+The backend `user@host` must be the one your Tunnel Manager profile shows. Save it
+once in the dialog or with `gui/scripts/backup-suite-gui-server backend user@host`.
+`status` also saves the profile and the launchers in
+`~/.local/share/backup-suite-gui/client-launchers`.
+
+Tunnel Manager's app window is a webview at `wails.localhost` whose local proxy
+forwards requests with Host `127.0.0.1:<port>`; the GUI accepts that Origin (the CSRF
+token is still required). The proxy also ends the live stream after each message:
+every message has an id, a reconnecting window gets only what it missed, and the
+"connection lost" banner shows only after 30 s without a stream.
 
 Tunnel Manager shows warnings and errors from Backup Suite as desktop notices.
 Every event, including "run finished", is in the bell's Activity list.
@@ -64,7 +79,7 @@ Every event, including "run finished", is in the bell's Activity list.
 ## Operate
 
 ```bash
-gui/scripts/backup-suite-gui-server status      # unit status and the GUI watchdog's last stop
+gui/scripts/backup-suite-gui-server status      # unit, the GUI watchdog's last stop, every way to connect
 gui/scripts/backup-suite-gui-server restart
 journalctl --user -u backup-suite-gui-4337.service -n 50 --no-pager
 ```

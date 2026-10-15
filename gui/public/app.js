@@ -1283,17 +1283,33 @@
 
   // ------------------------------------------------------------------ live stream
 
+  // An EventSource that reconnects is not a lost connection: Tunnel Manager's app
+  // window ends the stream after every message and the page reconnects at once (the
+  // server replays what it missed). The banner shows only after the stream has stayed
+  // down for STREAM_LOST_AFTER_MS.
+  const STREAM_LOST_AFTER_MS = 30000;
   let stream = null;
+  let streamLostTimer = null;
   function connectStream() {
     if (stream) stream.close();
     stream = new EventSource("/api/stream");
     stream.addEventListener("open", () => {
+      clearTimeout(streamLostTimer);
+      streamLostTimer = null;
       state.connected = true;
       $("#connection-banner").hidden = true;
     });
     stream.addEventListener("error", () => {
-      state.connected = false;
-      $("#connection-banner").hidden = false;
+      if (streamLostTimer) return;
+      streamLostTimer = setTimeout(() => {
+        streamLostTimer = null;
+        if (stream && stream.readyState === EventSource.OPEN) return;
+        state.connected = false;
+        $("#connection-banner").hidden = false;
+        // A stream the browser gave up on (CLOSED) is opened again; the browser
+        // retries a CONNECTING one itself.
+        if (stream && stream.readyState === EventSource.CLOSED) connectStream();
+      }, STREAM_LOST_AFTER_MS);
     });
     stream.addEventListener("hello", (message) => {
       const data = JSON.parse(message.data);
@@ -1481,32 +1497,118 @@
     renderConnect(info);
   }
 
+  // "Ways to connect", as in agentw-gui: four tabs made from /api/connect on every
+  // opening, so the profile, the scripts and the steps match the current settings.
+  // Each tab can be copied as plain text to share.
+  const CONNECT_TABS = [["tunnel-manager", "Tunnel Manager"], ["scripts", "Launcher scripts"], ["mobile", "Phone or tablet"], ["manual", "Manual"]];
+  let connectTab = "tunnel-manager";
+
+  function connectCopyRow(label, value) {
+    return h("div", { class: "copy-row" }, label ? h("span", { class: "copy-label" }, label) : null, h("code", {}, value),
+      h("button", { type: "button", onclick: () => copyText(value) }, "Copy"));
+  }
+
+  function connectSignIn(info) {
+    return `Sign in as ${info.ssh_target} with your usual SSH key or password.`;
+  }
+
+  const CONNECT_BUILDERS = {
+    "tunnel-manager": (info) => {
+      const tm = info.tunnel_manager;
+      const backendInput = h("input", { type: "text", value: info.backend_id, spellcheck: "false", "aria-describedby": "backend-hint", autocomplete: "off", "aria-label": "Tunnel Manager backend (user@host)" });
+      const steps = [
+        `Install Tunnel Manager (Windows, macOS, Linux): ${tm.download_url}`,
+        `Download the profile ${tm.file_name} and, in your Tunnel Manager profile for ${info.backend_id}, choose Import.`,
+        "Select the imported tunnel backup-suite-gui, then Start. Tunnel Manager starts the GUI on the server if it is stopped, checks it, and opens the app window.",
+        connectSignIn(info)
+      ];
+      const view = [
+        h("ol", { class: "connect-steps" },
+          h("li", {}, "Install Tunnel Manager (Windows, macOS, Linux): ", h("a", { href: tm.download_url, target: "_blank", rel: "noopener noreferrer" }, "releases page"), "."),
+          h("li", {}, "Download the profile and choose Import in Tunnel Manager.",
+            h("div", { class: "toolbar-row tight" },
+              h("a", { href: tm.url, download: tm.file_name, class: "button-link primary-button" }, `Download ${tm.file_name}`),
+              h("button", { type: "button", onclick: () => copyText(tm.toml) }, "Copy profile"))),
+          h("li", {}, steps[2]),
+          h("li", {}, steps[3])),
+        h("label", {}, "Tunnel Manager backend (user@host)", h("div", { class: "copy-row" }, backendInput,
+          h("button", { type: "button", onclick: async () => {
+            try {
+              renderConnect(await api("/api/connect/backend", { method: "POST", body: { backend_id: backendInput.value.trim() } }));
+              toast("Backend saved; the profile and every launcher use it.");
+            } catch (error) {
+              toast(errorText(error), "error");
+            }
+          } }, "Save"))),
+        h("p", { class: "settings-help", id: "backend-hint" }, info.backend_hint_text),
+        h("details", {}, h("summary", {}, `What the profile contains (${tm.file_name})`), h("pre", {}, tm.toml)),
+        h("p", { class: "muted" }, `On the server the same profile is printed by: ${info.cli.bundle}`)
+      ];
+      const text = ["Connect with Tunnel Manager", ...steps.map((step, index) => `${index + 1}. ${step}`), "", `--- ${tm.file_name} ---`, tm.toml.trimEnd()].join("\n");
+      return { view, text };
+    },
+    scripts: (info) => {
+      const view = [
+        h("p", {}, "One small script per computer: it opens the SSH tunnel (no shell), waits until the GUI answers, opens it in your browser and reconnects if the connection drops."),
+        h("ul", { class: "connect-scripts" }, info.scripts.map((script) => h("li", {},
+          h("a", { href: script.url, download: script.file_name, class: "button-link" }, `Download for ${script.label}`),
+          h("span", { class: "muted" }, ` ${script.file_name}: ${script.how_to}`)))),
+        h("p", { class: "muted" }, connectSignIn(info)),
+        connectCopyRow("Then open", info.address),
+        h("p", { class: "muted" }, `On the server, ${info.cli.status} lists the same scripts, saved in ${info.cli.launcher_dir}.`)
+      ];
+      const text = ["Connect with a launcher script", "Run the script for your computer. It forwards the GUI over SSH and opens it in your browser.",
+        ...info.scripts.map((script) => `- ${script.label}: ${script.file_name}. ${script.how_to}`), connectSignIn(info), `The GUI opens at ${info.address}`].join("\n");
+      return { view, text };
+    },
+    mobile: (info) => {
+      const m = info.mobile;
+      const view = [
+        h("h3", {}, m.android.title),
+        h("ol", { class: "connect-steps" }, h("li", {}, "Open Termux and run:", connectCopyRow("", "pkg install openssh")), h("li", {}, "Run:", connectCopyRow("", info.manual.ssh)),
+          m.android.after.map((line) => h("li", {}, line))),
+        h("h3", {}, m.ios.title),
+        h("ol", { class: "connect-steps" }, h("li", {}, "In Blink, run:", connectCopyRow("", info.manual.ssh)), m.ios.after.map((line) => h("li", {}, line))),
+        h("p", { class: "muted" }, m.ios.note),
+        h("h3", {}, "On any phone"),
+        h("ul", {}, m.general.map((line) => h("li", {}, line)))
+      ];
+      const text = ["Connect from a phone or tablet", "", m.android.title, "1. Open Termux and run: pkg install openssh", `2. Run: ${info.manual.ssh}`,
+        ...m.android.after.map((line, index) => `${index + 3}. ${line}`), "", m.ios.title, `1. In Blink, run: ${info.manual.ssh}`,
+        ...m.ios.after.map((line, index) => `${index + 2}. ${line}`), m.ios.note, "", "On any phone:", ...m.general.map((line) => `- ${line}`)].join("\n");
+      return { view, text };
+    },
+    manual: (info) => {
+      const view = [
+        h("ol", { class: "connect-steps" },
+          h("li", {}, "In a terminal (Windows PowerShell, macOS or Linux), run:", connectCopyRow("", info.manual.ssh),
+            h("span", { class: "muted" }, "It stays open with no prompt while connected; keep it open while you work.")),
+          h("li", {}, "Open this address in your browser:", connectCopyRow("", info.manual.address))),
+        h("p", { class: "muted" }, connectSignIn(info)),
+        h("p", { class: "muted" }, `Another local port works too: change ${info.local_port} in both places. The tunnel forwards to ${info.socket ? "the GUI's private socket" : "127.0.0.1 (tcp mode)"} ${info.remote}.`),
+        info.socket ? h("p", { class: "muted" }, info.tcp_note) : null
+      ];
+      const text = ["Connect by hand (any computer with OpenSSH: Windows 10/11, macOS, Linux)", "1. In a terminal, run:", `   ${info.manual.ssh}`,
+        "   It stays open with no prompt while connected; keep it open while you work.", "2. Open this address in your browser:", `   ${info.manual.address}`,
+        connectSignIn(info), `Another local port works too: change ${info.local_port} in both places.`].join("\n");
+      return { view, text };
+    }
+  };
+
   function renderConnect(info) {
     const body = clear($("#connect-body"));
-    const backendInput = h("input", { type: "text", value: info.backend_id, spellcheck: "false", "aria-describedby": "backend-hint", autocomplete: "off" });
-    body.append(
-      h("h3", {}, "1. Tunnel Manager (recommended)"),
-      h("p", {}, "Get Tunnel Manager from ", h("a", { href: info.tunnel_manager.download_url, target: "_blank", rel: "noopener noreferrer" }, "its releases page"), ". In the profile for this server, use Import with the file below, then press Start."),
-      h("label", {}, "Tunnel Manager backend (user@host)", h("div", { class: "copy-row" }, backendInput,
-        h("button", { type: "button", onclick: async () => {
-          try {
-            renderConnect(await api("/api/connect/backend", { method: "POST", body: { backend_id: backendInput.value.trim() } }));
-            toast("Backend saved; the bundle below uses it.");
-          } catch (error) {
-            toast(errorText(error), "error");
-          }
-        } }, "Save"))),
-      h("p", { class: "settings-help", id: "backend-hint" }, "Must be the user@host of your Tunnel Manager profile for this server, exactly as Tunnel Manager shows it. Tunnel Manager refuses the import on any difference, for example an alias instead of the address."),
-      h("div", { class: "toolbar-row tight" },
-        h("a", { href: info.tunnel_manager.url, download: info.tunnel_manager.file_name, class: "button-link" }, `Download ${info.tunnel_manager.file_name}`),
-        h("button", { type: "button", onclick: () => copyText(info.tunnel_manager.toml) }, "Copy bundle")),
-      h("details", {}, h("summary", {}, "Show the bundle"), h("pre", {}, info.tunnel_manager.toml)),
-      h("p", { class: "muted" }, `The GUI's remote service is ${info.unit}; Tunnel Manager starts it if it is stopped.`),
-      h("h3", {}, "2. Launcher scripts"),
-      h("div", { class: "toolbar-row tight" }, info.scripts.map((script) => h("a", { href: script.url, download: script.file_name, class: "button-link" }, script.label))),
-      h("h3", {}, "3. Manually"),
-      h("div", { class: "copy-row" }, h("code", {}, info.manual.ssh), h("button", { type: "button", onclick: () => copyText(info.manual.ssh) }, "Copy")),
-      h("p", {}, "Then open ", h("code", {}, info.manual.address), ". Forwarding to ", info.socket ? "the GUI's private socket" : "127.0.0.1 (tcp mode)", ": ", h("code", {}, info.remote), "."));
+    const tabBar = h("div", { class: "settings-tabs", role: "tablist", "aria-label": "Ways to connect" });
+    const panel = h("div", { class: "connect-panel", role: "tabpanel" });
+    const show = (name) => {
+      connectTab = CONNECT_BUILDERS[name] ? name : "tunnel-manager";
+      for (const button of tabBar.children) button.setAttribute("aria-selected", String(button.dataset.tab === connectTab));
+      const built = CONNECT_BUILDERS[connectTab](info);
+      clear(panel).append(...built.view.filter(Boolean),
+        h("div", { class: "toolbar-row tight" }, h("button", { type: "button", title: "Copy these instructions as text, to share them", onclick: () => copyText(CONNECT_BUILDERS[connectTab](info).text) }, "Copy this tab")));
+    };
+    for (const [name, label] of CONNECT_TABS) tabBar.append(h("button", { type: "button", role: "tab", dataset: { tab: name }, onclick: () => show(name) }, label));
+    body.append(h("p", { class: "muted" }, `For ${info.ssh_target}: the GUI on the server (${info.remote}) opens at ${info.address} on your device.`), tabBar, panel);
+    show(connectTab);
   }
 
   // ------------------------------------------------------------------ start-up
@@ -1534,7 +1636,8 @@
     actionsMenu.addEventListener("click", (event) => {
       const action = event.target.closest("[data-action]")?.dataset.action;
       closeMenu();
-      if (action) runAction(action);
+      if (action === "connect") openConnect();
+      else if (action) runAction(action);
     });
     document.addEventListener("click", (event) => {
       if (!event.target.closest(".menu-anchor")) closeMenu();

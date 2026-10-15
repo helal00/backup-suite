@@ -344,11 +344,53 @@ function connectFile(kind, p) {
   return { contentType: entry.contentType, fileName: entry.fileName, body: entry.render(p) };
 }
 
+const LAUNCHER_HOW_TO = {
+  windows: "Double-click it. It opens the tunnel in its own window and then the GUI in your browser; keep that window open.",
+  mac: "In Terminal: chmod +x FILE, then ./FILE. Keep the window open while you work.",
+  linux: "In a terminal: chmod +x FILE, then ./FILE. Keep the window open while you work.",
+  android: "Steps for Termux on Android (the Phone or tablet tab has them too)."
+};
+
+// Where `backup-suite-gui-server status` saves the launcher scripts on the server.
+const LAUNCHER_DIR = "~/.local/share/backup-suite-gui/client-launchers";
+
+function mobileInstructions(p) {
+  const address = `http://127.0.0.1:${p.localPort}/`;
+  return {
+    android: {
+      title: "Android: Termux (free, from F-Droid or Google Play)",
+      after: [
+        "Leave Termux running (allow it to run in the background if Android asks).",
+        `Open ${address} in Chrome. Menu, then Add to Home screen, keeps it one tap away.`
+      ]
+    },
+    ios: {
+      title: "iPhone or iPad: Blink Shell (App Store)",
+      after: [
+        "Keep Blink open in the background (Blink's settings can keep the connection alive).",
+        `Open ${address} in Safari. Share, then Add to Home Screen, keeps it one tap away.`
+      ],
+      note: "Blink's forwarding to a socket path has not been checked here; if it does not connect, switch the GUI to tcp mode or use a computer or Android."
+    },
+    general: [
+      "Keep the SSH app connected while you use the GUI; reopen it if the GUI stops answering.",
+      p.remoteSocket
+        ? "The GUI is reached through a private socket on the server. Use an app that runs real OpenSSH commands; apps that only forward to a host and port (for example Termius or JuiceSSH) cannot reach it unless the GUI is switched to tcp mode."
+        : `Any SSH app with local port forwarding works (for example Termius or JuiceSSH): local 127.0.0.1:${p.localPort} to destination 127.0.0.1:${p.remotePort}.`,
+      `Sign in as ${p.sshTarget} with your usual SSH key or password.`
+    ]
+  };
+}
+
 function connectInstructions(p, settings) {
   return {
     backend_id: p.backendId,
+    ssh_target: p.sshTarget,
     backend_saved: Boolean(settings.tunnel.backendId),
     backend_hint: "must be the user@host of your Tunnel Manager profile for this server",
+    backend_hint_text: settings.tunnel.backendId
+      ? "Must be the user@host of your Tunnel Manager profile for this server, exactly as Tunnel Manager shows it. Tunnel Manager refuses the import on any difference, for example an alias instead of the address. The launchers and the manual command use it too."
+      : "Not saved yet: this is a guess from the server's address. Save the user@host of your Tunnel Manager profile for this server, exactly as Tunnel Manager shows it; the launchers and the manual command use it too.",
     remote: forwardTarget(p),
     socket: Boolean(p.remoteSocket),
     local_port: p.localPort,
@@ -360,9 +402,46 @@ function connectInstructions(p, settings) {
       url: "/api/connect/file?kind=toml",
       toml: tunnelManagerToml(p)
     },
-    scripts: Object.entries(PLATFORMS).map(([platform, entry]) => ({ platform, label: entry.label, file_name: entry.fileName, url: `/api/connect/file?kind=${platform}` })),
-    manual: { ssh: `ssh -N -L 127.0.0.1:${p.localPort}:${forwardTarget(p)} ${p.sshTarget}`, address: `http://127.0.0.1:${p.localPort}/` }
+    scripts: Object.entries(PLATFORMS).map(([platform, entry]) => ({
+      platform, label: entry.label, file_name: entry.fileName, url: `/api/connect/file?kind=${platform}`,
+      how_to: LAUNCHER_HOW_TO[platform].replace(/FILE/g, entry.fileName)
+    })),
+    mobile: mobileInstructions(p),
+    manual: { ssh: `ssh -N -L 127.0.0.1:${p.localPort}:${forwardTarget(p)} ${p.sshTarget}`, address: `http://127.0.0.1:${p.localPort}/` },
+    tcp_note: "If an SSH app can only forward to a host and port, switch the GUI to tcp mode (Settings, Tunnel Manager, GUI listener) and download the profile and launchers again. In tcp mode every local account on the server can reach the GUI.",
+    cli: {
+      status: "gui/scripts/backup-suite-gui-server status",
+      bundle: `gui/scripts/backup-suite-gui-server bundle --backend ${p.backendId}`,
+      launcher_dir: LAUNCHER_DIR
+    }
   };
 }
 
-module.exports = { APP_ID, APP_NAME, backendId, connectFile, connectInstructions, primaryIPv4, profile, tunnelManagerToml };
+// Plain-text "ways to connect" for `backup-suite-gui-server status`, like agentw-gui status.
+function connectText(info, savedFiles = {}) {
+  const lines = [];
+  lines.push(info.socket
+    ? `${APP_NAME} listens on a private Unix socket on this host:\n  ${info.remote}\nOnly this account can open it; an SSH tunnel to it is opened as your SSH login user.`
+    : `${APP_NAME} listens on ${info.remote} (tcp mode): every local account on this host can reach it.`);
+  lines.push("", `Backend (user@host): ${info.backend_id}${info.backend_saved ? "" : " (a guess; set yours with: bundle --backend user@host, or in the GUI's Ways to connect)"}`);
+  lines.push("", "1. Tunnel Manager (recommended)",
+    `   Install: ${info.tunnel_manager.download_url}`,
+    `   Profile: ${savedFiles.toml || info.cli.bundle}`,
+    "   In your Tunnel Manager profile for this server: Import that file, then Start.");
+  lines.push("", "2. Launcher scripts (open the tunnel and the browser, reconnect on drops)");
+  for (const script of info.scripts) lines.push(`   ${script.label.padEnd(8)} ${savedFiles[script.platform] || script.file_name}`);
+  lines.push(`   Through an open tunnel the GUI serves fresh ones: ${info.address}api/connect/file?kind=windows|mac|linux|android|toml`);
+  lines.push("", "3. Phone or tablet",
+    `   Android (Termux): pkg install openssh, then: ${info.manual.ssh}`,
+    `   iPhone/iPad (Blink Shell): ${info.manual.ssh}`,
+    `   Then open ${info.address} in the phone's browser.`,
+    `   ${info.mobile.general[1]}`);
+  lines.push("", "4. Manual (any computer with OpenSSH 6.7 or later; keep it open)",
+    `   ${info.manual.ssh}`,
+    `   Then open: ${info.address}`);
+  if (info.socket) lines.push("", info.tcp_note);
+  lines.push("", `In the GUI: the download button (or Actions, Ways to connect) shows all of these.`);
+  return `${lines.join("\n")}\n`;
+}
+
+module.exports = { APP_ID, APP_NAME, PLATFORMS, backendId, connectFile, connectInstructions, connectText, primaryIPv4, profile, tunnelManagerToml };

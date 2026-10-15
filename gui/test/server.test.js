@@ -128,9 +128,10 @@ test("HTTP API: health, guard, control, settings, connect, events and one shared
     assert.ok(during >= 2 && during <= 4, `expected 2-4 shared status reads in 4.5 s with three tabs, got ${during}`);
     for (const stream of streams) assert.match(stream.text, /event: status/);
 
-    // V7 (automated part): no tab, no polling.
+    // V7 (automated part): no tab, no polling once the reconnect grace (1 s here,
+    // 15 s by default) has passed.
     for (const stream of streams) stream.req.destroy();
-    await wait(300);
+    await wait(1500);
     const idleStart = app.client.callsByVerb.status || 0;
     await wait(4200);
     assert.strictEqual((app.client.callsByVerb.status || 0) - idleStart, 0, "status was polled with no tab open");

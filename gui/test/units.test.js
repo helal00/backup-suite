@@ -30,6 +30,15 @@ test("Host and Origin checks accept any local port and refuse everything else", 
   assert.strictEqual(guard.check(request("POST", "127.0.0.1:14400", undefined, token), "/api/control", token).code, "bad_origin");
   assert.strictEqual(guard.check(request("POST", "127.0.0.1:14400", "http://127.0.0.1:14400", "wrong"), "/api/control", token).code, "bad_csrf");
   assert.strictEqual(guard.check(request("POST", "127.0.0.1:14400", "http://127.0.0.1:14400", undefined), "/api/settings", token).code, "bad_csrf");
+  // Tunnel Manager's app window (Wails): the page is at wails.localhost and the proxy
+  // forwards with Host 127.0.0.1:<port>; the CSRF token is still required.
+  for (const origin of ["http://wails.localhost", "https://wails.localhost", "http://wails.localhost:34115", "wails://wails"]) {
+    assert.strictEqual(guard.check(request("POST", "127.0.0.1:14337", origin, token), "/api/control", token), null, origin);
+  }
+  assert.strictEqual(guard.check(request("POST", "127.0.0.1:14337", "http://wails.localhost", "wrong"), "/api/control", token).code, "bad_csrf");
+  for (const origin of ["http://wails.localhost.evil.example", "http://evilwails.localhost", "null"]) {
+    assert.strictEqual(guard.check(request("POST", "127.0.0.1:14337", origin, token), "/api/control", token).code, "bad_origin", origin);
+  }
   // Tunnel Manager's event endpoint: no CSRF token, no Origin; Host still checked.
   assert.strictEqual(guard.check(request("POST", "127.0.0.1:14337"), "/api/events", token), null);
   assert.strictEqual(guard.check(request("POST", "evil.example"), "/api/events", token).code, "bad_host");
@@ -76,6 +85,23 @@ test("launchers and manual line forward to the socket and check the app id", () 
     if (kind !== "android") assert.ok(file.body.includes("backup-suite-gui"), kind);
   }
   assert.strictEqual(bundle.connectFile("evil", profile), null);
+  // Every way agentw-gui offers: profile, launchers with how-to, phone, manual, CLI.
+  assert.strictEqual(info.ssh_target, "user@black");
+  assert.deepStrictEqual(info.scripts.map((script) => script.platform), ["windows", "mac", "linux", "android"]);
+  for (const script of info.scripts) assert.ok(script.how_to.length > 10, script.platform);
+  assert.match(info.scripts.find((script) => script.platform === "mac").how_to, /chmod \+x backup-suite-gui-mac\.sh/);
+  assert.match(info.mobile.android.title, /Termux/);
+  assert.match(info.mobile.ios.title, /Blink/);
+  assert.match(info.mobile.general.join(" "), /real OpenSSH/);
+  assert.strictEqual(info.cli.bundle, "gui/scripts/backup-suite-gui-server bundle --backend user@black");
+  const text = bundle.connectText(info, { toml: "/x/backup-suite-gui-tunnel-manager.toml" });
+  for (const part of ["1. Tunnel Manager", "/x/backup-suite-gui-tunnel-manager.toml", "2. Launcher scripts", "3. Phone or tablet", "4. Manual", info.manual.ssh]) {
+    assert.ok(text.includes(part), part);
+  }
+  // tcp mode: any SSH app with port forwarding works on a phone.
+  const tcpSettings = settingsStore.normalize({ tunnel: { backendId: "user@black", listenMode: "tcp" } });
+  const tcpProfile = bundle.profile(tcpSettings, listenConfig.resolveListen({ env: {}, settings: tcpSettings }), "u");
+  assert.match(bundle.connectInstructions(tcpProfile, tcpSettings).mobile.general.join(" "), /Termius or JuiceSSH\): local 127\.0\.0\.1:14337/);
 });
 
 test("settings are clamped and an invalid backend is dropped", () => {
@@ -252,4 +278,49 @@ test("the socket directory is tightened to 0700, and someone else's directory is
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("live stream: a proxy's reconnects get only what they missed and cost no extra status read", async () => {
+  const { Live } = require("../lib/live");
+  let reads = 0;
+  const client = { call: async () => { reads += 1; return { services: {}, server: { available_percent: 50 } }; } };
+  const events = { onNewEvents: () => {}, refresh: async () => {}, tunnelManagerActive: () => false };
+  const settings = { general: { refreshSeconds: 3600, chartMinutes: 30 } };
+  const live = new Live({ client, events, getSettings: () => settings });
+  const response = () => ({ text: "", write(chunk) { this.text += chunk; } });
+  const idOf = (text) => [...text.matchAll(/^id: (.+)$/gm)].map((match) => match[1]).pop();
+
+  const first = response();
+  live.addClient(first);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.strictEqual(reads, 1);
+  assert.match(first.text, /event: hello/);
+  assert.match(first.text, /event: status/);
+  const seen = idOf(first.text);
+
+  // The proxy ends the response; the page reconnects with Last-Event-ID at once.
+  live.removeClient(first);
+  const again = response();
+  live.addClient(again, seen);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.strictEqual(again.text, "", "nothing new: nothing sent");
+  assert.strictEqual(reads, 1, "a reconnect does not read status again");
+
+  // Something happens while the page is between reconnects; it gets exactly that.
+  live.removeClient(again);
+  live.broadcast("events", { events: [{ seq: 1 }] });
+  const third = response();
+  live.addClient(third, seen);
+  assert.doesNotMatch(third.text, /event: hello/);
+  assert.strictEqual((third.text.match(/^event: /gm) || []).length, 1);
+  assert.match(third.text, /event: events/);
+
+  // An id from before a restart, or one no longer kept, gets one fresh snapshot.
+  const stale = response();
+  live.addClient(stale, "zzzz-3");
+  assert.match(stale.text, /event: hello/);
+  for (const res of [third, stale]) live.removeClient(res);
+  clearTimeout(live.timer);
+  clearTimeout(live.idleStop);
+  clearInterval(live.heartbeat);
 });

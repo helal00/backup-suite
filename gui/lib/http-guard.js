@@ -8,6 +8,10 @@
 // - A changing request (POST, PUT, PATCH, DELETE) must carry an Origin whose host and
 //   port equal the request's own Host, and the per-server CSRF token from
 //   GET /api/session.
+// - Tunnel Manager's app window is a Wails webview: the page lives at wails.localhost
+//   (wails://wails on macOS and Linux) and Tunnel Manager's local proxy forwards its
+//   requests with Host 127.0.0.1:<port>. Its Origin is accepted in place of a matching
+//   one; the CSRF token is still required, and only a page served by this GUI can read it.
 // - Tunnel Manager's event endpoint (POST /api/events) needs no CSRF token, because
 //   Tunnel Manager is not a browser and sends no Origin; it still passes the Host check.
 
@@ -35,6 +39,21 @@ function originMatchesHost(origin, host) {
   }
 }
 
+function tunnelManagerWindowOrigin(origin) {
+  if (!origin) return false;
+  try {
+    const url = new URL(origin);
+    if (url.protocol === "wails:") return true;
+    return (url.protocol === "http:" || url.protocol === "https:") && /(^|\.)wails\.localhost$/i.test(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function originAllowed(origin, host) {
+  return originMatchesHost(origin, host) || tunnelManagerWindowOrigin(origin);
+}
+
 function tokensEqual(a, b) {
   const left = Buffer.from(String(a || ""));
   const right = Buffer.from(String(b || ""));
@@ -50,12 +69,12 @@ function check(req, pathname, token) {
   if (!CHANGING.has(req.method)) return null;
   if (CSRF_EXEMPT.has(pathname)) {
     const origin = req.headers.origin;
-    if (origin && !originMatchesHost(origin, host)) {
+    if (origin && !originAllowed(origin, host)) {
       return { status: 403, code: "bad_origin", message: "Cross-origin request refused." };
     }
     return null;
   }
-  if (!originMatchesHost(req.headers.origin, host)) {
+  if (!originAllowed(req.headers.origin, host)) {
     return { status: 403, code: "bad_origin", message: "Cross-origin request refused." };
   }
   if (!tokensEqual(req.headers["x-csrf-token"], token)) {
@@ -64,4 +83,4 @@ function check(req, pathname, token) {
   return null;
 }
 
-module.exports = { check, hostAllowed, newToken, originMatchesHost };
+module.exports = { check, hostAllowed, newToken, originAllowed, originMatchesHost, tunnelManagerWindowOrigin };

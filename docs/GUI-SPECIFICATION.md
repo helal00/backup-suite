@@ -125,7 +125,11 @@ downloadable files, and copy buttons.
   `127.0.0.1`, `localhost` or `[::1]`, with **any** port (Tunnel Manager
   chooses the local port); otherwise 403. Every changing request (`POST`,
   `PUT`, `DELETE`) must carry an `Origin` whose host and port equal the
-  request's own `Host`, and the per-page CSRF token from `GET /api/session`.
+  request's own `Host` (or the Origin of Tunnel Manager's app window,
+  `wails.localhost` or `wails://wails`, whose proxy rewrites `Host`), and the
+  per-page CSRF token from `GET /api/session`. Every live-stream message has
+  an id; a reconnect with `Last-Event-ID` gets only what it missed, because
+  that proxy ends the stream after each message.
   Tunnel Manager's event endpoint (`POST /api/events`) needs no CSRF token
   (Tunnel Manager sends no `Origin`), but still passes the `Host` check.
 - **G-ARC-8** Instance name and ports: remote "port" 4337 (the instance

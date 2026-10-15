@@ -3,11 +3,21 @@
 // Live status for every open tab: one `status` read per interval, fanned out over
 // Server-Sent Events. Nothing is polled while no tab is connected. A bounded
 // in-memory chart buffer keeps backup memory, CPU and server RAM for new tabs.
+//
+// Tunnel Manager's app window cannot stream: its proxy ends an event-stream response
+// once it has news and the page reconnects. So every message has an id
+// (<epoch>-<seq>), a reconnection that sends Last-Event-ID gets only the messages it
+// missed (or one fresh snapshot when they are no longer kept), and polling carries on
+// for a short grace period while no window is connected, so a reconnect never triggers
+// an extra status read.
 
 const HEARTBEAT_MS = 15000;
+const REPLAY_KEEP = 50;
+const IDLE_STOP_MS = 15000;
+const EPOCH = Date.now().toString(36);
 
 class Live {
-  constructor({ client, events, getSettings, log = () => {} }) {
+  constructor({ client, events, getSettings, log = () => {}, idleStopMs = IDLE_STOP_MS }) {
     this.client = client;
     this.events = events;
     this.getSettings = getSettings;
@@ -15,6 +25,10 @@ class Live {
     this.clients = new Set();
     this.timer = null;
     this.heartbeat = null;
+    this.idleStop = null;
+    this.idleStopMs = idleStopMs;
+    this.seq = 0;
+    this.recent = [];
     this.lastStatus = null;
     this.lastError = null;
     this.chart = [];
@@ -27,12 +41,36 @@ class Live {
     return Math.ceil((settings.general.chartMinutes * 60) / settings.general.refreshSeconds) + 1;
   }
 
-  addClient(res) {
+  currentId() {
+    return `${EPOCH}-${this.seq}`;
+  }
+
+  // The messages after Last-Event-ID, or null when they are not all kept (another
+  // epoch, too old or unknown): then the client gets a fresh snapshot.
+  missedSince(lastEventId) {
+    const match = /^([0-9a-z]+)-([0-9]+)$/.exec(String(lastEventId || ""));
+    if (!match || match[1] !== EPOCH) return null;
+    const seen = Number(match[2]);
+    if (seen > this.seq) return null;
+    if (seen === this.seq) return [];
+    const missed = this.recent.filter((message) => message.seq > seen);
+    if (missed.length === 0 || missed[0].seq !== seen + 1) return null;
+    return missed;
+  }
+
+  addClient(res, lastEventId = "") {
     this.clients.add(res);
-    this.send(res, "hello", { chart: this.chart, status: this.lastStatus, error: this.lastError });
+    if (this.idleStop) clearTimeout(this.idleStop);
+    this.idleStop = null;
+    const missed = this.missedSince(lastEventId);
+    if (missed === null) {
+      this.send(res, "hello", { chart: this.chart, status: this.lastStatus, error: this.lastError }, this.currentId());
+    } else {
+      for (const message of missed) this.write(res, message.text);
+    }
     if (!this.heartbeat) {
       this.heartbeat = setInterval(() => {
-        for (const client of this.clients) client.write(": keepalive\n\n");
+        for (const client of this.clients) this.write(client, ": keepalive\n\n");
       }, HEARTBEAT_MS);
       this.heartbeat.unref?.();
     }
@@ -41,29 +79,41 @@ class Live {
 
   removeClient(res) {
     this.clients.delete(res);
-    if (this.clients.size === 0) {
+    if (this.clients.size > 0 || this.idleStop) return;
+    this.idleStop = setTimeout(() => {
+      this.idleStop = null;
+      if (this.clients.size > 0) return;
       if (this.timer) clearTimeout(this.timer);
       this.timer = null;
       if (this.heartbeat) clearInterval(this.heartbeat);
       this.heartbeat = null;
-    }
+    }, this.idleStopMs);
+    this.idleStop.unref?.();
   }
 
-  send(res, type, data) {
+  write(res, text) {
     try {
-      res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+      res.write(text);
     } catch {
       this.removeClient(res);
     }
   }
 
+  send(res, type, data, id = "") {
+    this.write(res, `event: ${type}\n${id ? `id: ${id}\n` : ""}data: ${JSON.stringify(data)}\n\n`);
+  }
+
   broadcast(type, data) {
-    for (const client of this.clients) this.send(client, type, data);
+    this.seq += 1;
+    const text = `event: ${type}\nid: ${this.currentId()}\ndata: ${JSON.stringify(data)}\n\n`;
+    this.recent.push({ seq: this.seq, text });
+    if (this.recent.length > REPLAY_KEEP) this.recent.splice(0, this.recent.length - REPLAY_KEEP);
+    for (const client of this.clients) this.write(client, text);
   }
 
   // Requests an immediate refresh (after an action), keeping one poll at a time.
   nudge() {
-    if (this.clients.size === 0 || this.polling) return;
+    if ((this.clients.size === 0 && !this.idleStop) || this.polling) return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.poll();
@@ -71,7 +121,7 @@ class Live {
 
   async poll() {
     this.timer = null;
-    if (this.clients.size === 0) return;
+    if (this.clients.size === 0 && !this.idleStop) return;
     this.polling = true;
     try {
       const status = await this.client.call("status");
@@ -87,7 +137,7 @@ class Live {
       this.broadcast("status-error", this.lastError);
     } finally {
       this.polling = false;
-      if (this.clients.size > 0) {
+      if (this.clients.size > 0 || this.idleStop) {
         this.timer = setTimeout(() => this.poll(), this.getSettings().general.refreshSeconds * 1000);
         this.timer.unref?.();
       }
