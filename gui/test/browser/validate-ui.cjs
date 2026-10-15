@@ -124,6 +124,14 @@ async function main() {
             if (!/Running 5\/12/.test(chip)) failures.push(`${label}/${scheme}: state chip shows "${chip}"`);
             const cards = await page.$$eval(".entry-card", (nodes) => nodes.map((node) => node.textContent));
             if (cards.length < 2) failures.push(`${label}/${scheme}: expected at least 2 job cards, got ${cards.length}`);
+            const cardActions = await page.$$eval(".entry-card .entry-card-actions button", (nodes) => nodes.map((node) => node.textContent));
+            if (!["Back up", "Edit", "Remove"].every((text) => cardActions.includes(text))) failures.push(`${label}/${scheme}: job cards lack their actions (${cardActions.slice(0, 4)})`);
+            const order = await page.evaluate(() => {
+              const home = document.querySelector("#home-button");
+              const jobs = document.querySelector("#jobs-heading");
+              return Boolean(home && jobs && (home.compareDocumentPosition(jobs) & Node.DOCUMENT_POSITION_FOLLOWING) && jobs.closest(".sidebar-jobs")?.contains(document.querySelector("#new-job-button")) && !jobs.closest(".sidebar-jobs")?.contains(home));
+            });
+            if (!order) failures.push(`${label}/${scheme}: the sidebar must show Home first, then Backup jobs with + New job and the cards`);
             if (!(await page.isHidden("#backend-banner"))) failures.push(`${label}/${scheme}: the outdated-backend notice shows for a current backend`);
           }
           const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -197,7 +205,7 @@ async function main() {
         // the menu is opened everywhere for its layout).
         await page.goto(`${base}/#job/workspace/changing`);
         await page.waitForSelector('#section-body tr:has-text("data/cache.db")');
-        await page.click('#section-body tr:has-text("data/cache.db")', { button: "right" });
+        await page.click('#section-body tr:has-text("data/cache.db") button:has-text("Exclude")');
         await page.waitForSelector(".context-menu");
         const menuText = await page.textContent(".context-menu");
         if (!/in beta only/i.test(menuText) || !/every project of workspace/i.test(menuText) || !menuText.includes("data/")) failures.push(`${label}/${scheme}: changing-file menu reads "${menuText}"`);

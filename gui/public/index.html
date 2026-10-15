@@ -44,27 +44,39 @@
   </header>
 
   <div class="layout" id="layout">
-    <nav class="sidebar panel" id="sidebar" aria-label="Backup jobs">
-      <div class="panel-titlebar">
-        <h2>Backup jobs</h2>
-        <div class="titlebar-actions">
-          <button class="help-button" type="button" data-help="navigation" aria-label="Help: backup jobs">?</button>
+    <nav class="sidebar panel" id="sidebar" aria-label="Overview and backup jobs">
+      <div class="sidebar-group sidebar-home">
+        <div class="panel-titlebar">
+          <h2>Overview</h2>
+          <div class="titlebar-actions">
+            <button class="help-button" type="button" data-help="home" aria-label="Help: overview">?</button>
+          </div>
+        </div>
+        <div class="sidebar-tools">
+          <button type="button" id="home-button" class="home-card" aria-current="page">
+            <strong>Home</strong>
+            <span id="home-card-note" class="muted">System condition</span>
+          </button>
         </div>
       </div>
-      <div class="sidebar-tools">
-        <button type="button" id="new-job-button" class="primary-button">+ New job</button>
-        <button type="button" id="home-button" class="home-card" aria-current="page">
-          <strong>Home</strong>
-          <span id="home-card-note" class="muted">System condition</span>
-        </button>
-        <label class="sr-only" for="entry-filter">Show jobs</label>
-        <select id="entry-filter">
-          <option value="all">All jobs</option>
-          <option value="enabled">Enabled only</option>
-          <option value="attention">Needing attention</option>
-        </select>
-      </div>
-      <div id="entry-list" class="entry-list" aria-live="polite"><p class="muted">Loading entries…</p></div>
+      <section class="sidebar-group sidebar-jobs" aria-labelledby="jobs-heading">
+        <div class="panel-titlebar">
+          <h2 id="jobs-heading">Backup jobs</h2>
+          <div class="titlebar-actions">
+            <button class="help-button" type="button" data-help="navigation" aria-label="Help: backup jobs">?</button>
+          </div>
+        </div>
+        <div class="sidebar-tools">
+          <button type="button" id="new-job-button" class="primary-button">+ New job</button>
+          <label class="sr-only" for="entry-filter">Show jobs</label>
+          <select id="entry-filter">
+            <option value="all">All jobs</option>
+            <option value="enabled">Enabled only</option>
+            <option value="attention">Needing attention</option>
+          </select>
+        </div>
+        <div id="entry-list" class="entry-list" aria-live="polite"><p class="muted">Loading entries…</p></div>
+      </section>
     </nav>
 
     <main class="main panel" id="main" tabindex="-1">

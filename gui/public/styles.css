@@ -396,6 +396,29 @@ a { color: var(--accent); }
 .sidebar-tools { display: flex; flex-direction: column; gap: 0.45rem; padding: 0.5rem; border-bottom: 1px solid var(--border); }
 .sidebar-tools select { width: 100%; }
 .entry-list { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.5rem; overflow: auto; }
+/* Sidebar: Overview (Home) on top, then Backup jobs (new job, filter, job cards). */
+.sidebar-group { display: flex; flex-direction: column; }
+.sidebar-home { flex: none; border-bottom: 1px solid var(--border); }
+.sidebar-home .sidebar-tools { border-bottom: 0; }
+.sidebar-jobs { flex: 1 1 auto; min-height: 0; }
+.sidebar-jobs .entry-list { flex: 1 1 auto; min-height: 0; }
+.entry-card-open {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.3rem;
+  width: 100%;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.entry-card-open:hover { background: transparent; }
+.entry-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.3rem; padding-top: 0.35rem; border-top: 1px solid var(--border); }
+.entry-card-actions .small-button { padding: 0.15rem 0.5rem; font-size: 0.78rem; }
 .home-card, .entry-card {
   display: flex;
   flex-direction: column;
@@ -800,6 +823,9 @@ mark { background: var(--warn-soft); color: var(--text); outline: 1px solid var(
 .context-menu button span { font-family: var(--mono, ui-monospace, monospace); }
 .context-menu-heading { padding: 0.45rem 0.6rem 0.2rem; font-size: 0.78rem; font-weight: 700; color: var(--muted); }
 .context-menu-heading:not(:first-child) { border-top: 1px solid var(--border); margin-top: 0.25rem; }
-.changing-table tbody tr { cursor: context-menu; }
+.changing-table td code { overflow-wrap: anywhere; word-break: break-word; }
+.changing-table .actions-cell { text-align: right; white-space: nowrap; width: 1%; }
 .pattern-list { list-style: none; padding-left: 0; }
 .pattern-list li { display: flex; align-items: center; gap: 0.5rem; padding: 0.15rem 0; }
+.entry-card:hover { border-color: var(--accent); }
+.entry-card:focus-within { border-color: var(--accent); }

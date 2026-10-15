@@ -1287,11 +1287,11 @@
       const condition = entryCondition(entry);
       const selected = state.view.kind === "entry" && state.view.name === entry.name;
       const last = entry.last_run;
-      return h("button", {
-        type: "button", class: `entry-card ${entry.enabled ? "" : "is-disabled"} condition-${condition.key}`,
-        "aria-current": selected ? "page" : null, dataset: { entry: entry.name },
-        onclick: () => openEntry(entry.name)
+      return h("div", {
+        class: `entry-card ${entry.enabled ? "" : "is-disabled"} condition-${condition.key}`,
+        "aria-current": selected ? "page" : null, dataset: { entry: entry.name }
       },
+      h("button", { type: "button", class: "entry-card-open", "aria-label": `Open job ${entry.name}`, onclick: () => openEntry(entry.name) },
       h("span", { class: "entry-card-head" }, h("strong", {}, entry.name), pill(entry.enabled ? "yes" : "no", entry.enabled ? "ok" : "")),
       h("span", { class: "entry-card-status" }, pill(condition.label, condition.kind),
         entry.running && entry.current_project ? h("span", { class: "muted" }, ` ${entry.current_project.split("/").pop()}`) : null),
@@ -1300,10 +1300,24 @@
       entry.enabled ? h("span", { class: "entry-card-meta" },
         last ? h("span", {}, "last ", h("span", {}, relative(parseTime(last.ended || last.run)) || "—")) : "never run",
         last && last.changes_known ? ` · ${last.new + last.updated + last.removed} changed` : "",
-        entry.changing_files ? ` · ${entry.changing_files} changing` : "") : null);
+        entry.changing_files ? ` · ${entry.changing_files} changing` : "") : null),
+      jobCardActions(entry, data));
     });
     append(clear(host), [cards.length ? cards : h("p", { class: "empty" }, filter === "attention" ? "No job needs attention." : "No backup jobs yet. Add one with + New job.")]);
     if (data.legacy) host.append(h("p", { class: "muted small-note" }, "Per-job history starts with the next backup run; until then the latest run's log is used."));
+  }
+
+  // The small action buttons on a job card (the same actions as on the job's page).
+  function jobCardActions(entry, data) {
+    const running = ["running", "paused"].includes(fileBackupState(state.status).key);
+    return h("div", { class: "entry-card-actions" },
+      h("button", { type: "button", class: "small-button primary-button", disabled: !entry.enabled || Boolean(entry.problem) || running,
+        title: running ? "A backup is running; try again when it has finished." : !entry.enabled ? "Enable the job first." : `Back up ${entry.name} now`,
+        onclick: () => jobRunNow(entry) }, "Back up"),
+      h("button", { type: "button", class: "small-button", title: `Edit ${entry.name}`, onclick: () => openJobEditor(entry.name) }, "Edit"),
+      h("button", { type: "button", class: "small-button", title: `${entry.enabled ? "Disable" : "Enable"} ${entry.name}`,
+        onclick: () => jobSetEnabled(entry, data.sha256, !entry.enabled) }, entry.enabled ? "Disable" : "Enable"),
+      h("button", { type: "button", class: "small-button danger-button", title: `Remove ${entry.name}`, onclick: () => jobRemove(entry, data.sha256) }, "Remove"));
   }
 
   function openEntry(name, tab = "overview") {
@@ -1439,7 +1453,7 @@
     body.append(cards);
   }
 
-  // ------------------------------------------------------------------ exclude a changing file
+  // ------------------------------------------------------------------ exclude a changing file (Exclude… menu)
 
   let openContextMenu = null;
 
@@ -1477,8 +1491,8 @@
     }
   }
 
-  // showContextMenu(x, y, [{heading} | {label, detail, action}], focus element to restore)
-  function showContextMenu(x, y, items, restoreFocus) {
+  // showContextMenu(x, y, [{heading} | {label, detail, action}], focus element to restore, align the right edge to x)
+  function showContextMenu(x, y, items, restoreFocus, alignRight = false) {
     closeContextMenu();
     const menu = h("div", { class: "popover-menu context-menu", role: "menu" }, items.map((item) => item.heading
       ? h("div", { class: "context-menu-heading", role: "presentation" }, item.heading)
@@ -1487,7 +1501,7 @@
     document.body.append(menu);
     const width = menu.offsetWidth;
     const height = menu.offsetHeight;
-    menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - width - 8))}px`;
+    menu.style.left = `${Math.max(8, Math.min(alignRight ? x - width : x, window.innerWidth - width - 8))}px`;
     menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - 8))}px`;
     openContextMenu = { menu, restoreFocus };
     document.addEventListener("pointerdown", contextMenuOutside, true);
@@ -1515,7 +1529,6 @@
   }
 
   function changingRowMenu(event, data, row) {
-    event.preventDefault();
     const entry = data.entry;
     const child = entry.isolation === "children" ? String(row.project || "").split("/").pop() : "";
     const targets = excludeTargets(row.path);
@@ -1526,15 +1539,10 @@
     }
     items.push({ heading: child ? `Exclude in every project of ${entry.name} (each folder in ${entry.source})` : `Exclude in ${entry.name}` });
     for (const target of targets) items.push({ label: target.shown, detail: target.folder ? "this folder and everything in it" : "this file", action: () => excludeChanging(data, target, "job", "") });
-    const anchor = event.currentTarget instanceof Element ? event.currentTarget : null;
-    let x = event.clientX;
-    let y = event.clientY;
-    if (!x && !y && anchor) {
-      const box = anchor.getBoundingClientRect();
-      x = box.left;
-      y = box.bottom;
-    }
-    showContextMenu(x, y, items, anchor);
+    // Opened from the row's Exclude… button, just below it and ending at its right edge.
+    const anchor = event.currentTarget;
+    const box = anchor.getBoundingClientRect();
+    showContextMenu(box.right, box.bottom + 4, items, anchor, true);
   }
 
   async function excludeChanging(data, target, scope, child) {
@@ -1768,14 +1776,14 @@
     changing: (panel, data) => {
       panel.append(h("p", { class: "muted" }, `A file modified in the last ${data.active_window_s}s before its project syncs, or seen changing during the upload, is skipped: its previous remote version stays in place and it is tried again next run. A file skipped ${data.max_deferrals} runs in a row never settles, and you are notified (the number of runs is FILE_ACTIVE_MAX_DEFERRALS in Admin → Settings).`));
       const stale = data.changing.filter((row) => row.count >= data.max_deferrals).length;
-      if (stale) panel.append(h("p", { class: "notice" }, `${stale} file(s) never settle. Decide for each: exclude it (or its folder) in this project or in every project of the job with Exclude… or a right-click on the row, or leave it and stop its writer briefly so it can be backed up.`));
+      if (stale) panel.append(h("p", { class: "notice" }, `${stale} file(s) never settle. Decide for each: Exclude… excludes it (or one of its folders) in this project or in every project of the job; or leave it and stop its writer briefly so it can be backed up.`));
       panel.append(data.changing.length ? h("div", { class: "table-wrap" }, h("table", { class: "changing-table" },
-        h("thead", {}, h("tr", {}, h("th", {}, "Project"), h("th", {}, "Path"), h("th", { class: "num" }, "Runs skipped in a row"), h("th", {}, "Last seen"), h("th", {}, h("span", { class: "sr-only" }, "Actions")))),
-        h("tbody", {}, data.changing.map((row) => h("tr", { class: row.count >= data.max_deferrals ? "highlight" : "", oncontextmenu: (event) => changingRowMenu(event, data, row) },
+        h("thead", {}, h("tr", {}, h("th", {}, "Project"), h("th", {}, "Path"), h("th", { class: "num" }, "Runs skipped in a row"), h("th", {}, "Last seen"), h("th", { class: "actions-cell" }, h("span", { class: "sr-only" }, "Actions")))),
+        h("tbody", {}, data.changing.map((row) => h("tr", { class: row.count >= data.max_deferrals ? "highlight" : "" },
           h("td", {}, row.project.split("/").pop()), h("td", {}, h("code", {}, row.path)),
           h("td", { class: "num" }, row.count >= data.max_deferrals ? h("span", {}, String(row.count), " ", pill("never settles", "warn")) : String(row.count)),
           h("td", {}, timeNode(row.updated)),
-          h("td", {}, h("button", { type: "button", class: "small-button", "aria-haspopup": "menu", title: "Exclude this file or a parent folder", onclick: (event) => changingRowMenu(event, data, row) }, "Exclude…"))))))) : h("p", { class: "empty" }, "No file of this job is being skipped."));
+          h("td", { class: "actions-cell" }, h("button", { type: "button", class: "small-button", "aria-haspopup": "menu", title: "Exclude this file or a parent folder", onclick: (event) => changingRowMenu(event, data, row) }, "Exclude…"))))))) : h("p", { class: "empty" }, "No file of this job is being skipped."));
     },
 
     excludes: (panel, data) => {
@@ -1793,7 +1801,7 @@
       };
       const jobExcludes = data.patterns?.excludes || [];
       const projectExcludes = Object.entries(data.project_patterns || {});
-      panel.append(h("h3", {}, "Excluded by this job"), h("p", { class: "muted" }, "Kept in Backup Suite's config, not in the projects' folders, and relative to each project's folder. Added from Changing files (Exclude…, or right-click) or in the job editor."));
+      panel.append(h("h3", {}, "Excluded by this job"), h("p", { class: "muted" }, "Kept in Backup Suite's config, not in the projects' folders, and relative to each project's folder. Added with Exclude… on Changing files, or in the job editor."));
       const patternList = (patterns, scope, child) => h("ul", { class: "pattern-list" }, patterns.map((pattern) => h("li", {}, h("code", {}, pattern), " ",
         h("button", { type: "button", class: "small-button", onclick: () => removeJobExclude(entry, scope, child, pattern) }, "Remove"))));
       if (jobExcludes.length) panel.append(h("div", {}, h("p", {}, entry.isolation === "children" ? "In every project:" : "In this job:"), patternList(jobExcludes, "job", "")));
@@ -2417,7 +2425,7 @@
   function jobActionBar(data) {
     const entry = data.entry;
     const running = ["running", "paused"].includes(fileBackupState(state.status).key);
-    return h("div", { class: "toolbar-row tight job-actions" },
+    return h("div", { class: "toolbar-row tight end job-actions" },
       h("button", { type: "button", class: "primary-button", dataset: { key: "job-run" }, disabled: !entry.enabled || Boolean(entry.problem) || running,
         title: running ? "A backup is running; try again when it has finished." : !entry.enabled ? "Enable the job first." : "", onclick: () => jobRunNow(entry) }, "Back up now"),
       h("button", { type: "button", dataset: { key: "job-edit" }, onclick: () => openJobEditor(entry.name) }, "Edit…"),

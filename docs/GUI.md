@@ -19,7 +19,7 @@ the acceptance checks are in [GUI-SPECIFICATION.md](GUI-SPECIFICATION.md).
   Source & destination (sizes measured on request).
 - **Files that never settle:** a file skipped `FILE_ACTIVE_MAX_DEFERRALS` runs in a
   row (12 by default) is reported once per that many runs. On Changing files,
-  **Exclude…** (or a right-click on the row) excludes the file or any of its parent
+  **Exclude…** on a row excludes the file or any of its parent
   folders, up to the project's own folder, either in that project only
   (`<config>/jobs/<job>.projects/<child folder>.excludes`) or in every project of the
   job (`<config>/jobs/<job>.excludes`). Nothing is written into the projects; the
