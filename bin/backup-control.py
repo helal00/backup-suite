@@ -2615,43 +2615,72 @@ def verb_remote_browse(request):
     return {"remote": remote, "path": folder.strip("/"), "base": base, "folders": folders, "exists": True}
 
 
+# Pseudo and runtime file systems: nothing to back up there, and listing them is noise.
+BROWSE_HIDDEN_TREES = ["/proc", "/sys", "/dev", "/run"]
+
+
+def caller_home():
+    try:
+        import pwd
+        uid = ENV.get("BSC_CALLER_UID", "")
+        return pwd.getpwuid(int(uid) if uid.isdigit() else os.getuid()).pw_dir
+    except (KeyError, ImportError, ValueError):
+        return "/"
+
+
+def source_choice(path, roots, protected):
+    """("", "") when a job may back up this folder, else a reason."""
+    if any(path_within(path, folder) for folder in protected):
+        return "It holds system or Backup Suite files."
+    if not any(path_within(path, root) for root in roots):
+        return "Not under the folders a job may back up (%s)." % ", ".join(roots)
+    return ""
+
+
 def verb_fs_browse(request):
-    """Folders on this server, for the job source picker: only under
-    FILE_JOB_SOURCE_ROOTS, never inside system or Backup Suite folders."""
+    """Folders on this server for the job source picker. Any folder can be
+    browsed (names of folders only, never files), so the picker works like a
+    normal one; only folders under FILE_JOB_SOURCE_ROOTS, outside system and
+    Backup Suite folders, can be chosen. Pseudo file systems are not listed."""
     args = get_args(request, ["path"])
     path = args.get("path") or ""
     roots = job_source_roots()
-    if not path:
-        return {"path": "", "parent": None, "roots": roots,
-                "folders": [{"name": root, "path": root, "allowed": True} for root in roots if os.path.isdir(root)]}
-    if not isinstance(path, str) or not path.startswith("/") or "\x00" in path:
-        invalid("path must be an absolute folder.")
-    real = os.path.realpath(path)
     protected = protected_folders()
-    # Outside the allowed folders is an answer, not an error: the picker starts at
-    # the top instead.
-    if not any(path_within(real, root) for root in roots):
-        return {"path": real, "parent": "", "roots": roots, "folders": [],
-                "denied": "Only folders under %s can be backed up." % ", ".join(roots)}
-    if any(path_within(real, folder) for folder in protected):
-        return {"path": real, "parent": "", "roots": roots, "folders": [], "denied": "This folder holds system or Backup Suite files."}
+    home = caller_home()
+    if not path:
+        path = home if os.path.isdir(home) else "/"
+    if not isinstance(path, str) or not path.startswith("/") or "\x00" in path or len(path) > 4096:
+        invalid("path must be an absolute folder, such as /home/user.")
+    real = os.path.realpath(path)
+    if not os.path.isdir(real):
+        raise ControlError("not_found", "%s is not a folder on this server." % path)
+    parent = os.path.dirname(real.rstrip("/")) if real != "/" else None
+    base = {"path": real, "parent": parent, "home": home, "roots": roots}
+    if any(path_within(real, tree) for tree in BROWSE_HIDDEN_TREES) and real != "/":
+        reason = source_choice(real, roots, protected)
+        return dict(base, folders=[], selectable=False, reason=reason, denied="%s is a system file system; nothing here can be backed up." % real)
     try:
         names = sorted(os.listdir(real), key=str.lower)
     except OSError as error:
         raise ControlError("not_found", "Cannot open %s: %s" % (path, error.strerror))
     folders = []
+    truncated = False
     for name in names:
         full = os.path.join(real, name)
         if not os.path.isdir(full) or os.path.islink(full):
             continue
-        allowed = not any(path_within(full, folder) or folder.startswith(full.rstrip("/") + "/") for folder in protected)
-        folders.append({"name": name, "path": full, "allowed": allowed, "hidden": name.startswith(".")})
+        if full in BROWSE_HIDDEN_TREES:
+            continue
         if len(folders) >= 2000:
+            truncated = True
             break
-    parent = os.path.dirname(real.rstrip("/"))
-    if not any(path_within(parent, root) for root in roots):
-        parent = ""
-    return {"path": real, "parent": parent, "roots": roots, "folders": folders}
+        reason = source_choice(full, roots, protected)
+        # A folder that cannot be chosen may still lead to one that can (/var to /var/www).
+        leads = not reason or any(path_within(root, full) for root in roots)
+        folders.append({"name": name, "path": full, "allowed": True, "selectable": not reason, "reason": reason,
+                        "leads_to_allowed": leads, "hidden": name.startswith(".")})
+    reason = source_choice(real, roots, protected)
+    return dict(base, folders=folders, truncated=truncated, selectable=not reason, reason=reason)
 
 
 VERBS = {

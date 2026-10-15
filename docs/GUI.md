@@ -39,8 +39,14 @@ the acceptance checks are in [GUI-SPECIFICATION.md](GUI-SPECIFICATION.md).
   and removed. A job sends its backup to the default destination or to one of these
   (destination mode `remote`, value `name:folder`). Only cloud and network types, no
   option that reads a file or runs a program; secrets are never shown.
-- **Folder pickers:** the job's source folder (only under `FILE_JOB_SOURCE_ROOTS`)
-  and its folder on the destination are chosen by browsing.
+- **Folder pickers:** the job's source folder and its folder on the destination are
+  chosen by browsing, with a path box, Home, Up, Refresh and Go. On the server every
+  folder can be browsed (folder names only; /proc, /sys, /dev and /run are not
+  listed), but only a folder a job may back up can be used: under
+  `FILE_JOB_SOURCE_ROOTS`, never a system or Backup Suite folder. That list is set
+  in `global.conf` on the server only, never from the GUI: in system mode backups
+  run as root, so a GUI session that could widen it could send `/etc/shadow` or
+  `/root/.ssh` to a destination it set up itself.
 - **Notifications** are generic: one message per event goes to every enabled channel
   (ntfy now; Telegram, WhatsApp, email and SMS later). The bell lists them all with
   each channel's result; Admin → Notifications has each channel's switch, settings,

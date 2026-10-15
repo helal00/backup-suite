@@ -1889,12 +1889,14 @@
 
   // ------------------------------------------------------------------ folder picker
   //
-  // Like agentw-gui's folder picker in New Project: browse folders on this server
-  // (fs.browse: only under FILE_JOB_SOURCE_ROOTS) or on a destination
-  // (remote.browse), and use one. On a destination a new sub-folder name can be
-  // added; the first backup creates it.
+  // Like agentw-gui's folder picker in New Project: a path box with Home, Up,
+  // Refresh and Go, and the folders of the current one. On this server
+  // (fs.browse) every folder can be browsed, but only one a job may back up
+  // (under FILE_JOB_SOURCE_ROOTS, outside system and Backup Suite folders) can be
+  // used. On a destination (remote.browse) a new sub-folder name can be added; the
+  // first backup creates it.
 
-  const picker = { kind: "fs", remote: "", path: "", parent: null, resolve: null, data: null };
+  const picker = { kind: "fs", remote: "", path: "", resolve: null, data: null, seq: 0 };
 
   function closePicker(value) {
     const dialog = $("#picker-dialog");
@@ -1904,16 +1906,28 @@
     if (resolve) resolve(value);
   }
 
+  function pickerJoin(base, name) {
+    if (picker.kind === "fs") return base === "/" ? `/${name}` : `${base}/${name}`;
+    return base ? `${base}/${name}` : name;
+  }
+
+  function pickerRemoteLabel(data, path) {
+    return `${data.base}${path ? `${data.base.endsWith(":") ? "" : "/"}${path}` : ""}`;
+  }
+
   async function pickerLoad(path, { fallback = false } = {}) {
+    const seq = ++picker.seq;
     const list = clear($("#picker-list"));
     list.append(h("li", { class: "muted" }, "Loading…"));
+    let data;
     try {
-      picker.data = picker.kind === "fs"
+      data = picker.kind === "fs"
         ? await control("fs.browse", path ? { path } : {})
         : await control("remote.browse", { remote: picker.remote, path: path || "" });
     } catch (error) {
-      // A starting folder that cannot be opened (typed by hand, outside the allowed
-      // folders): start at the top instead, and say why.
+      if (seq !== picker.seq) return;
+      // A starting folder that cannot be opened (typed by hand, or gone): start at
+      // the home folder instead, and say why.
       if (fallback && path) {
         await pickerLoad("");
         $("#picker-list").prepend(h("li", { class: "muted" }, `${path}: ${errorText(error)}`));
@@ -1922,40 +1936,57 @@
       clear(list).append(h("li", {}, errorNode(error)));
       return;
     }
-    if (picker.data.denied) {
-      const denied = `${path}: ${picker.data.denied}`;
-      await pickerLoad("");
-      $("#picker-list").prepend(h("li", { class: "muted" }, denied));
-      return;
-    }
-    const data = picker.data;
+    if (seq !== picker.seq) return;
+    picker.data = data;
     picker.path = data.path || "";
-    $("#picker-current").textContent = picker.kind === "fs" ? (picker.path || "Allowed folders") : `${data.base}${picker.path ? `${data.base.endsWith(":") ? "" : "/"}${picker.path}` : ""}`;
-    $("#picker-up").disabled = picker.kind === "fs" ? !picker.path : !picker.path;
-    $("#picker-select").disabled = picker.kind === "fs" && !picker.path;
+    const input = $("#picker-path-input");
+    input.value = picker.path;
+    $("#picker-up").disabled = picker.kind === "fs" ? !data.parent : !picker.path;
     const showHidden = $("#picker-hidden").checked;
-    const folders = picker.kind === "fs"
-      ? data.folders.filter((folder) => showHidden || !folder.hidden)
-      : data.folders.map((name) => ({ name, path: picker.path ? `${picker.path}/${name}` : name, allowed: true, hidden: name.startsWith(".") })).filter((folder) => showHidden || !folder.hidden);
+    const folders = (picker.kind === "fs"
+      ? data.folders
+      : data.folders.map((name) => ({ name, path: pickerJoin(picker.path, name), selectable: true, leads_to_allowed: true, hidden: name.startsWith(".") })))
+      .filter((folder) => showHidden || !folder.hidden);
     clear(list);
+    if (data.denied) list.append(h("li", { class: "muted" }, data.denied));
     if (picker.kind === "remote" && !data.exists) list.append(h("li", { class: "muted" }, "This folder does not exist yet; the first backup creates it."));
-    if (!folders.length && data.exists !== false) list.append(h("li", { class: "muted" }, "No sub-folders."));
+    if (!folders.length && !data.denied && data.exists !== false) list.append(h("li", { class: "muted" }, "No sub-folders."));
     for (const folder of folders) {
+      const dim = picker.kind === "fs" && !folder.selectable && !folder.leads_to_allowed;
       list.append(h("li", {}, h("button", {
-        type: "button", class: "picker-item", disabled: !folder.allowed,
-        title: folder.allowed ? `Open ${folder.name}` : "Holds system or Backup Suite files: cannot be backed up",
+        type: "button", class: `picker-item ${dim ? "is-dim" : ""}`,
+        title: folder.selectable ? `Open ${folder.name}` : `Open ${folder.name}. ${folder.reason || ""}`,
         onclick: () => pickerLoad(folder.path)
-      }, "📁 ", folder.name, folder.allowed ? "" : " (not allowed)")));
+      }, h("span", { "aria-hidden": "true" }, "📁 "), folder.name)));
+    }
+    if (data.truncated) list.append(h("li", { class: "muted" }, "Only the first 2000 folders are listed; type a path above."));
+    const note = $("#picker-note");
+    const select = $("#picker-select");
+    if (picker.kind === "fs") {
+      select.disabled = !data.selectable;
+      note.className = `notice ${data.selectable ? "info" : "warn"} picker-note`;
+      note.textContent = data.selectable
+        ? `Browsing folders on the server, not on your computer. ${picker.path} can be backed up.`
+        : `Browsing folders on the server, not on your computer. ${picker.path} cannot be used: ${data.reason} Jobs may back up folders under ${(data.roots || []).join(", ")} (FILE_JOB_SOURCE_ROOTS in global.conf, changed only on the server).`;
+    } else {
+      select.disabled = false;
+      note.className = "notice info picker-note";
+      note.textContent = `Folder on the destination: ${pickerRemoteLabel(data, picker.path)}`;
     }
   }
 
   function openPicker({ kind, remote = "", start = "", title, eyebrow }) {
     picker.kind = kind;
     picker.remote = remote;
+    picker.data = null;
     $("#picker-title").textContent = title || "Choose a folder";
     $("#picker-eyebrow").textContent = eyebrow || (kind === "fs" ? "Folder on this server" : "Folder on the destination");
+    $("#picker-path-label").textContent = kind === "fs" ? "Path on this server" : "Folder on the destination (relative)";
+    $("#picker-home").textContent = kind === "fs" ? "Home" : "Top";
+    $("#picker-home").title = kind === "fs" ? "Your home folder" : "The top of the destination";
     $("#picker-new").hidden = kind !== "remote";
     $("#picker-new-name").value = "";
+    $("#picker-path-input").value = start || "";
     $("#picker-dialog").showModal();
     pickerLoad(start, { fallback: true });
     return new Promise((resolve) => { picker.resolve = resolve; });
@@ -1966,9 +1997,20 @@
     $("#picker-cancel").addEventListener("click", () => closePicker(null));
     $("#picker-dialog").addEventListener("cancel", () => closePicker(null));
     $("#picker-hidden").addEventListener("change", () => pickerLoad(picker.path));
+    $("#picker-refresh").addEventListener("click", () => pickerLoad(picker.path));
+    $("#picker-home").addEventListener("click", () => pickerLoad(picker.kind === "fs" ? (picker.data?.home || "") : ""));
     $("#picker-up").addEventListener("click", () => {
-      if (picker.kind === "fs") pickerLoad(picker.data?.parent || "");
+      if (picker.kind === "fs") pickerLoad(picker.data?.parent || "/");
       else pickerLoad(picker.path.split("/").slice(0, -1).join("/"));
+    });
+    $("#picker-go-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      let typed = $("#picker-path-input").value.trim();
+      if (picker.kind === "fs") {
+        if (typed.startsWith("~")) typed = (picker.data?.home || "") + typed.slice(1);
+        if (typed && !typed.startsWith("/")) typed = pickerJoin(picker.path || "/", typed);
+      } else typed = typed.replace(/^\/+|\/+$/g, "");
+      pickerLoad(typed);
     });
     $("#picker-select").addEventListener("click", () => {
       let value = picker.path;

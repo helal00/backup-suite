@@ -380,9 +380,19 @@
       </div>
       <button class="icon-button small" type="button" id="picker-close" aria-label="Close">&#10005;</button>
     </div>
-    <div class="picker-path"><button type="button" id="picker-up" title="Up one folder">&#8593; Up</button><code id="picker-current"></code></div>
-    <label class="inline-check"><input type="checkbox" id="picker-hidden"><span>Show hidden folders</span></label>
+    <form id="picker-go-form" class="picker-go">
+      <label for="picker-path-input" id="picker-path-label">Path on this server</label>
+      <input type="text" id="picker-path-input" spellcheck="false" autocomplete="off" autocapitalize="off">
+      <div class="toolbar-row tight picker-nav">
+        <button type="button" id="picker-home" title="Your home folder">Home</button>
+        <button type="button" id="picker-up" title="Up one folder">Up</button>
+        <button type="button" id="picker-refresh" title="List this folder again">Refresh</button>
+        <button type="submit" id="picker-go" title="Open the path typed above">Go</button>
+        <label class="inline-check"><input type="checkbox" id="picker-hidden"><span>Show hidden folders</span></label>
+      </div>
+    </form>
     <ul id="picker-list" class="picker-list" aria-live="polite"></ul>
+    <p id="picker-note" class="notice info picker-note"></p>
     <div id="picker-new" class="copy-row" hidden>
       <input type="text" id="picker-new-name" spellcheck="false" autocomplete="off" placeholder="new sub-folder (created by the first backup)" aria-label="New sub-folder name">
     </div>

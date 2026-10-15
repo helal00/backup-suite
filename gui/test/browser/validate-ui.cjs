@@ -165,10 +165,18 @@ async function main() {
           await page.waitForSelector("#job-check .notice.bad");
           if (!(await page.isDisabled("#job-save-button"))) failures.push("job editor: save must be disabled for /etc");
           await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-job-editor-refused.png`) });
-          // The folder picker: open the allowed root, then gamma, and use it.
+          // The folder picker: it opens at /etc (browsable, not usable), Up goes to /,
+          // then a typed path, source, gamma, and use it.
           await page.click("#job-browse-source");
-          await page.waitForSelector("#picker-list .picker-item");
-          await page.click("#picker-list .picker-item");
+          await page.waitForFunction(() => document.querySelector("#picker-path-input").value === "/etc" && document.querySelector("#picker-list .picker-item"));
+          if (!(await page.isDisabled("#picker-select"))) failures.push("picker: /etc must not be usable");
+          if (!/cannot be used/.test(await page.textContent("#picker-note"))) failures.push("picker: the note must say why /etc cannot be used");
+          await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-picker-etc.png`) });
+          await page.click("#picker-up");
+          await page.waitForFunction(() => document.querySelector("#picker-path-input").value === "/");
+          if (await page.$('#picker-list .picker-item:text-is("📁 proc")')) failures.push("picker: /proc must not be listed");
+          await page.fill("#picker-path-input", path.dirname(fixture.stateDir));
+          await page.click("#picker-go");
           await page.waitForSelector('#picker-list .picker-item:has-text("source")');
           await page.click('#picker-list .picker-item:has-text("source")');
           await page.waitForSelector('#picker-list .picker-item:has-text("gamma")');

@@ -1700,15 +1700,22 @@ test_control_destinations() {
     reply=$(control_call "$test_root" '{"verb":"remote.delete","args":{"name":"gd"}}')
     [ "$(json_field "$reply" 'd["data"]["deleted"]')" = "True" ] || fail_test "delete: $reply"
 
-    # The folder picker.
+    # The folder picker: any folder can be browsed (folders only), only allowed
+    # ones can be chosen, and pseudo file systems are not listed.
     reply=$(control_call "$test_root" '{"verb":"fs.browse","args":{}}')
-    [ "$(json_field "$reply" 'd["data"]["folders"][0]["path"]')" = "$(realpath "$test_root")" ] || fail_test "picker roots: $reply"
+    [ "$(json_field "$reply" 'd["data"]["path"] == d["data"]["home"]')" = "True" ] || fail_test "the picker must start at the caller's home: $reply"
     reply=$(control_call "$test_root" "{\"verb\":\"fs.browse\",\"args\":{\"path\":\"$test_root/web\"}}")
-    [ "$(json_field "$reply" '[f["name"] for f in d["data"]["folders"]]')" = "['site']" ] || fail_test "picker listing: $reply"
+    [ "$(json_field "$reply" '[f["name"] for f in d["data"]["folders"]] == ["site"] and d["data"]["folders"][0]["selectable"] and d["data"]["selectable"]')" = "True" ] || fail_test "picker listing: $reply"
     reply=$(control_call "$test_root" "{\"verb\":\"fs.browse\",\"args\":{\"path\":\"$test_root\"}}")
-    [ "$(json_field "$reply" '[f["allowed"] for f in d["data"]["folders"] if f["name"] == "config"]')" = "[False]" ] || fail_test "the config folder must not be selectable: $reply"
+    [ "$(json_field "$reply" '[f["selectable"] for f in d["data"]["folders"] if f["name"] == "config"]')" = "[False]" ] || fail_test "the config folder must not be selectable: $reply"
     reply=$(control_call "$test_root" '{"verb":"fs.browse","args":{"path":"/etc"}}')
-    [ "$(json_field "$reply" 'd["data"]["folders"] == [] and "Only folders under" in d["data"]["denied"]')" = "True" ] || fail_test "/etc must not be browsable: $reply"
+    [ "$(json_field "$reply" 'd["data"]["selectable"] == False and "system" in d["data"]["reason"] and len(d["data"]["folders"]) > 0')" = "True" ] || fail_test "/etc may be browsed but not chosen: $reply"
+    reply=$(control_call "$test_root" '{"verb":"fs.browse","args":{"path":"/"}}')
+    [ "$(json_field "$reply" 'd["data"]["parent"] is None and not any(f["name"] in ("proc", "sys", "dev", "run") for f in d["data"]["folders"])')" = "True" ] || fail_test "the root listing: $reply"
+    reply=$(control_call "$test_root" '{"verb":"fs.browse","args":{"path":"/proc/1"}}')
+    [ "$(json_field "$reply" 'd["data"]["folders"] == [] and "system file system" in d["data"]["denied"]')" = "True" ] || fail_test "/proc must not be listed: $reply"
+    reply=$(control_call "$test_root" '{"verb":"fs.browse","args":{"path":"relative"}}')
+    [ "$(json_field "$reply" 'd["error"]["code"]')" = "invalid_request" ] || fail_test "a relative path must be refused: $reply"
 
     # A job on its own remote; an unknown remote is refused.
     reply=$(control_call "$test_root" "{\"verb\":\"job.check\",\"args\":{\"job\":{\"label\":\"site\",\"source\":\"$test_root/web/site\",\"destination_mode\":\"remote\",\"destination_value\":\"store:backups/site\",\"isolation\":\"single\"}}}")

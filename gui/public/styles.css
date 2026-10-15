@@ -792,9 +792,13 @@ mark { background: var(--warn-soft); color: var(--text); outline: 1px solid var(
 
 /* Folder picker and destination wizard */
 .dialog.picker-dialog { width: min(40rem, calc(100vw - 1.5rem)); }
-.picker-path { display: flex; gap: 0.5rem; align-items: center; margin: 0.25rem 0 0.5rem; }
-.picker-path code { overflow-wrap: anywhere; }
-.picker-list { list-style: none; margin: 0.5rem 0; padding: 0; max-height: 50vh; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+.picker-go { display: flex; flex-direction: column; gap: 0.3rem; margin: 0.25rem 0 0.25rem; }
+.picker-go input[type="text"] { width: 100%; font-family: var(--mono, ui-monospace, monospace); }
+.picker-nav { align-items: center; }
+.picker-nav .inline-check { margin-left: auto; }
+.picker-item.is-dim { color: var(--muted); }
+.picker-note { margin: 0.25rem 0 0.5rem; overflow-wrap: anywhere; }
+.picker-list { list-style: none; margin: 0.5rem 0; padding: 0; min-height: min(14rem, 30vh); max-height: 50vh; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
 .picker-list li { border-bottom: 1px solid var(--border); }
 .picker-list li:last-child { border-bottom: none; }
 .picker-list li.muted, .picker-list li > .notice { padding: 0.5rem 0.75rem; margin: 0; }
