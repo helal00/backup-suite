@@ -86,11 +86,19 @@ window.BACKUP_SUITE_HELP = {
     ]
   },
   notifications: {
-    title: "Notifications (ntfy)",
+    title: "Notifications",
     sections: [
-      ["ntfy", "Backup Suite sends failures and watchdog actions to your ntfy topic. Every message starts with a plain description; the full log is attached."],
-      ["Token", "An access token for a protected topic can be replaced or cleared here, but it is never shown."],
-      ["Test", "Send test notification sends one message in the real format, and it also appears in the bell."]
+      ["Channels", "Backup Suite writes one message per event (failure, watchdog action, changing files, recovery, test) and sends it through every enabled channel. ntfy is the first channel; Telegram, WhatsApp, email and SMS are planned."],
+      ["ntfy", "Enable or disable the channel, set its topic and token (the token is never shown), send a test, and read its delivery log: every message, whether it was sent or failed, and why."],
+      ["Bell", "The bell lists every notification with each channel's result. \"Not sent again\" means the watchdog already reported the same episode; \"GUI only\" marks routine events such as a normal run finishing."]
+    ]
+  },
+  destinations: {
+    title: "Destinations",
+    sections: [
+      ["What they are", "Where backups go: Google Drive, Dropbox, OneDrive, Box, pCloud, S3 and compatible stores, Backblaze B2, WebDAV, SFTP and more, kept as rclone remotes in rclone.conf. Jobs choose one under Destination; the default destination is RCLONE_REMOTE_ROOT."],
+      ["New destination", "Pick the service and fill in what it needs. Google Drive, Dropbox, OneDrive and Box need one sign-in: the wizard shows a command (rclone authorize …) to run on your own computer, which opens your browser; paste its result back."],
+      ["Safety", "Tokens and passwords are stored by rclone and never shown. Only cloud and network types can be set up here, and no option that reads a file or runs a program, because rclone runs as root. A destination in use cannot be removed; removing one never deletes what is stored on it."]
     ]
   },
   sources: {

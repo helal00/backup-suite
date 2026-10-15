@@ -17,7 +17,8 @@ const IDLE_STOP_MS = 15000;
 const EPOCH = Date.now().toString(36);
 
 class Live {
-  constructor({ client, events, getSettings, log = () => {}, idleStopMs = IDLE_STOP_MS }) {
+  constructor({ client, events, getSettings, log = () => {}, idleStopMs = IDLE_STOP_MS, build = "" }) {
+    this.build = build;
     this.client = client;
     this.events = events;
     this.getSettings = getSettings;
@@ -64,7 +65,7 @@ class Live {
     this.idleStop = null;
     const missed = this.missedSince(lastEventId);
     if (missed === null) {
-      this.send(res, "hello", { chart: this.chart, status: this.lastStatus, error: this.lastError }, this.currentId());
+      this.send(res, "hello", { chart: this.chart, status: this.lastStatus, error: this.lastError, build: this.build }, this.currentId());
     } else {
       for (const message of missed) this.write(res, message.text);
     }

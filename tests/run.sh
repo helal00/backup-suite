@@ -1586,6 +1586,88 @@ test_control_settings_catalog() {
     rm -rf "$test_root"
 }
 
+test_control_destinations() {
+    # Destinations (rclone remotes) from the GUI: allowed types only, no option
+    # that reads a file or runs a program, secrets never returned, the OAuth
+    # questions step by step, delete refused while in use; the folder picker stays
+    # inside FILE_JOB_SOURCE_ROOTS; a job can use its own remote.
+    local test_root
+    local reply
+    local state
+    test_root=$(mktemp -d)
+    setup_control_root "$test_root"
+    printf '[backup]\ntype = alias\nremote = %s\n' "$test_root/remote" > "$test_root/config/rclone.conf"
+    printf 'RCLONE_REMOTE_ROOT="backup:"\nFILE_JOB_SOURCE_ROOTS="%s"\n' "$test_root" >> "$test_root/config/global.conf"
+    mkdir -p "$test_root/remote" "$test_root/web/site"
+
+    reply=$(control_call "$test_root" '{"verb":"remote.create","args":{"name":"disk","type":"local","options":{}}}')
+    [ "$(json_field "$reply" 'd["error"]["code"]')" = "invalid_request" ] || fail_test "a local remote must be refused: $reply"
+    reply=$(control_call "$test_root" '{"verb":"remote.create","args":{"name":"box1","type":"sftp","options":{"host":"localhost","key_file":"/root/.ssh/id_rsa"}}}')
+    [ "$(json_field "$reply" 'd["error"]["code"]')" = "invalid_request" ] || fail_test "key_file must be refused: $reply"
+    reply=$(control_call "$test_root" '{"verb":"remote.create","args":{"name":"store","type":"sftp","options":{"host":"backup.example.invalid","user":"me","pass":"secret-value-1"}}}')
+    [ "$(json_field "$reply" 'd["data"]["done"]')" = "True" ] || fail_test "sftp create: $reply"
+    reply=$(control_call "$test_root" '{"verb":"remotes","args":{"providers":true}}')
+    [ "$(json_field "$reply" '[r for r in d["data"]["remotes"] if r["name"] == "store"][0]["settings"]["host"]')" = "backup.example.invalid" ] || fail_test "remotes list: $reply"
+    case "$reply" in *secret-value-1*) fail_test 'a password was returned' ;; esac
+    [ "$(json_field "$reply" '"drive" in d["data"]["providers"] and "local" not in d["data"]["providers"]')" = "True" ] || fail_test 'providers: allowed types only'
+    [ "$(json_field "$reply" '[r for r in d["data"]["remotes"] if r["name"] == "backup"][0]["used_by"][0].startswith("the default destination")')" = "True" ] || fail_test 'usage of the default root'
+
+    # Google Drive, headless: rclone's own questions, one step at a time.
+    reply=$(control_call "$test_root" '{"verb":"remote.create","args":{"name":"gd","type":"drive","options":{"scope":"drive"}}}')
+    [ "$(json_field "$reply" 'd["data"]["question"]["name"]')" = "config_is_local" ] || fail_test "drive first question: $reply"
+    state=$(json_field "$reply" 'd["data"]["state"]')
+    reply=$(control_call "$test_root" '{"verb":"remote.continue","args":{"name":"gd","state":"stale","result":"false"}}')
+    [ "$(json_field "$reply" 'd["error"]["code"]')" = "config_conflict" ] || fail_test "a stale step must be refused: $reply"
+    reply=$(control_call "$test_root" "{\"verb\":\"remote.continue\",\"args\":{\"name\":\"gd\",\"state\":\"$state\",\"result\":\"false\"}}")
+    [ "$(json_field "$reply" 'd["data"]["question"]["name"] == "config_token" and "rclone authorize" in d["data"]["question"]["help"]')" = "True" ] || fail_test "drive token question: $reply"
+
+    # Delete: refused while in use, allowed otherwise.
+    reply=$(control_call "$test_root" '{"verb":"remote.delete","args":{"name":"backup"}}')
+    [ "$(json_field "$reply" 'd["error"]["code"]')" = "invalid_request" ] || fail_test "deleting the default root must be refused: $reply"
+    reply=$(control_call "$test_root" '{"verb":"remote.delete","args":{"name":"gd"}}')
+    [ "$(json_field "$reply" 'd["data"]["deleted"]')" = "True" ] || fail_test "delete: $reply"
+
+    # The folder picker.
+    reply=$(control_call "$test_root" '{"verb":"fs.browse","args":{}}')
+    [ "$(json_field "$reply" 'd["data"]["folders"][0]["path"]')" = "$(realpath "$test_root")" ] || fail_test "picker roots: $reply"
+    reply=$(control_call "$test_root" "{\"verb\":\"fs.browse\",\"args\":{\"path\":\"$test_root/web\"}}")
+    [ "$(json_field "$reply" '[f["name"] for f in d["data"]["folders"]]')" = "['site']" ] || fail_test "picker listing: $reply"
+    reply=$(control_call "$test_root" "{\"verb\":\"fs.browse\",\"args\":{\"path\":\"$test_root\"}}")
+    [ "$(json_field "$reply" '[f["allowed"] for f in d["data"]["folders"] if f["name"] == "config"]')" = "[False]" ] || fail_test "the config folder must not be selectable: $reply"
+    reply=$(control_call "$test_root" '{"verb":"fs.browse","args":{"path":"/etc"}}')
+    [ "$(json_field "$reply" 'd["data"]["folders"] == [] and "Only folders under" in d["data"]["denied"]')" = "True" ] || fail_test "/etc must not be browsable: $reply"
+
+    # A job on its own remote; an unknown remote is refused.
+    reply=$(control_call "$test_root" "{\"verb\":\"job.check\",\"args\":{\"job\":{\"label\":\"site\",\"source\":\"$test_root/web/site\",\"destination_mode\":\"remote\",\"destination_value\":\"store:backups/site\",\"isolation\":\"single\"}}}")
+    [ "$(json_field "$reply" 'd["data"]["problems"] == [] and d["data"]["info"]["destination"] == "store:/backups/site"')" = "True" ] || fail_test "remote job check: $reply"
+    reply=$(control_call "$test_root" "{\"verb\":\"job.check\",\"args\":{\"job\":{\"label\":\"site\",\"source\":\"$test_root/web/site\",\"destination_mode\":\"remote\",\"destination_value\":\"nope:x\",\"isolation\":\"single\"}}}")
+    [ "$(json_field "$reply" 'any("no destination named nope" in p for p in d["data"]["problems"])')" = "True" ] || fail_test "unknown remote: $reply"
+    rm -rf "$test_root"
+}
+
+test_job_on_its_own_remote() {
+    # file-backup.sh: a job with destination mode remote goes to that remote, and
+    # previous versions are kept and cleaned there.
+    local test_root
+    local output_file
+    test_root=$(mktemp -d)
+    output_file="$test_root/output.log"
+    mkdir -p "$test_root/src" "$test_root/main" "$test_root/other"
+    printf 'v1\n' > "$test_root/src/a.txt"
+    write_test_config "$test_root" rclone 'backup:'
+    printf '[backup]\ntype = alias\nremote = %s\n\n[other]\ntype = alias\nremote = %s\n' "$test_root/main" "$test_root/other" > "$test_root/config/rclone.conf"
+    printf '1|elsewhere|%s|remote|other:jobs/elsewhere|.nosync|single\n' "$test_root/src" > "$test_root/config/file-sources.conf"
+    run_backup "$test_root" > "$output_file" 2>&1 || fail_test "remote job run failed: $(tail -5 "$output_file")"
+    assert_file "$test_root/other/jobs/elsewhere/a.txt"
+    [ -z "$(ls -A "$test_root/main")" ] || fail_test 'nothing may go to the default remote'
+    sleep 1
+    printf 'v2\n' > "$test_root/src/a.txt"
+    run_backup "$test_root" > "$output_file" 2>&1 || fail_test "second run failed"
+    find "$test_root/other/deleted_files" -name a.txt | grep -q . || fail_test 'the previous version must be kept on the same remote'
+    assert_contains "$output_file" 'Cleaning archived file versions older than 21d from other:/deleted_files'
+    rm -rf "$test_root"
+}
+
 test_control_config_set() {
     local test_root
     local reply
@@ -1841,6 +1923,8 @@ run_test 'control script config.set safety' test_control_config_set
 run_test 'backup jobs: add, edit, enable, remove, run' test_control_jobs
 run_test 'job run and per-job patterns in file-backup' test_job_run_and_job_patterns
 run_test 'every global setting shown, schedule applied' test_control_settings_catalog
+run_test 'destinations, folder picker and remote jobs' test_control_destinations
+run_test 'a job on its own remote' test_job_on_its_own_remote
 run_test 'control script profile verbs match the CLI' test_control_profile_matches_cli
 run_test 'control script actions, audit and peer check' test_control_actions_and_peer_check
 run_test 'events file and run progress' test_events_and_progress_files

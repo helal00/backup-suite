@@ -118,7 +118,7 @@ CONFIG_KEYS = {
     "WATCHDOG_ADAPTIVE_STEP_UP_AVAILABLE_PERCENT": (int_range(5, 95), "Adaptive mode: step up only while server RAM available stays at or above this percent."),
     "WATCHDOG_ADAPTIVE_STEP_UP_SECONDS": (int_range(30, 7200), "Adaptive mode: seconds of normal conditions before stepping up."),
     "WATCHDOG_ADAPTIVE_COOLDOWN_SECONDS": (int_range(0, 3600), "Adaptive mode: minimum seconds between two level changes."),
-    "NOTIFY_FAILURES_ENABLED": (("bool",), "Send ntfy notifications for failures and watchdog actions."),
+    "NOTIFY_FAILURES_ENABLED": (("bool",), "The ntfy channel's switch: send notifications through ntfy."),
     "NOTIFY_NTFY_TOPIC_URL": (("url",), "The ntfy topic URL that receives the notifications."),
     "NOTIFY_NTFY_TOKEN": (("secret",), "Access token for a protected ntfy topic (write-only)."),
     "NOTIFY_NTFY_PRIORITY": (("choice", ["min", "low", "default", "high", "urgent"]), "ntfy priority of failure notifications."),
@@ -222,7 +222,7 @@ CONFIG_GROUPS = [
     ("database", "Database backups", ["DB_REMOTE_DESTINATION_ROOT", "DB_RETENTION_DAYS", "DB_RCLONE_TRANSFERS", "DB_RCLONE_CHECKERS",
                                       "DB_SKIP_UNCHANGED_BACKUPS", "DB_KEEP_LOCAL_AFTER_UPLOAD", "DB_MONITOR_THRESHOLD_MB", "DB_RCLONE_EXTRA_FLAGS"]),
     ("watchdog", "Watchdog", [key for key in CONFIG_KEYS if key.startswith("WATCHDOG_")]),
-    ("ntfy", "Notifications (ntfy)", [key for key in CONFIG_KEYS if key.startswith("NOTIFY_NTFY_") or key == "NOTIFY_FAILURES_ENABLED"]),
+    ("ntfy", "Notifications: ntfy channel", [key for key in CONFIG_KEYS if key.startswith("NOTIFY_NTFY_") or key == "NOTIFY_FAILURES_ENABLED"]),
     ("logs", "Logs and failure records", ["BACKUP_SUITE_LOG_MAX_BYTES", "BACKUP_SUITE_LOG_KEEP_FILES", "NOTIFY_JOURNAL_LINES",
                                           "NOTIFY_DURABLE_LOG_LINES", "NOTIFY_FAILURE_LOG_KEEP_FILES"]),
     ("install", "Installation (read-only)", ["INSTALL_MODE", "FILE_JOB_SOURCE_ROOTS", "INSTALL_SYSTEMD_UNITS", "ENABLE_TIMERS_AFTER_INSTALL"]
@@ -1198,22 +1198,39 @@ def entry_destination_relative(row):
     if mode == "default-root":
         key = row["destination_value"] or row["label"] or os.path.basename(row["source"].rstrip("/"))
         return join_path(DEFAULT_DESTINATION_ROOT, key)
+    if mode == "remote":
+        match = REMOTE_VALUE_RE.match(row["destination_value"] or "")
+        return strip_slashes(match.group(2)) if match else ""
     return ""
+
+
+REMOTE_VALUE_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_-]{0,31}):/?([A-Za-z0-9._ -]+(/[A-Za-z0-9._ -]+)*)/?$")
+
+
+def entry_base(row):
+    """The remote root a job's destination is under: the default (RCLONE_REMOTE_ROOT
+    with this host) or, in mode remote, the job's own remote."""
+    if row["destination_mode"] == "remote":
+        match = REMOTE_VALUE_RE.match(row["destination_value"] or "")
+        return "%s:" % match.group(1) if match else ""
+    return REMOTE_BASE
 
 
 def describe_entry(row):
     """The entry as file-backup.sh treats it."""
     name = row["label"] or row["source"]
     relative = entry_destination_relative(row)
+    base = entry_base(row)
     stop_file = row["stop_file"] or DEFAULT_STOP_FILE
     entry = {
         "name": name, "line": row["line"], "label": row["label"], "enabled": is_enabled_value(row["enabled"]),
         "source": row["source"], "source_exists": row["source_exists"], "isolation": row["isolation"],
         "destination_mode": row["destination_mode"] or "default-root", "destination_value": row["destination_value"],
-        "destination": join_path(REMOTE_BASE, relative) if relative and REMOTE_BASE else "",
+        "destination": join_path(base, relative) if relative and base else "",
+        "remote": base[:-1] if row["destination_mode"] == "remote" and base else "",
         "destination_relative": relative, "stop_file": stop_file, "stop_file_configured": row["stop_file"],
         "stop_file_present": bool(row["source_exists"] and stop_file and os.path.isfile(os.path.join(row["source"], stop_file))),
-        "archive": join_path(REMOTE_BASE, ARCHIVE_FOLDER, "<run time>", "attempt-<n>", relative) if relative and REMOTE_BASE else "",
+        "archive": join_path(base, ARCHIVE_FOLDER, "<run time>", "attempt-<n>", relative) if relative and base else "",
         "retention": RETENTION, "problem": "",
     }
     if row["extra_fields"]:
@@ -1223,7 +1240,8 @@ def describe_entry(row):
     elif not row["source_exists"]:
         entry["problem"] = "The source directory does not exist."
     elif not relative:
-        entry["problem"] = "No destination: fixed mode needs a destination value." if row["destination_mode"] == "fixed" else "Unknown destination mode."
+        entry["problem"] = {"fixed": "No destination: fixed mode needs a destination value.",
+                            "remote": "Destination must be remote:folder, e.g. dropbox:backups/web10."}.get(row["destination_mode"], "Unknown destination mode.")
     elif row["isolation"] not in ("single", "children"):
         entry["problem"] = "Unknown isolation mode %s." % row["isolation"]
     return entry
@@ -1750,7 +1768,7 @@ def verb_job_measure(request):
 # job could otherwise upload any file on the server.
 
 JOB_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-JOB_DESTINATION_MODES = ["fixed", "same-name", "default-root"]
+JOB_DESTINATION_MODES = ["fixed", "same-name", "default-root", "remote"]
 JOB_ISOLATIONS = ["single", "children"]
 JOB_PATTERN_RE = re.compile(r"^[^\x00-\x1f|]{1,300}$")
 JOB_PATTERNS_MAX = 500
@@ -1863,15 +1881,32 @@ def check_job(fields, rows, editing=None):
     fields["destination_mode"] = mode
     value = fields["destination_value"]
     if mode not in JOB_DESTINATION_MODES:
-        problems.append("Destination mode: fixed, same-name or default-root.")
+        problems.append("Destination mode: fixed, same-name, default-root or remote.")
+    elif mode == "remote":
+        match = REMOTE_VALUE_RE.match(value)
+        if not match:
+            problems.append("Destination: pick a destination and a folder on it (remote:folder, e.g. dropbox:backups/web10).")
+        else:
+            try:
+                remote_settings = rclone_dump().get(match.group(1))
+            except ControlError as error:
+                remote_settings = None
+                problems.append("Destination: %s" % error.message)
+            if remote_settings is None:
+                problems.append("Destination: there is no destination named %s (Admin → Destinations)." % match.group(1))
+            elif remote_settings.get("type") not in REMOTE_TYPES:
+                problems.append("Destination: %s is a %s remote, which jobs cannot use from the GUI." % (match.group(1), remote_settings.get("type")))
+        value = "%s:%s" % (match.group(1), match.group(2).strip("/")) if match else value
+        fields["destination_value"] = value
     elif mode == "fixed" and not value:
         problems.append("Destination: fixed mode needs a folder, e.g. projects/%s." % (name or "my-job"))
     if mode == "same-name":
         value = ""
         fields["destination_value"] = ""
-    if value and (not re.fullmatch(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*", value.strip("/")) or ".." in value.split("/")):
-        problems.append("Destination: a relative folder of letters, digits, . _ - and /, e.g. sites/web10.")
-    fields["destination_value"] = value.strip("/") if value else ""
+    if mode != "remote":
+        if value and (not re.fullmatch(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*", value.strip("/")) or ".." in value.split("/")):
+            problems.append("Destination: a relative folder of letters, digits, . _ - and /, e.g. sites/web10.")
+        fields["destination_value"] = value.strip("/") if value else ""
 
     stop = fields["stop_file"]
     if stop and (not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", stop) or stop in (".", "..")):
@@ -1891,10 +1926,13 @@ def check_job(fields, rows, editing=None):
            "destination_value": fields["destination_value"], "stop_file": stop, "isolation": isolation, "extra_fields": False,
            "source_exists": bool(real_source) and os.path.isdir(real_source), "line": editing["line"] if editing else 0}
     relative = entry_destination_relative(row) if mode in JOB_DESTINATION_MODES else ""
-    destination = join_path(REMOTE_BASE, relative) if relative and REMOTE_BASE else ""
+    base = entry_base(row)
+    destination = join_path(base, relative) if relative and base else ""
     if relative:
         for other_row in others:
             other_relative = entry_destination_relative(other_row)
+            if entry_base(other_row) != base:
+                continue
             if other_relative and (other_relative == relative or other_relative.startswith(relative + "/") or relative.startswith(other_relative + "/")):
                 problems.append("Destination %s overlaps job %s (%s): two jobs would overwrite each other's files." % (relative, other_row["label"] or other_row["source"], other_relative))
     projects = None
@@ -2096,6 +2134,325 @@ def verb_job_run(request):
     return {"name": name, "started": True}
 
 
+# --------------------------------------------------------------------------- destinations (rclone remotes)
+#
+# Set up where backups go without the rclone command line: list, create (rclone's
+# own question-and-answer protocol: `config create --non-interactive`, then
+# `config update --continue --state --result`), test, browse and delete remotes in
+# rclone.conf.
+#
+# rclone runs as root in system mode, so only cloud and network remote types can be
+# created (never local, alias, crypt, union and other types that reach local
+# folders), and no option that reads a file or runs a command is accepted. Secrets
+# (tokens, passwords, keys) are never returned.
+
+REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+REMOTE_TYPES = {
+    "drive": "Google Drive", "dropbox": "Dropbox", "onedrive": "Microsoft OneDrive", "box": "Box", "pcloud": "pCloud",
+    "s3": "Amazon S3 and compatible (Wasabi, MinIO, Cloudflare R2, …)", "b2": "Backblaze B2", "webdav": "WebDAV (Nextcloud, ownCloud, …)",
+    "sftp": "SFTP server", "ftp": "FTP server", "mega": "MEGA", "azureblob": "Microsoft Azure Blob Storage",
+    "google cloud storage": "Google Cloud Storage", "koofr": "Koofr", "jottacloud": "Jottacloud", "yandex": "Yandex Disk",
+    "swift": "OpenStack Swift", "seafile": "Seafile", "hidrive": "HiDrive", "zoho": "Zoho WorkDrive",
+}
+REMOTE_DENIED_OPTION_RE = re.compile(r"(file$|_file|command|^ssh$|env_auth|key_use_agent|socket|^config_dir)", re.I)
+REMOTE_SECRET_RE = re.compile(r"(token|secret|pass|key|credential|auth|cookie|session|sas|account$|^user$|client_id)", re.I)
+REMOTE_TIMEOUT = 45
+
+
+def rclone_command(*arguments):
+    command = [RCLONE_BIN] + list(arguments)
+    if RCLONE_CONFIG:
+        command += ["--config", RCLONE_CONFIG]
+    return command
+
+
+def rclone_dump():
+    code, out, err = run(rclone_command("config", "dump"), READ_TIMEOUT)
+    if code != 0:
+        raise ControlError("remote_error", (err or out).strip()[-300:] or "rclone config dump failed.")
+    try:
+        data = json.loads(out or "{}")
+    except ValueError:
+        raise ControlError("remote_error", "rclone config dump returned no JSON.")
+    return data if isinstance(data, dict) else {}
+
+
+def remote_root_name(spec):
+    match = re.match(r"^([A-Za-z0-9_-]+)[,:]", spec or "")
+    return match.group(1) if match else ""
+
+
+def remote_usage():
+    """{remote name: [what uses it]}: the global destination and jobs with their own remote."""
+    usage = {}
+    values = parse_global_config(os.path.realpath(GLOBAL_CONFIG_FILE)) if GLOBAL_CONFIG_FILE else {}
+    root = remote_root_name(values.get("RCLONE_REMOTE_ROOT", ""))
+    if root:
+        usage.setdefault(root, []).append("the default destination (RCLONE_REMOTE_ROOT)")
+    try:
+        rows = sources_rows()
+    except ControlError:
+        rows = []
+    for row in rows:
+        if row["destination_mode"] == "remote":
+            name = remote_root_name(row["destination_value"])
+            if name:
+                usage.setdefault(name, []).append("job %s" % (row["label"] or row["source"]))
+    return usage
+
+
+def safe_remote_settings(settings):
+    shown = {}
+    for key, value in settings.items():
+        if key == "type":
+            continue
+        shown[key] = "[set]" if REMOTE_SECRET_RE.search(key) else str(value)[:200]
+    return shown
+
+
+def provider_options():
+    """{type: [options a user fills in when creating it]} for the allowed types."""
+    code, out, _ = run(rclone_command("config", "providers"), READ_TIMEOUT)
+    if code != 0:
+        return {}
+    try:
+        providers = json.loads(out)
+    except ValueError:
+        return {}
+    options = {}
+    for provider in providers:
+        name = provider.get("Name")
+        if name not in REMOTE_TYPES:
+            continue
+        fields = []
+        for option in provider.get("Options") or []:
+            if option.get("Advanced") or option.get("Hide") or REMOTE_DENIED_OPTION_RE.search(option.get("Name", "")):
+                continue
+            fields.append({"name": option.get("Name"), "help": (option.get("Help") or "")[:1500], "default": option.get("DefaultStr", ""),
+                           "required": bool(option.get("Required")), "password": bool(option.get("IsPassword")),
+                           "provider": option.get("Provider", ""), "type": option.get("Type", "string"),
+                           "exclusive": bool(option.get("Exclusive")),
+                           "examples": [{"value": example.get("Value", ""), "help": (example.get("Help") or "")[:200], "provider": example.get("Provider", "")}
+                                        for example in (option.get("Examples") or [])[:60]]})
+        options[name] = {"label": REMOTE_TYPES[name], "description": provider.get("Description", ""), "options": fields}
+    return options
+
+
+def verb_remotes(request):
+    args = get_args(request, ["providers"])
+    dump = rclone_dump()
+    usage = remote_usage()
+    remotes = []
+    for name in sorted(dump):
+        settings = dump[name] if isinstance(dump[name], dict) else {}
+        kind = settings.get("type", "")
+        remotes.append({"name": name, "type": kind, "type_label": REMOTE_TYPES.get(kind, kind), "allowed": kind in REMOTE_TYPES,
+                        "settings": safe_remote_settings(settings), "used_by": usage.get(name, [])})
+    reply = {"remotes": remotes, "config": RCLONE_CONFIG, "default_root": REMOTE_BASE, "default_remote": remote_root_name(REMOTE_BASE)}
+    if args.get("providers"):
+        reply["providers"] = provider_options()
+    return reply
+
+
+def wizard_path(name):
+    directory = os.path.join(gui_dir(), "remote-wizard")
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    return os.path.join(directory, "%s.json" % name)
+
+
+def wizard_reply(name, out, err, code):
+    """One step of rclone's protocol: the next question, or done."""
+    try:
+        data = json.loads(out[out.index("{"):]) if "{" in out else {}
+    except ValueError:
+        data = {}
+    if code != 0 and not data:
+        raise ControlError("remote_error", (err or out).strip()[-500:] or "rclone config failed.")
+    state_value = data.get("State") or ""
+    option = data.get("Option") or {}
+    error = data.get("Error") or ""
+    if not state_value:
+        try:
+            os.remove(wizard_path(name))
+        except OSError:
+            pass
+        return {"name": name, "done": True, "error": error}
+    option_name = option.get("Name", "")
+    with open(wizard_path(name), "w", encoding="utf-8") as handle:
+        json.dump({"state": state_value, "option": option_name, "at": int(time.time())}, handle)
+    return {"name": name, "done": False, "error": error, "state": state_value,
+            "question": {"name": option_name, "help": (option.get("Help") or "")[:3000], "default": option.get("DefaultStr", ""),
+                         "type": option.get("Type", "string"), "password": bool(option.get("IsPassword")),
+                         "exclusive": bool(option.get("Exclusive")), "required": bool(option.get("Required")),
+                         "examples": [{"value": example.get("Value", ""), "help": (example.get("Help") or "")[:200]}
+                                      for example in (option.get("Examples") or [])[:100]]}}
+
+
+def check_remote_value(key, value):
+    if not isinstance(value, str) or len(value) > 20000 or "\n" in value.strip() or "\r" in value:
+        invalid("%s must be one line of text." % key)
+    if REMOTE_DENIED_OPTION_RE.search(key):
+        invalid("%s cannot be set from the GUI: it reads a file or runs a program as root." % key)
+
+
+def verb_remote_create(request):
+    args = get_args(request, ["name", "type", "options"])
+    name = args.get("name")
+    kind = args.get("type")
+    options = args.get("options") or {}
+    if not isinstance(name, str) or not REMOTE_NAME_RE.match(name):
+        invalid("Name: up to 32 letters, digits, - and _, starting with a letter or digit.")
+    if kind not in REMOTE_TYPES:
+        invalid("This remote type cannot be created from the GUI.")
+    if not isinstance(options, dict):
+        invalid("options must be an object.")
+    if name in rclone_dump():
+        invalid("A remote named %s already exists." % name)
+    pairs = []
+    for key, value in options.items():
+        if not isinstance(key, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", key):
+            invalid("Unknown option %r." % key)
+        check_remote_value(key, value)
+        if value != "":
+            pairs.append("%s=%s" % (key, value))
+    backup_file(RCLONE_CONFIG, "rclone.conf") if RCLONE_CONFIG else None
+    code, out, err = run(rclone_command("config", "create", name, kind, *pairs, "--non-interactive", "--obscure"), REMOTE_TIMEOUT)
+    reply = wizard_reply(name, out, err, code)
+    record_event("info", "gui-action", "Destination %s (%s) created" % (name, REMOTE_TYPES[kind]) if reply["done"] else "Destination %s (%s) being set up" % (name, REMOTE_TYPES[kind]), "", "")
+    return reply
+
+
+def verb_remote_continue(request):
+    args = get_args(request, ["name", "state", "result"])
+    name = args.get("name")
+    if not isinstance(name, str) or not REMOTE_NAME_RE.match(name):
+        invalid("Unknown remote.")
+    try:
+        with open(wizard_path(name), "r", encoding="utf-8") as handle:
+            pending = json.load(handle)
+    except (OSError, ValueError):
+        raise ControlError("not_found", "No setup in progress for %s; start again." % name)
+    if args.get("state") != pending.get("state"):
+        raise ControlError("config_conflict", "This setup step is out of date; start again.")
+    check_remote_value(pending.get("option", ""), args.get("result", ""))
+    code, out, err = run(rclone_command("config", "update", name, "--continue", "--state", pending["state"], "--result", args.get("result", ""),
+                                        "--non-interactive", "--obscure"), REMOTE_TIMEOUT)
+    reply = wizard_reply(name, out, err, code)
+    if reply["done"]:
+        record_event("info", "gui-action", "Destination %s set up" % name, "", "")
+    return reply
+
+
+def find_remote(name):
+    if not isinstance(name, str) or not REMOTE_NAME_RE.match(name):
+        invalid("Unknown remote.")
+    dump = rclone_dump()
+    if name not in dump:
+        raise ControlError("not_found", "No remote named %s in rclone.conf." % name)
+    return dump[name]
+
+
+def verb_remote_test(request):
+    args = get_args(request, ["name"])
+    name = args.get("name")
+    find_remote(name)
+    started = time.monotonic()
+    code, out, err = run(rclone_command("about", "%s:" % name, "--json"), REMOTE_TIMEOUT)
+    about = None
+    if code == 0:
+        try:
+            about = json.loads(out)
+        except ValueError:
+            about = None
+    if code != 0:
+        code, out, err = run(rclone_command("lsf", "%s:" % name, "--dirs-only", "--max-depth", "1"), REMOTE_TIMEOUT)
+        if code != 0:
+            return {"name": name, "ok": False, "error": (err or out).strip()[-600:] or "rclone could not reach it."}
+    return {"name": name, "ok": True, "about": about, "seconds": round(time.monotonic() - started, 1)}
+
+
+def verb_remote_delete(request):
+    args = get_args(request, ["name"])
+    name = args.get("name")
+    find_remote(name)
+    used = remote_usage().get(name, [])
+    if used:
+        raise ControlError("invalid_request", "%s is still used by %s." % (name, ", ".join(used)))
+    backup_file(RCLONE_CONFIG, "rclone.conf")
+    code, out, err = run(rclone_command("config", "delete", name), READ_TIMEOUT)
+    if code != 0:
+        raise ControlError("remote_error", (err or out).strip()[-300:] or "rclone config delete failed.")
+    record_event("warning", "gui-action", "Destination %s removed from rclone.conf" % name, "Nothing stored on it was deleted.", "")
+    return {"name": name, "deleted": True}
+
+
+def verb_remote_browse(request):
+    """Folders on a remote, for the destination picker. remote is a configured
+    remote name, or empty for the default destination root."""
+    args = get_args(request, ["remote", "path"])
+    remote = args.get("remote") or ""
+    folder = args.get("path") or ""
+    if not isinstance(folder, str) or (folder and not re.fullmatch(r"[A-Za-z0-9._ -]+(/[A-Za-z0-9._ -]+)*", folder.strip("/"))) or ".." in folder.split("/"):
+        invalid("path must be a relative folder.")
+    if remote:
+        settings = find_remote(remote)
+        if settings.get("type") not in REMOTE_TYPES:
+            invalid("This remote type cannot be used from the GUI.")
+        base = "%s:" % remote
+    else:
+        if not REMOTE_BASE:
+            raise ControlError("not_found", "No default destination (RCLONE_REMOTE_ROOT) is set.")
+        base = REMOTE_BASE
+    target = join_path(base, folder.strip("/")) if folder.strip("/") else base
+    code, out, err = run(rclone_command("lsf", target, "--dirs-only", "--max-depth", "1"), REMOTE_TIMEOUT)
+    if code != 0:
+        message = (err or out).strip()
+        if "directory not found" in message.lower():
+            return {"remote": remote, "path": folder.strip("/"), "base": base, "folders": [], "exists": False}
+        raise ControlError("remote_error", message[-500:] or "rclone could not list it.")
+    folders = sorted({line.rstrip("/") for line in out.splitlines() if line.strip()}, key=str.lower)[:1000]
+    return {"remote": remote, "path": folder.strip("/"), "base": base, "folders": folders, "exists": True}
+
+
+def verb_fs_browse(request):
+    """Folders on this server, for the job source picker: only under
+    FILE_JOB_SOURCE_ROOTS, never inside system or Backup Suite folders."""
+    args = get_args(request, ["path"])
+    path = args.get("path") or ""
+    roots = job_source_roots()
+    if not path:
+        return {"path": "", "parent": None, "roots": roots,
+                "folders": [{"name": root, "path": root, "allowed": True} for root in roots if os.path.isdir(root)]}
+    if not isinstance(path, str) or not path.startswith("/") or "\x00" in path:
+        invalid("path must be an absolute folder.")
+    real = os.path.realpath(path)
+    protected = protected_folders()
+    # Outside the allowed folders is an answer, not an error: the picker starts at
+    # the top instead.
+    if not any(path_within(real, root) for root in roots):
+        return {"path": real, "parent": "", "roots": roots, "folders": [],
+                "denied": "Only folders under %s can be backed up." % ", ".join(roots)}
+    if any(path_within(real, folder) for folder in protected):
+        return {"path": real, "parent": "", "roots": roots, "folders": [], "denied": "This folder holds system or Backup Suite files."}
+    try:
+        names = sorted(os.listdir(real), key=str.lower)
+    except OSError as error:
+        raise ControlError("not_found", "Cannot open %s: %s" % (path, error.strerror))
+    folders = []
+    for name in names:
+        full = os.path.join(real, name)
+        if not os.path.isdir(full) or os.path.islink(full):
+            continue
+        allowed = not any(path_within(full, folder) or folder.startswith(full.rstrip("/") + "/") for folder in protected)
+        folders.append({"name": name, "path": full, "allowed": allowed, "hidden": name.startswith(".")})
+        if len(folders) >= 2000:
+            break
+    parent = os.path.dirname(real.rstrip("/"))
+    if not any(path_within(parent, root) for root in roots):
+        parent = ""
+    return {"path": real, "parent": parent, "roots": roots, "folders": folders}
+
+
 VERBS = {
     "status": (verb_status, False),
     "history": (verb_history, False),
@@ -2130,6 +2487,13 @@ VERBS = {
     "job.enable": (verb_job_enable, True),
     "job.remove": (verb_job_remove, True),
     "job.run": (verb_job_run, True),
+    "remotes": (verb_remotes, False),
+    "remote.create": (verb_remote_create, True),
+    "remote.continue": (verb_remote_continue, True),
+    "remote.test": (verb_remote_test, False),
+    "remote.delete": (verb_remote_delete, True),
+    "remote.browse": (verb_remote_browse, False),
+    "fs.browse": (verb_fs_browse, False),
 }
 
 

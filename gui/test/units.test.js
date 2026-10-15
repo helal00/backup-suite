@@ -151,6 +151,10 @@ test("direct backend runs the real control script; identical reads are coalesced
     assert.strictEqual(client.callsByVerb.status, 1);
     const config = await client.call("config.get");
     assert.ok(!JSON.stringify(config).includes("tk_fixture_secret"));
+    const remotes = await client.call("remotes", { providers: true });
+    assert.deepStrictEqual(remotes.remotes.map((remote) => remote.name).sort(), ["dropbox", "fake"]);
+    assert.ok(!JSON.stringify(remotes).includes("rclone-fixture-secret"), "a token was returned");
+    assert.ok(remotes.providers.drive && !remotes.providers.local);
     await assert.rejects(client.call("failures.read", { name: "../x" }), { code: "invalid_request" });
     await assert.rejects(client.call("rm -rf"), { code: "invalid_request" });
   } finally {

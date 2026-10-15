@@ -25,7 +25,7 @@ const crypto = require("crypto");
 
 // Home, every tab of one entry, and every Admin tab.
 const ENTRY_TABS = ["overview", "projects", "changes", "changing", "excludes", "runs", "log", "storage"];
-const ADMIN_TABS = ["actions", "runs", "profiles", "watchdog", "notifications", "settings", "sources", "logs", "activity"];
+const ADMIN_TABS = ["actions", "destinations", "runs", "profiles", "watchdog", "notifications", "settings", "sources", "logs", "activity"];
 const PAGES = [["home", "#home", "#section-body"], ...ENTRY_TABS.map((tab) => [`entry-${tab}`, `#job/workspace${tab === "overview" ? "" : `/${tab}`}`, "#section-body"]),
   ...ADMIN_TABS.map((tab) => [`admin-${tab}`, `#admin/${tab}`, "#admin-body"])];
 
@@ -88,7 +88,8 @@ function seed(fixture) {
   let seq = 0;
   for (const [severity, category, title] of [["info", "run-finished", "File backup finished: completed-successfully"], ["warning", "profile-step", "backup stepped down from moderate to slow"], ["error", "watchdog-stop", "backup stopped before OOM"]]) {
     seq += 1;
-    appendEvent(stateDir, { seq, id: `evt-${seq}-1`, created_at: iso(-600 + seq * 60), severity, category, title, message: `${title}. Details for the test.`, unit: "file-backup.service", ntfy: category === "run-finished" ? "" : seq === 2 ? "held" : "sent" });
+    appendEvent(stateDir, { seq, id: `evt-${seq}-1`, created_at: iso(-600 + seq * 60), severity, category, title, message: `${title}. Details for the test.`, unit: "file-backup.service",
+      delivery: category === "run-finished" || seq === 2 ? {} : { ntfy: "sent" }, held: seq === 2, delivery_note: "" });
   }
 }
 
@@ -155,7 +156,19 @@ async function main() {
           await page.waitForSelector("#job-check .notice.bad");
           if (!(await page.isDisabled("#job-save-button"))) failures.push("job editor: save must be disabled for /etc");
           await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-job-editor-refused.png`) });
-          await page.fill('#job-form [name="source"]', path.join(fixture.stateDir, "..", "source", "gamma"));
+          // The folder picker: open the allowed root, then gamma, and use it.
+          await page.click("#job-browse-source");
+          await page.waitForSelector("#picker-list .picker-item");
+          await page.click("#picker-list .picker-item");
+          await page.waitForSelector('#picker-list .picker-item:has-text("source")');
+          await page.click('#picker-list .picker-item:has-text("source")');
+          await page.waitForSelector('#picker-list .picker-item:has-text("gamma")');
+          await page.click('#picker-list .picker-item:has-text("gamma")');
+          await page.waitForTimeout(500);
+          await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-picker.png`) });
+          await page.click("#picker-select");
+          const pickedSource = await page.inputValue('#job-form [name="source"]');
+          if (!pickedSource.endsWith("/source/gamma")) failures.push(`picker: source is ${pickedSource}`);
           await page.fill('#job-form [name="excludes"]', "*.log\ncache/**");
           await page.waitForFunction(() => !document.querySelector("#job-check .notice.bad") && document.querySelector("#job-check code"));
           await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-job-editor.png`) });
@@ -177,6 +190,24 @@ async function main() {
           const editLabel = await page.inputValue('#job-form [name="label"]');
           const editExcludes = await page.inputValue('#job-form [name="excludes"]');
           if (editLabel !== "web11" || !editExcludes.includes("cache/**")) failures.push(`job editor: edit did not load the job (${editLabel}, ${editExcludes})`);
+          await page.keyboard.press("Escape");
+        }
+        // A new destination through the wizard (sftp needs no sign-in), once.
+        if (label === "desktop" && scheme === "light") {
+          await page.goto(`${base}/#admin/destinations`);
+          await page.waitForSelector("#admin-body .card");
+          await page.click('#admin-body button:has-text("+ New destination")');
+          await page.waitForSelector("#remote-dialog[open]");
+          await page.fill('#remote-body [name="name"]', "offsite");
+          await page.selectOption('#remote-body [name="type"]', "sftp");
+          await page.waitForSelector('#remote-body [name="host"]');
+          await page.fill('#remote-body [name="host"]', "backup.example.invalid");
+          await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-remote-wizard.png`) });
+          await page.click('#remote-body button:has-text("Continue")');
+          await page.waitForFunction(() => !document.querySelector("#remote-dialog[open]"), null, { timeout: 30000 });
+          await page.waitForSelector('#admin-body h3:has-text("offsite")');
+          await page.screenshot({ path: path.join(screenshotDir, `${label}-${scheme}-destinations.png`), fullPage: true });
+          if (!fs.readFileSync(path.join(fixture.configDir, "rclone.conf"), "utf8").includes("[offsite]")) failures.push("wizard: the remote was not written");
           await page.keyboard.press("Escape");
         }
         // Dialogs.

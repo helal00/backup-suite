@@ -760,3 +760,25 @@ mark { background: var(--warn-soft); color: var(--text); outline: 1px solid var(
 #new-job-button { width: 100%; }
 .job-form-grid fieldset { min-width: 0; }
 .job-form-grid input[type="text"], .job-form-grid select, .job-form-grid textarea { width: 100%; box-sizing: border-box; }
+
+#reload-button.update-available { background: var(--danger); border-color: var(--danger); color: var(--danger-text); }
+.channel-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.channel-head h3 { margin: 0; }
+.channel-card.is-disabled { opacity: 0.85; }
+.event-pills { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; align-items: center; }
+
+/* Folder picker and destination wizard */
+.dialog.picker-dialog { width: min(40rem, calc(100vw - 1.5rem)); }
+.picker-path { display: flex; gap: 0.5rem; align-items: center; margin: 0.25rem 0 0.5rem; }
+.picker-path code { overflow-wrap: anywhere; }
+.picker-list { list-style: none; margin: 0.5rem 0; padding: 0; max-height: 50vh; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+.picker-list li { border-bottom: 1px solid var(--border); }
+.picker-list li:last-child { border-bottom: none; }
+.picker-list li.muted, .picker-list li > .notice { padding: 0.5rem 0.75rem; margin: 0; }
+.picker-item { width: 100%; text-align: left; border: none; border-radius: 0; background: transparent; padding: 0.5rem 0.75rem; }
+.picker-item:hover:not(:disabled) { background: var(--accent-soft); }
+.dialog.remote-dialog { width: min(52rem, calc(100vw - 1.5rem)); }
+.remote-dialog textarea { width: 100%; font-family: var(--font-mono); font-size: 0.85rem; }
+.remote-dialog .threshold-grid label { display: flex; flex-direction: column; gap: 0.25rem; }
+.wizard-help { white-space: pre-wrap; background: var(--panel-sunken); padding: 0.6rem; border-radius: 6px; font-size: 0.85rem; }
+.copy-row button { white-space: nowrap; }

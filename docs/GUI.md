@@ -25,8 +25,21 @@ the acceptance checks are in [GUI-SPECIFICATION.md](GUI-SPECIFICATION.md).
   watchdog, ntfy, **All settings** (every `global.conf` key, grouped; schedule changes
   are applied to the timers at once through `bin/apply-schedule.sh`), the sources
   file, logs, activity and audit.
-- **Bell:** the notifications sent to ntfy, each with what happened to the push
-  (sent, failed, ntfy off, or held back as already reported), and all activity.
+- **Destinations** (Admin): Google Drive, Dropbox, OneDrive, S3 and other rclone
+  remotes, set up with a wizard that walks through rclone's own questions (one
+  `rclone authorize …` sign-in on your computer for OAuth services), tested, browsed
+  and removed. A job sends its backup to the default destination or to one of these
+  (destination mode `remote`, value `name:folder`). Only cloud and network types, no
+  option that reads a file or runs a program; secrets are never shown.
+- **Folder pickers:** the job's source folder (only under `FILE_JOB_SOURCE_ROOTS`)
+  and its folder on the destination are chosen by browsing.
+- **Notifications** are generic: one message per event goes to every enabled channel
+  (ntfy now; Telegram, WhatsApp, email and SMS later). The bell lists them all with
+  each channel's result; Admin → Notifications has each channel's switch, settings,
+  test and delivery log.
+- **Updates:** asset URLs carry the GUI build and are revalidated on every load, so
+  a page reload always gets the installed version; when the GUI is reinstalled the
+  reload button turns red.
 - **Resource warning:** a popup when the server or the backup runs short, once per
   condition until it clears.
 - ⚙ holds this GUI's own settings only.

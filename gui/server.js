@@ -25,6 +25,22 @@ const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf
 const UNIT_NAME = `backup-suite-gui-${listenConfig.INSTANCE}.service`;
 const MAX_BODY_BYTES = 256 * 1024;
 const STARTED_AT = new Date().toISOString();
+// The build of the page files this server serves: a hash of public/. A page that
+// loaded another build is told to reload (its reload button turns red), and asset
+// URLs carry it (?v=) so a reload never gets an old app.js from a cache.
+const BUILD = (() => {
+  const crypto = require("crypto");
+  const digest = crypto.createHash("sha256");
+  const walk = (dir) => {
+    for (const name of fs.readdirSync(dir).sort()) {
+      const full = path.join(dir, name);
+      if (fs.statSync(full).isDirectory()) walk(full);
+      else digest.update(name).update(fs.readFileSync(full));
+    }
+  };
+  walk(path.join(ROOT, "public"));
+  return digest.digest("hex").slice(0, 12);
+})();
 
 const STATIC_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -48,7 +64,7 @@ function createApp({ env = process.env } = {}) {
   const csrfToken = guard.newToken();
   const client = new ControlClient({ env, getPreference: () => settings.general.backend });
   const events = new EventStore({ client, stateDir, getSettings: () => settings, log });
-  const live = new Live({ client, events, getSettings: () => settings, log, idleStopMs: Number(env.BACKUP_SUITE_GUI_STREAM_GRACE_MS) || undefined });
+  const live = new Live({ client, events, getSettings: () => settings, log, build: BUILD, idleStopMs: Number(env.BACKUP_SUITE_GUI_STREAM_GRACE_MS) || undefined });
   let listen = listenConfig.resolveListen({ env, settings });
 
   function sendJson(res, status, body) {
@@ -145,10 +161,21 @@ function createApp({ env = process.env } = {}) {
     } catch {
       return sendError(res, 404, "not_found", "Not found.");
     }
+    if (file.endsWith(".html")) {
+      data = Buffer.from(data.toString("utf8").replace(/(src|href)="\/(app\.js|help\.js|theme-boot\.js|styles\.css)"/g, `$1="/$2?v=${BUILD}"`));
+    }
+    // Revalidated on every load (ETag), so a page reload always gets the files this
+    // server has now.
+    const etag = `"${BUILD}-${path.basename(file)}"`;
+    if (req.headers["if-none-match"] === etag) {
+      res.writeHead(304, { ETag: etag, "Cache-Control": "no-cache" });
+      return res.end();
+    }
     const type = STATIC_TYPES[path.extname(file)] || "application/octet-stream";
     res.writeHead(200, {
       "Content-Type": type,
-      "Cache-Control": file.endsWith(".html") || file.endsWith("sw.js") ? "no-cache" : "max-age=300",
+      ETag: etag,
+      "Cache-Control": "no-cache",
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
       "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'"
@@ -162,7 +189,7 @@ function createApp({ env = process.env } = {}) {
 
     if (req.method === "GET" && pathname === "/api/health") {
       return sendJson(res, 200, {
-        ok: true, app: bundle.APP_ID, app_id: bundle.APP_ID, name: bundle.APP_NAME, version: VERSION,
+        ok: true, app: bundle.APP_ID, app_id: bundle.APP_ID, name: bundle.APP_NAME, version: VERSION, build: BUILD,
         started_at: STARTED_AT, at: new Date().toISOString(), mode: client.mode().mode, listen: { mode: listen.mode },
         features: { health: true, app_events: true, browser_notifications: true }
       });
@@ -170,7 +197,7 @@ function createApp({ env = process.env } = {}) {
 
     if (req.method === "GET" && pathname === "/api/session") {
       return sendJson(res, 200, {
-        ok: true, csrf: csrfToken, app: bundle.APP_ID, name: bundle.APP_NAME, version: VERSION, login: loginName(),
+        ok: true, csrf: csrfToken, app: bundle.APP_ID, name: bundle.APP_NAME, version: VERSION, build: BUILD, login: loginName(),
         host: os.hostname(), unit: UNIT_NAME, backend: modeReport(), listen: listenReport(), settings,
         categories: settingsStore.CATEGORY_LABELS, tunnel_manager_active: events.tunnelManagerActive()
       });

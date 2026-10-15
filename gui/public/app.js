@@ -1039,11 +1039,23 @@
       } }, "Save thresholds…")));
   };
 
+  // Admin: notification channels -------------------------------------------------
+  //
+  // Each channel has its switch, its settings, a test and its delivery log. ntfy is
+  // the only channel so far; the others are listed as planned.
+
+  const PLANNED_CHANNELS = [
+    ["Telegram", "A bot posts each notification to a chat or group."],
+    ["WhatsApp", "Through the WhatsApp Business API or a gateway."],
+    ["Email", "Through an SMTP server you choose."],
+    ["SMS", "Through an SMS gateway, for errors only."]
+  ];
+
   renderers.notifications = async (body) => {
     body.append(loadingNode());
     let config;
     try {
-      config = await control("config.get");
+      [config] = await Promise.all([control("config.get"), api("/api/events?limit=500").then((list) => { state.events = list.events; })]);
     } catch (error) {
       clear(body).append(errorNode(error));
       return;
@@ -1051,19 +1063,42 @@
     clear(body);
     const byKey = Object.fromEntries(config.settings.map((entry) => [entry.key, entry]));
     const enabled = (byKey.NOTIFY_FAILURES_ENABLED.value || byKey.NOTIFY_FAILURES_ENABLED.default) === "1";
-    body.append(h("section", { class: "card" }, h("h3", {}, "ntfy now"), kv([
-      ["Alerts", pill(enabled ? "on" : "off", enabled ? "ok" : "warn")],
-      ["Topic", byKey.NOTIFY_NTFY_TOPIC_URL.is_set ? h("code", {}, byKey.NOTIFY_NTFY_TOPIC_URL.value) : "not set"],
-      ["Token", byKey.NOTIFY_NTFY_TOKEN.is_set ? "set (never shown)" : "not set"],
-      ["Priority", byKey.NOTIFY_NTFY_PRIORITY.value || byKey.NOTIFY_NTFY_PRIORITY.default],
-      ["Title prefix", byKey.NOTIFY_NTFY_TITLE_PREFIX.value || byKey.NOTIFY_NTFY_TITLE_PREFIX.default]
-    ]), h("div", { class: "toolbar-row tight" }, h("button", { type: "button", onclick: () => runAction("notify-test") }, "Send test notification…"))));
+    const configured = byKey.NOTIFY_NTFY_TOPIC_URL.is_set;
+    body.append(h("p", { class: "muted" }, "Backup Suite writes one message per event and sends it through every enabled channel. The bell lists them all with each channel's result."));
+
+    const log = state.events.filter((event) => eventDelivery(event).channels.ntfy).slice().reverse();
+    const counts = log.reduce((sum, event) => { sum[eventDelivery(event).channels.ntfy] = (sum[eventDelivery(event).channels.ntfy] || 0) + 1; return sum; }, {});
     const form = h("div", {});
-    form.append(h("fieldset", { class: "settings-option-group" }, h("legend", {}, "ntfy settings"), h("div", { class: "threshold-grid" }, NTFY_KEYS.filter((key) => byKey[key]).map((key) => settingField(byKey[key])))));
-    body.append(form, h("p", { class: "muted" }, "The topic is shown shortened; leave the field empty to keep it, or type a full https:// URL to replace it. The token can be replaced or cleared, never read. GUI notices (bell, Tunnel Manager, browser) are in Settings → Notifications."),
-      h("div", { class: "toolbar-row end" }, h("button", { type: "button", class: "primary-button", onclick: async () => {
-        if (await saveConfig(collectChanges(form), config, { title: "Save ntfy settings?", note: "They apply to the next notification." })) renderSection();
-      } }, "Save ntfy settings…")));
+    form.append(h("div", { class: "threshold-grid" }, NTFY_KEYS.filter((key) => byKey[key] && key !== "NOTIFY_FAILURES_ENABLED").map((key) => settingField(byKey[key]))));
+    const ntfyCard = h("section", { class: `card wide channel-card ${enabled ? "" : "is-disabled"}` },
+      h("div", { class: "channel-head" }, h("h3", {}, "ntfy"), pill(enabled ? (configured ? "enabled" : "enabled, no topic") : "disabled", enabled && configured ? "ok" : "warn")),
+      kv([
+        ["Topic", configured ? h("code", {}, byKey.NOTIFY_NTFY_TOPIC_URL.value) : "not set"],
+        ["Token", byKey.NOTIFY_NTFY_TOKEN.is_set ? "set (never shown)" : "not set"],
+        ["Last 500 events", `${counts.sent || 0} sent, ${counts.failed || 0} failed, ${counts.off || 0} while off`]
+      ]),
+      h("div", { class: "toolbar-row tight" },
+        h("button", { type: "button", class: enabled ? "danger-button" : "primary-button", onclick: async () => {
+          if (await saveConfig({ NOTIFY_FAILURES_ENABLED: enabled ? "0" : "1" }, config, { title: enabled ? "Disable the ntfy channel?" : "Enable the ntfy channel?", note: enabled ? "Notifications are still recorded and shown in the bell." : "From the next notification on." })) renderAdmin();
+        } }, enabled ? "Disable channel…" : "Enable channel…"),
+        h("button", { type: "button", onclick: () => runAction("notify-test") }, "Send test notification…")),
+      h("details", { open: !configured }, h("summary", {}, "Settings"), form,
+        h("p", { class: "muted" }, "The topic is shown shortened; leave it empty to keep it, or type a full https:// URL to replace it. The token can be replaced or cleared, never read."),
+        h("div", { class: "toolbar-row end" }, h("button", { type: "button", class: "primary-button", onclick: async () => {
+          if (await saveConfig(collectChanges(form), config, { title: "Save ntfy settings?", note: "They apply to the next notification." })) renderAdmin();
+        } }, "Save ntfy settings…"))),
+      h("h4", {}, "Delivery log"),
+      log.length ? h("div", { class: "table-wrap" }, h("table", {},
+        h("thead", {}, h("tr", {}, ["Time", "Result", "Notification", "Why it failed"].map((label) => h("th", {}, label)))),
+        h("tbody", {}, log.slice(0, 200).map((event) => {
+          const result = eventDelivery(event).channels.ntfy;
+          const [word, kind] = DELIVERY_LABELS[result] || [result, ""];
+          return h("tr", {}, h("td", {}, timeNode(event.created_at)), h("td", {}, pill(word, kind)), h("td", {}, event.title),
+            h("td", { class: "muted" }, result === "failed" ? (event.delivery_note || "—").replace(/^ntfy: /, "") : ""));
+        })))) : h("p", { class: "muted" }, "Nothing sent through ntfy yet."));
+    body.append(h("div", { class: "cards" }, ntfyCard,
+      PLANNED_CHANNELS.map(([name, note]) => h("section", { class: "card channel-card is-disabled" },
+        h("div", { class: "channel-head" }, h("h3", {}, name), pill("planned", "")), h("p", { class: "muted" }, note)))));
   };
 
   // Sources ------------------------------------------------------------------
@@ -1376,8 +1411,8 @@
     });
     cards.append(h("section", { class: "card" }, h("h3", {}, "Database backups"), kv(dbRows)));
 
-    const pushed = ntfyEvents().slice(-5).reverse();
-    cards.append(h("section", { class: "card" }, h("h3", {}, "Latest ntfy notifications"),
+    const pushed = sentEvents().slice(-5).reverse();
+    cards.append(h("section", { class: "card" }, h("h3", {}, "Latest notifications"),
       pushed.length ? h("ul", { class: "event-list compact" }, pushed.map((event) => eventItem(event, false))) : h("p", { class: "muted" }, "None yet."),
       h("div", { class: "toolbar-row tight" }, h("button", { type: "button", onclick: openBell }, "Open notifications"))));
     body.append(cards);
@@ -1674,6 +1709,332 @@
     }
   }
 
+  // ------------------------------------------------------------------ folder picker
+  //
+  // Like agentw-gui's folder picker in New Project: browse folders on this server
+  // (fs.browse: only under FILE_JOB_SOURCE_ROOTS) or on a destination
+  // (remote.browse), and use one. On a destination a new sub-folder name can be
+  // added; the first backup creates it.
+
+  const picker = { kind: "fs", remote: "", path: "", parent: null, resolve: null, data: null };
+
+  function closePicker(value) {
+    const dialog = $("#picker-dialog");
+    if (dialog.open) dialog.close();
+    const resolve = picker.resolve;
+    picker.resolve = null;
+    if (resolve) resolve(value);
+  }
+
+  async function pickerLoad(path, { fallback = false } = {}) {
+    const list = clear($("#picker-list"));
+    list.append(h("li", { class: "muted" }, "Loading…"));
+    try {
+      picker.data = picker.kind === "fs"
+        ? await control("fs.browse", path ? { path } : {})
+        : await control("remote.browse", { remote: picker.remote, path: path || "" });
+    } catch (error) {
+      // A starting folder that cannot be opened (typed by hand, outside the allowed
+      // folders): start at the top instead, and say why.
+      if (fallback && path) {
+        await pickerLoad("");
+        $("#picker-list").prepend(h("li", { class: "muted" }, `${path}: ${errorText(error)}`));
+        return;
+      }
+      clear(list).append(h("li", {}, errorNode(error)));
+      return;
+    }
+    if (picker.data.denied) {
+      const denied = `${path}: ${picker.data.denied}`;
+      await pickerLoad("");
+      $("#picker-list").prepend(h("li", { class: "muted" }, denied));
+      return;
+    }
+    const data = picker.data;
+    picker.path = data.path || "";
+    $("#picker-current").textContent = picker.kind === "fs" ? (picker.path || "Allowed folders") : `${data.base}${picker.path ? `${data.base.endsWith(":") ? "" : "/"}${picker.path}` : ""}`;
+    $("#picker-up").disabled = picker.kind === "fs" ? !picker.path : !picker.path;
+    $("#picker-select").disabled = picker.kind === "fs" && !picker.path;
+    const showHidden = $("#picker-hidden").checked;
+    const folders = picker.kind === "fs"
+      ? data.folders.filter((folder) => showHidden || !folder.hidden)
+      : data.folders.map((name) => ({ name, path: picker.path ? `${picker.path}/${name}` : name, allowed: true, hidden: name.startsWith(".") })).filter((folder) => showHidden || !folder.hidden);
+    clear(list);
+    if (picker.kind === "remote" && !data.exists) list.append(h("li", { class: "muted" }, "This folder does not exist yet; the first backup creates it."));
+    if (!folders.length && data.exists !== false) list.append(h("li", { class: "muted" }, "No sub-folders."));
+    for (const folder of folders) {
+      list.append(h("li", {}, h("button", {
+        type: "button", class: "picker-item", disabled: !folder.allowed,
+        title: folder.allowed ? `Open ${folder.name}` : "Holds system or Backup Suite files: cannot be backed up",
+        onclick: () => pickerLoad(folder.path)
+      }, "📁 ", folder.name, folder.allowed ? "" : " (not allowed)")));
+    }
+  }
+
+  function openPicker({ kind, remote = "", start = "", title, eyebrow }) {
+    picker.kind = kind;
+    picker.remote = remote;
+    $("#picker-title").textContent = title || "Choose a folder";
+    $("#picker-eyebrow").textContent = eyebrow || (kind === "fs" ? "Folder on this server" : "Folder on the destination");
+    $("#picker-new").hidden = kind !== "remote";
+    $("#picker-new-name").value = "";
+    $("#picker-dialog").showModal();
+    pickerLoad(start, { fallback: true });
+    return new Promise((resolve) => { picker.resolve = resolve; });
+  }
+
+  function bindPicker() {
+    $("#picker-close").addEventListener("click", () => closePicker(null));
+    $("#picker-cancel").addEventListener("click", () => closePicker(null));
+    $("#picker-dialog").addEventListener("cancel", () => closePicker(null));
+    $("#picker-hidden").addEventListener("change", () => pickerLoad(picker.path));
+    $("#picker-up").addEventListener("click", () => {
+      if (picker.kind === "fs") pickerLoad(picker.data?.parent || "");
+      else pickerLoad(picker.path.split("/").slice(0, -1).join("/"));
+    });
+    $("#picker-select").addEventListener("click", () => {
+      let value = picker.path;
+      const extra = $("#picker-new-name").value.trim().replace(/^\/+|\/+$/g, "");
+      if (picker.kind === "remote" && extra) value = value ? `${value}/${extra}` : extra;
+      closePicker(value);
+    });
+  }
+
+  // ------------------------------------------------------------------ destinations
+
+  async function loadRemotes(providers = false) {
+    const data = await control("remotes", providers ? { providers: true } : {});
+    state.remotes = data;
+    return data;
+  }
+
+  function remoteChoiceOptions(selected) {
+    const data = state.remotes;
+    const select = clear($("#job-remote-choice"));
+    select.append(h("option", { value: "" }, `Default destination (${data?.default_root || "RCLONE_REMOTE_ROOT"})`));
+    for (const remote of (data?.remotes || []).filter((item) => item.allowed)) {
+      select.append(h("option", { value: remote.name }, `${remote.name} (${remote.type_label})`));
+    }
+    select.value = selected || "";
+    if (select.value !== (selected || "")) select.value = "";
+  }
+
+  function updateDestinationFields() {
+    const form = $("#job-form");
+    const remote = form.elements.remote_choice.value;
+    $("#job-mode-label").hidden = Boolean(remote);
+    form.elements.destination_value.disabled = !remote && form.elements.destination_mode.value === "same-name";
+    form.elements.destination_value.placeholder = remote ? "e.g. backups/web10" : "e.g. sites/web10";
+  }
+
+  renderers.destinations = async (body) => {
+    body.append(loadingNode());
+    let data;
+    try {
+      data = await loadRemotes(true);
+    } catch (error) {
+      clear(body).append(errorNode(error));
+      return;
+    }
+    clear(body);
+    body.append(h("p", { class: "muted" }, "Where backups can go: Google Drive, Dropbox, OneDrive, S3 and others, kept as rclone remotes. Set one up here, then choose it in a job's Destination. Tokens and passwords are stored by rclone on the server and are never shown."),
+      h("div", { class: "toolbar-row tight" }, h("button", { type: "button", class: "primary-button", onclick: () => openRemoteWizard(data.providers) }, "+ New destination")));
+    const cards = h("div", { class: "cards" });
+    for (const remote of data.remotes) {
+      const result = h("div", {});
+      const settings = Object.entries(remote.settings).slice(0, 12);
+      cards.append(h("section", { class: `card ${remote.allowed ? "" : "is-disabled"}` },
+        h("div", { class: "channel-head" }, h("h3", {}, remote.name), pill(remote.type_label || remote.type, remote.allowed ? "info" : "")),
+        kv([
+          ["Used by", remote.used_by.length ? remote.used_by.join(", ") : "nothing yet"],
+          ...settings.map(([key, value]) => [key, h("code", {}, value)])
+        ]),
+        remote.allowed ? null : h("p", { class: "muted" }, "Set up on the server with a type the GUI does not manage; jobs cannot choose it here."),
+        h("div", { class: "toolbar-row tight" },
+          h("button", { type: "button", onclick: async () => {
+            clear(result).append(loadingNode("Testing (up to 45 s)…"));
+            try {
+              const test = await control("remote.test", { name: remote.name });
+              clear(result).append(test.ok
+                ? h("p", { class: "notice ok" }, `Reachable (${test.seconds}s).`, test.about?.free !== undefined ? ` Free: ${bytes(test.about.free)}${test.about.total ? ` of ${bytes(test.about.total)}` : ""}.` : "")
+                : h("p", { class: "notice bad" }, test.error));
+            } catch (error) {
+              clear(result).append(errorNode(error));
+            }
+          } }, "Test"),
+          remote.allowed ? h("button", { type: "button", onclick: () => openPicker({ kind: "remote", remote: remote.name, title: `Folders on ${remote.name}` }) }, "Browse…") : null,
+          h("button", { type: "button", class: "danger-button", disabled: remote.used_by.length > 0, title: remote.used_by.length ? `Used by ${remote.used_by.join(", ")}` : "", onclick: async () => {
+            if (!(await confirmAction({ title: `Remove destination ${remote.name}?`, lines: ["Removes it from rclone.conf (a backup copy is kept and the change is audited).", "Nothing stored on it is deleted."], okLabel: "Remove", danger: true }))) return;
+            try {
+              await control("remote.delete", { name: remote.name });
+              toast(`Destination ${remote.name} removed.`, "warn");
+              renderAdmin();
+            } catch (error) {
+              toast(errorText(error), "error", 10000);
+            }
+          } }, "Remove…")),
+        result));
+    }
+    if (!data.remotes.length) cards.append(h("p", { class: "empty" }, "No destinations yet."));
+    body.append(cards);
+  };
+
+  // The setup wizard: the type and its main options, then rclone's own questions
+  // one at a time (for Google Drive, Dropbox, OneDrive and Box: one sign-in on a
+  // computer with a browser).
+
+  const wizard = { name: "", state: "", providers: null, onDone: null };
+
+  // s3 has sub-providers (AWS, Wasabi, MinIO, …); some options apply to some only.
+  function providerMatches(option, provider) {
+    if (!option.provider) return true;
+    const negated = option.provider.startsWith("!");
+    const names = option.provider.replace(/^!/, "").split(",").map((item) => item.trim());
+    if (!provider) return negated;
+    return negated ? !names.includes(provider) : names.includes(provider);
+  }
+
+  function optionInput(option, providerValue) {
+    const examples = option.examples.filter((example) => !example.provider || providerMatches({ provider: example.provider }, providerValue));
+    if (option.type === "bool") {
+      return h("select", { name: option.name }, ["", "true", "false"].map((value) => h("option", { value, selected: value === "" }, value === "" ? `default (${option.default || "false"})` : value === "true" ? "Yes" : "No")));
+    }
+    if (examples.length && option.exclusive) {
+      return h("select", { name: option.name }, h("option", { value: "" }, option.required ? "Choose…" : `default${option.default ? ` (${option.default})` : ""}`),
+        examples.map((example) => h("option", { value: example.value }, `${example.value}${example.help ? ` — ${example.help.split("\n")[0]}` : ""}`)));
+    }
+    const input = h("input", { name: option.name, type: option.password ? "password" : "text", autocomplete: option.password ? "new-password" : "off", spellcheck: "false", placeholder: option.default || "" });
+    if (examples.length) {
+      const listId = `opt-${option.name}-list`;
+      input.setAttribute("list", listId);
+      return h("span", {}, input, h("datalist", { id: listId }, examples.map((example) => h("option", { value: example.value }, example.help.split("\n")[0]))));
+    }
+    return input;
+  }
+
+  function renderWizardStart(error) {
+    const body = clear($("#remote-body"));
+    const providers = wizard.providers || {};
+    const types = Object.entries(providers).sort((a, b) => a[1].label.localeCompare(b[1].label));
+    const nameInput = h("input", { type: "text", name: "name", spellcheck: "false", autocomplete: "off", placeholder: "e.g. gdrive or dropbox", maxlength: "32" });
+    const typeSelect = h("select", { name: "type" }, h("option", { value: "" }, "Choose a service…"), types.map(([type, info]) => h("option", { value: type }, info.label)));
+    const optionsHost = h("div", { class: "threshold-grid" });
+    const drawOptions = (chosen = "") => {
+      clear(optionsHost);
+      const info = providers[typeSelect.value];
+      if (!info) return;
+      for (const option of info.options.filter((item) => item.name === "provider" || providerMatches(item, chosen))) {
+        const help = option.help.split("\n");
+        optionsHost.append(h("div", { class: "setting-row" },
+          h("label", {}, h("code", {}, option.name), option.required ? " (required)" : ""),
+          optionInput(option, chosen),
+          h("div", { class: "meta" }, help[0]),
+          help.length > 1 ? h("details", { class: "meta" }, h("summary", {}, "More"), h("pre", {}, help.slice(1).join("\n"))) : null));
+      }
+      const providerSelect = optionsHost.querySelector('[name="provider"]');
+      if (providerSelect) {
+        providerSelect.value = chosen;
+        providerSelect.addEventListener("change", () => drawOptions(providerSelect.value));
+      }
+    };
+    typeSelect.addEventListener("change", () => drawOptions(""));
+    body.append(
+      error ? h("div", { class: "notice bad", role: "alert" }, error) : null,
+      h("div", { class: "threshold-grid" },
+        h("label", {}, "Name (used in jobs, e.g. gdrive)", nameInput),
+        h("label", {}, "Service", typeSelect)),
+      h("p", { class: "muted" }, "Only what the service needs is asked. Leave a field empty to use rclone's default. Google Drive, Dropbox, OneDrive and Box then ask you to sign in once."),
+      optionsHost,
+      h("div", { class: "toolbar-row end" },
+        h("button", { type: "button", onclick: () => $("#remote-dialog").close() }, "Cancel"),
+        h("button", { type: "button", class: "primary-button", onclick: async (event) => {
+          const options = {};
+          for (const input of optionsHost.querySelectorAll("[name]")) if (input.value.trim()) options[input.name] = input.value.trim();
+          event.target.disabled = true;
+          try {
+            wizard.name = nameInput.value.trim();
+            handleWizardReply(await control("remote.create", { name: wizard.name, type: typeSelect.value, options }));
+          } catch (error) {
+            renderWizardStart(errorText(error));
+          }
+        } }, "Continue")));
+  }
+
+  function handleWizardReply(reply) {
+    if (reply.done) {
+      $("#remote-dialog").close();
+      toast(reply.error ? `Destination ${reply.name} saved, with a warning: ${reply.error}` : `Destination ${reply.name} is ready.`, reply.error ? "warn" : "info", 10000);
+      if (adminOpen() && state.adminTab === "destinations") renderAdmin();
+      if (wizard.onDone) wizard.onDone(reply.name);
+      return;
+    }
+    wizard.state = reply.state;
+    renderWizardQuestion(reply.question, reply.error);
+  }
+
+  function renderWizardQuestion(question, error) {
+    const body = clear($("#remote-body"));
+    const authorize = (question.help.match(/rclone authorize "[^"]+"(?: "[^"]+")?/) || [])[0];
+    let input;
+    if (authorize) {
+      input = h("textarea", { rows: "5", spellcheck: "false", placeholder: "Paste the result here ({\"access_token\": …})" });
+    } else if (question.type === "bool") {
+      input = h("select", {}, h("option", { value: "true", selected: question.default === "true" }, "Yes"), h("option", { value: "false", selected: question.default !== "true" }, "No"));
+    } else if (question.examples.length && question.exclusive) {
+      input = h("select", {}, question.examples.map((example) => h("option", { value: example.value, selected: example.value === question.default }, `${example.value}${example.help ? ` — ${example.help.split("\n")[0]}` : ""}`)));
+    } else {
+      input = h("input", { type: question.password ? "password" : "text", value: question.default || "", spellcheck: "false", autocomplete: "off" });
+    }
+    // Headless sign-in: "Use auto config?" is always answered No (the server has no browser).
+    if (question.name === "config_is_local") {
+      submitWizard("false");
+      return;
+    }
+    body.append(error ? h("div", { class: "notice bad", role: "alert" }, error) : null,
+      h("p", { class: "eyebrow" }, `Setting up ${wizard.name}`));
+    if (authorize) {
+      body.append(h("h3", {}, "Sign in"),
+        h("ol", { class: "connect-steps" },
+          h("li", {}, "On your own computer (it has a browser), install rclone if it is not there: ", h("a", { href: "https://rclone.org/downloads/", target: "_blank", rel: "noopener noreferrer" }, "rclone.org/downloads"), ". Windows: unzip it, no installer needed."),
+          h("li", {}, "In a terminal there, run this command. A browser opens; sign in and allow access:", h("div", { class: "copy-row" }, h("code", {}, authorize), h("button", { type: "button", onclick: () => copyText(authorize) }, "Copy"))),
+          h("li", {}, "rclone prints a result between two lines of dashes. Copy all of it and paste it below.")),
+        input);
+    } else {
+      body.append(h("h3", {}, question.name.replace(/^config_/, "").replace(/_/g, " ")), h("pre", { class: "wizard-help" }, question.help.trim()), input);
+    }
+    body.append(h("div", { class: "toolbar-row end" },
+      h("button", { type: "button", onclick: () => $("#remote-dialog").close() }, "Stop here"),
+      h("button", { type: "button", class: "primary-button", onclick: () => submitWizard(input.value.trim()) }, "Continue")));
+    input.focus();
+  }
+
+  async function submitWizard(result) {
+    clear($("#remote-body")).append(loadingNode("Asking rclone…"));
+    try {
+      handleWizardReply(await control("remote.continue", { name: wizard.name, state: wizard.state, result }));
+    } catch (error) {
+      clear($("#remote-body")).append(errorNode(error), h("div", { class: "toolbar-row end" }, h("button", { type: "button", onclick: () => $("#remote-dialog").close() }, "Close")));
+    }
+  }
+
+  async function openRemoteWizard(providers, onDone = null) {
+    wizard.onDone = onDone;
+    wizard.name = "";
+    wizard.state = "";
+    if (!providers) {
+      try {
+        providers = (await loadRemotes(true)).providers;
+      } catch (error) {
+        toast(errorText(error), "error");
+        return;
+      }
+    }
+    wizard.providers = providers;
+    $("#remote-title").textContent = "New destination";
+    renderWizardStart();
+    $("#remote-dialog").showModal();
+  }
+
   // ------------------------------------------------------------------ job changes
   //
   // New job, Edit, Enable/Disable, Remove and Back up now. Every change is checked
@@ -1693,8 +2054,10 @@
       enabled: form.elements.enabled.checked,
       label: form.elements.label.value.trim(),
       source: form.elements.source.value.trim(),
-      destination_mode: form.elements.destination_mode.value,
-      destination_value: form.elements.destination_value.value.trim(),
+      destination_mode: form.elements.remote_choice.value ? "remote" : form.elements.destination_mode.value,
+      destination_value: form.elements.remote_choice.value
+        ? `${form.elements.remote_choice.value}:${form.elements.destination_value.value.trim().replace(/^\/+|\/+$/g, "")}`
+        : form.elements.destination_value.value.trim(),
       stop_file: form.elements.stop_file.value.trim(),
       isolation: form.querySelector('input[name="isolation"]:checked')?.value || "single",
       excludes: lines("excludes"),
@@ -1723,8 +2086,7 @@
     jobEditor.timer = setTimeout(async () => {
       const token = ++jobEditor.token;
       const job = readJobForm();
-      const destinationInput = $("#job-form").elements.destination_value;
-      destinationInput.disabled = job.destination_mode === "same-name";
+      updateDestinationFields();
       try {
         const args = { job };
         if (jobEditor.name) args.name = jobEditor.name;
@@ -1746,6 +2108,11 @@
     jobEditor.check = null;
     $("#job-dialog-title").textContent = name ? `Edit job ${name}` : "New backup job";
     clear($("#job-check")).append(loadingNode("Checking…"));
+    try {
+      await loadRemotes();
+    } catch {
+      state.remotes = null;
+    }
     let job = { enabled: true, label: "", source: "", destination_mode: "fixed", destination_value: "", stop_file: "", isolation: "single", excludes: [], volatile: [] };
     try {
       if (name) {
@@ -1768,8 +2135,17 @@
     form.elements.label.value = job.label;
     form.elements.enabled.checked = job.enabled;
     form.elements.source.value = job.source;
-    form.elements.destination_mode.value = job.destination_mode;
-    form.elements.destination_value.value = job.destination_value;
+    if (job.destination_mode === "remote") {
+      const [remoteName, ...folder] = job.destination_value.split(":");
+      remoteChoiceOptions(remoteName);
+      form.elements.destination_mode.value = "fixed";
+      form.elements.destination_value.value = folder.join(":").replace(/^\/+/, "");
+    } else {
+      remoteChoiceOptions("");
+      form.elements.destination_mode.value = job.destination_mode;
+      form.elements.destination_value.value = job.destination_value;
+    }
+    updateDestinationFields();
     form.elements.stop_file.value = job.stop_file;
     for (const radio of form.querySelectorAll('input[name="isolation"]')) radio.checked = radio.value === job.isolation;
     form.elements.excludes.value = patternsText(job.excludes);
@@ -1960,10 +2336,11 @@
 
   const ADMIN_TABS = {
     actions: "Actions & schedule",
+    destinations: "Destinations",
     runs: "Runs & failures",
     profiles: "Profiles & limits",
     watchdog: "Watchdog",
-    notifications: "Notifications (ntfy)",
+    notifications: "Notifications",
     settings: "All settings",
     sources: "Sources file",
     logs: "Logs",
@@ -2049,38 +2426,47 @@
 
   // ------------------------------------------------------------------ bell
   //
-  // The bell lists the notifications Backup Suite sends to ntfy (each with what
-  // happened to the push), and every event under All activity. More channels can
-  // be added later the same way.
+  // Notifications are generic: one message per event, delivered through every
+  // enabled channel (ntfy now; Telegram, WhatsApp, email and SMS later). The bell
+  // lists them all, each with what every channel did; channels are set up in
+  // Admin → Notifications.
 
-  const LEGACY_GUI_ONLY = new Set(["run-finished"]);
-  function isNtfyEvent(event) {
-    if (event.ntfy !== undefined) return event.ntfy !== "";
-    return !LEGACY_GUI_ONLY.has(event.category);
+  const CHANNEL_LABELS = { ntfy: "ntfy", telegram: "Telegram", whatsapp: "WhatsApp", email: "Email", sms: "SMS" };
+  const DELIVERY_LABELS = { sent: ["sent", "ok"], failed: ["failed", "bad"], off: ["channel off", "warn"] };
+
+  // Events written before channels existed carry "ntfy": "<result>".
+  function eventDelivery(event) {
+    if (event.delivery && typeof event.delivery === "object") return { channels: event.delivery, held: Boolean(event.held) };
+    if (event.ntfy === "held") return { channels: {}, held: true };
+    if (event.ntfy) return { channels: { ntfy: event.ntfy }, held: false };
+    return { channels: {}, held: false };
   }
 
-  function ntfyEvents() {
-    return state.events.filter(isNtfyEvent);
+  function sentEvents() {
+    return state.events.filter((event) => Object.keys(eventDelivery(event).channels).length || eventDelivery(event).held);
   }
 
-  const NTFY_DELIVERY = {
-    sent: ["sent to ntfy", "ok"],
-    failed: ["ntfy delivery failed", "bad"],
-    off: ["ntfy is off: not sent", "warn"],
-    held: ["not pushed again: already reported", ""]
-  };
+  function deliveryPills(event) {
+    const delivery = eventDelivery(event);
+    if (delivery.held) return [pill("not sent again: already reported", "")];
+    const pills = Object.entries(delivery.channels).map(([channel, result]) => {
+      const [word, kind] = DELIVERY_LABELS[result] || [result, ""];
+      return pill(`${CHANNEL_LABELS[channel] || channel}: ${word}`, kind);
+    });
+    return pills.length ? pills : [pill("GUI only", "")];
+  }
 
   function eventItem(event, isNew) {
     const date = parseTime(event.created_at);
-    const delivery = NTFY_DELIVERY[event.ntfy];
     return h("li", { class: `event-item severity-${event.severity} ${isNew ? "is-new" : ""}` },
-      h("header", {}, h("span", {}, pill(event.severity, event.severity === "error" ? "bad" : event.severity === "warning" ? "warn" : "info"), " ", event.category,
-        delivery ? h("span", {}, " ", pill(delivery[0], delivery[1])) : ""), timeNode(date ? date.toISOString() : event.created_at)),
+      h("header", {}, h("span", { class: "event-pills" }, pill(event.severity, event.severity === "error" ? "bad" : event.severity === "warning" ? "warn" : "info"), " ", event.category, " ", deliveryPills(event)),
+        timeNode(date ? date.toISOString() : event.created_at)),
       h("strong", {}, event.title),
-      event.message ? h("details", {}, h("summary", {}, "Details"), h("p", { class: "event-message" }, event.message)) : null);
+      event.message || event.delivery_note ? h("details", {}, h("summary", {}, "Details"),
+        event.message ? h("p", { class: "event-message" }, event.message) : null,
+        event.delivery_note ? h("p", { class: "muted" }, `Delivery: ${event.delivery_note}`) : null) : null);
   }
 
-  let bellTab = "ntfy";
   async function openBell() {
     const panel = $("#bell-panel");
     const body = clear($("#bell-body"));
@@ -2095,20 +2481,14 @@
       return;
     }
     const previousSeen = state.seenSeq;
-    const draw = () => {
-      const events = bellTab === "ntfy" ? ntfyEvents() : state.events;
-      append(clear(body), [
-        h("div", { class: "settings-tabs", role: "tablist", "aria-label": "Notification lists" },
-          h("button", { type: "button", role: "tab", "aria-selected": String(bellTab === "ntfy"), onclick: () => { bellTab = "ntfy"; draw(); } }, `ntfy (${ntfyEvents().length})`),
-          h("button", { type: "button", role: "tab", "aria-selected": String(bellTab === "all"), onclick: () => { bellTab = "all"; draw(); } }, `All activity (${state.events.length})`)),
-        h("p", { class: "muted" }, bellTab === "ntfy" ? "What Backup Suite sent to ntfy, with what happened to each push. Other channels can be added later." : "Every event, including runs that finished normally."),
-        events.length ? h("ul", { class: "event-list" }, events.slice().reverse().slice(0, 200).map((event) => eventItem(event, event.seq > previousSeen))) : h("p", { class: "empty" }, "Nothing yet."),
-        h("div", { class: "toolbar-row tight" },
-          h("button", { type: "button", onclick: () => { closeBell(); openAdmin("notifications"); } }, "ntfy settings…"),
-          h("button", { type: "button", onclick: () => { closeBell(); openAdmin("activity"); } }, "Activity & audit…"))
-      ]);
-    };
-    draw();
+    const events = state.events;
+    append(clear(body), [
+      h("p", { class: "muted" }, "Every notification, newest first. Each shows what every channel did with it; routine events such as a normal run finishing are shown here only."),
+      events.length ? h("ul", { class: "event-list" }, events.slice().reverse().slice(0, 200).map((event) => eventItem(event, event.seq > previousSeen))) : h("p", { class: "empty" }, "Nothing yet."),
+      h("div", { class: "toolbar-row tight" },
+        h("button", { type: "button", onclick: () => { closeBell(); openAdmin("notifications"); } }, "Channels…"),
+        h("button", { type: "button", onclick: () => { closeBell(); openAdmin("activity"); } }, "Activity & audit…"))
+    ]);
     markEventsSeen();
     $("#bell-close").focus();
   }
@@ -2198,6 +2578,7 @@
     });
     stream.addEventListener("hello", (message) => {
       const data = JSON.parse(message.data);
+      markUpdateAvailable(data.build);
       state.chart = data.chart || [];
       if (data.status) state.status = data.status;
       state.statusError = data.error;
@@ -2236,6 +2617,18 @@
       if (adminOpen() && state.adminTab === "activity") renderAdmin();
       if (!$("#bell-panel").hidden) openBell();
     });
+  }
+
+  // Like agentw-gui: when the server serves a newer GUI than this page loaded (it was
+  // reinstalled), the reload button turns red; one page reload gets the new one.
+  function markUpdateAvailable(build) {
+    if (!build || !state.session?.build || build === state.session.build) return;
+    const button = $("#reload-button");
+    if (button.classList.contains("update-available")) return;
+    button.classList.add("update-available");
+    button.title = "A new version of this GUI is installed: reload the page to use it";
+    button.setAttribute("aria-label", button.title);
+    toast("A new version of the GUI is installed. Press the red reload button.", "warn", 12000);
   }
 
   function browserNotify(event) {
@@ -2499,6 +2892,35 @@
     });
     $("#home-button").addEventListener("click", goHome);
     $("#new-job-button").addEventListener("click", () => openJobEditor(null));
+    bindPicker();
+    $("#remote-close").addEventListener("click", () => $("#remote-dialog").close());
+    $("#job-browse-source").addEventListener("click", async () => {
+      const form = $("#job-form");
+      const chosen = await openPicker({ kind: "fs", start: form.elements.source.value.trim(), title: "Source folder" });
+      if (chosen) {
+        form.elements.source.value = chosen;
+        if (!form.elements.label.value.trim()) form.elements.label.value = chosen.split("/").filter(Boolean).pop().replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 64);
+        scheduleJobCheck();
+      }
+    });
+    $("#job-browse-destination").addEventListener("click", async () => {
+      const form = $("#job-form");
+      const remote = form.elements.remote_choice.value;
+      const chosen = await openPicker({ kind: "remote", remote, start: form.elements.destination_value.value.trim().replace(/^\/+|\/+$/g, ""), title: remote ? `Folder on ${remote}` : "Folder on the default destination" });
+      if (chosen !== null) {
+        form.elements.destination_value.value = chosen;
+        if (!remote) form.elements.destination_mode.value = "fixed";
+        scheduleJobCheck();
+      }
+    });
+    $("#job-manage-destinations").addEventListener("click", () => {
+      openRemoteWizard(null, async (name) => {
+        await loadRemotes();
+        remoteChoiceOptions(name);
+        updateDestinationFields();
+        scheduleJobCheck();
+      });
+    });
     $("#job-form").addEventListener("input", scheduleJobCheck);
     $("#job-form").addEventListener("change", scheduleJobCheck);
     $("#job-form").addEventListener("submit", (event) => {

@@ -263,7 +263,7 @@ if [ "$watchdog_already_notified" -eq 1 ]; then
     echo "Failure record retained at: $failure_log_path"
     exit 0
 fi
-ntfy_publish "$title_prefix failure on $host_name: $unit_name" "$priority" "warning,backup" \
+notify_publish "$title_prefix failure on $host_name: $unit_name" "$priority" "warning,backup" \
     "$summary_message" "$failure_log_path" "${failure_timestamp}-${failure_unit_name}.log" run-failed \
     || fail "Failure notification could not be delivered for unit: $unit_name"
 

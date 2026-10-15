@@ -28,6 +28,11 @@ fi
 run_started_at=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 archive_timestamp=$(date -u '+%Y-%m-%d_%H-%M-%S')
 remote_base=$(remote_base_root)
+# The remote root of the job being backed up: remote_base, or the job's own remote
+# (destination mode "remote", value "name:folder"). Previous versions are kept and
+# cleaned under each root used in the run.
+job_remote_root="$remote_base"
+cleanup_roots=("$remote_base")
 run_outcome="success"
 synced_count=0
 skipped_count=0
@@ -505,7 +510,7 @@ What to do: if a file is a log or cache, add it to .backup-excludes in that proj
 Host: $(hostname) | Profile: $PROFILE_NAME
 MSG
 )
-    ntfy_publish "${NOTIFY_NTFY_TITLE_PREFIX:-Backup Suite}: files repeatedly skipped while changing on $(hostname)" default "hourglass,backup" "$message" "" "" changing-files || true
+    notify_publish "${NOTIFY_NTFY_TITLE_PREFIX:-Backup Suite}: files repeatedly skipped while changing on $(hostname)" default "hourglass,backup" "$message" "" "" changing-files || true
 }
 
 migration_key_for_destination() {
@@ -588,7 +593,7 @@ record_skipped_project() {
     local state_key=""
 
     if [ -n "$4" ]; then
-        destination_path=$(join_path "$remote_base" "$4")
+        destination_path=$(join_path "$job_remote_root" "$4")
         state_key=$(migration_key_for_destination "$destination_path")
     fi
     project_started_iso=""
@@ -790,7 +795,7 @@ process_project() {
             *) project_result="failed" ;;
         esac
     fi
-    destination_path=$(join_path "$remote_base" "$destination_relative")
+    destination_path=$(join_path "$job_remote_root" "$destination_relative")
     record_project_result "$current_entry_label" "$project_label" "$source_path" "$destination_path" \
         "$(migration_key_for_destination "$destination_path")" "$project_result"
     rm -f "$project_changes_file" 2>/dev/null || true
@@ -852,8 +857,8 @@ process_project_sync() {
     fi
 
     select_project_profile
-    destination_path=$(join_path "$remote_base" "$destination_relative")
-    archive_path=$(join_path "$remote_base" "${FILE_ARCHIVE_FOLDER_NAME:-deleted_files}" "$archive_timestamp" "$destination_relative")
+    destination_path=$(join_path "$job_remote_root" "$destination_relative")
+    archive_path=$(join_path "$job_remote_root" "${FILE_ARCHIVE_FOLDER_NAME:-deleted_files}" "$archive_timestamp" "$destination_relative")
     migration_key=$(migration_key_for_destination "$destination_path")
     migration_report_file=$(join_path "$STATE_DIR" "migration-reports" "${migration_key}.txt")
     migration_marker_file=$(join_path "$STATE_DIR" "link-migrations" "${migration_key}.confirmed")
@@ -1095,6 +1100,7 @@ while IFS='|' read -r enabled label source_path destination_mode destination_val
     is_enabled_value "$enabled" || continue
     current_entry_label="${label:-$source_path}"
     job_selected "$current_entry_label" || continue
+    job_remote_root="$remote_base"
 
     if [ -n "$unexpected_fields" ]; then
         failed_count=$((failed_count + 1))
@@ -1131,7 +1137,22 @@ while IFS='|' read -r enabled label source_path destination_mode destination_val
         continue
     fi
 
+    job_remote_root="$remote_base"
     case "$destination_mode" in
+        remote)
+            if [[ ! "$destination_value" =~ ^([A-Za-z0-9][A-Za-z0-9_-]{0,31}):/?(.+)$ ]]; then
+                failed_count=$((failed_count + 1))
+                failed_entries+=("${label:-$source_path}:invalid-remote-destination")
+                echo "Destination for remote mode must be remote:folder, not '$destination_value', for source '$source_path'"
+                record_skipped_project "$current_entry_label" "$current_entry_label" "$source_path" "" invalid-config
+                continue
+            fi
+            job_remote_root="${BASH_REMATCH[1]}:"
+            destination_base=$(strip_slashes "${BASH_REMATCH[2]}")
+            if [[ " ${cleanup_roots[*]} " != *" $job_remote_root "* ]]; then
+                cleanup_roots+=("$job_remote_root")
+            fi
+            ;;
         same-name)
             destination_base=$(basename "$source_path")
             ;;
@@ -1207,25 +1228,28 @@ if [ "$migration_required_count" -gt 0 ]; then
 fi
 
 if [ "$failed_count" -eq 0 ]; then
-    echo "Cleaning archived file versions older than ${FILE_RETENTION_DAYS:-21d} from ${FILE_ARCHIVE_FOLDER_NAME:-deleted_files}"
-    archive_listing_file=$(mktemp)
-    temp_runtime_files+=("$archive_listing_file")
-    if ! list_destination_files_sorted "$(join_path "$remote_base" "${FILE_ARCHIVE_FOLDER_NAME:-deleted_files}")" "$archive_listing_file"; then
-        cleanup_failed=1
-        echo "Could not inspect archived files for retention cleanup."
-    elif [ ! -s "$archive_listing_file" ]; then
-        echo "No archived file versions currently require inspection."
-    elif "$RCLONE_BIN" delete "$(join_path "$remote_base" "${FILE_ARCHIVE_FOLDER_NAME:-deleted_files}")" \
-        --config "$RCLONE_CONFIG_PATH" \
-        --min-age "${FILE_RETENTION_DAYS:-21d}" \
-        --rmdirs \
-        --quiet \
-        "${file_extra_args[@]}"; then
-        echo "Archived file cleanup completed successfully."
-    else
-        cleanup_failed=1
-        echo "Archived file cleanup failed."
-    fi
+    for cleanup_root in "${cleanup_roots[@]}"; do
+        archive_root=$(join_path "$cleanup_root" "${FILE_ARCHIVE_FOLDER_NAME:-deleted_files}")
+        echo "Cleaning archived file versions older than ${FILE_RETENTION_DAYS:-21d} from $archive_root"
+        archive_listing_file=$(mktemp)
+        temp_runtime_files+=("$archive_listing_file")
+        if ! list_destination_files_sorted "$archive_root" "$archive_listing_file"; then
+            cleanup_failed=1
+            echo "Could not inspect archived files for retention cleanup."
+        elif [ ! -s "$archive_listing_file" ]; then
+            echo "No archived file versions currently require inspection."
+        elif "$RCLONE_BIN" delete "$archive_root" \
+            --config "$RCLONE_CONFIG_PATH" \
+            --min-age "${FILE_RETENTION_DAYS:-21d}" \
+            --rmdirs \
+            --quiet \
+            "${file_extra_args[@]}"; then
+            echo "Archived file cleanup completed successfully."
+        else
+            cleanup_failed=1
+            echo "Archived file cleanup failed."
+        fi
+    done
 else
     echo "Skipping archive retention cleanup because one or more isolated projects failed."
 fi

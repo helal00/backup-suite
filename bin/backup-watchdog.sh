@@ -743,7 +743,7 @@ MSG
         echo "Durable run log: $(join_path "$STATE_DIR" "logs" "backup-file.log")"
         echo "Watchdog history: $history_file"
     } > "$detail_file"
-    ntfy_publish "$title_prefix: $headline on $host_name" "$priority" "$tags" "$message" \
+    notify_publish "$title_prefix: $headline on $host_name" "$priority" "$tags" "$message" \
         "$detail_file" "watchdog-${event_key}-$(date -u '+%Y%m%dT%H%M%SZ').txt" "$event_category" || true
     rm -f "$detail_file"
 }
@@ -896,7 +896,7 @@ finish_run() {
         episode_value episode_notified notified
         rm -f "$episode_file"
         if [ "$episode_notified" = "1" ]; then
-            ntfy_publish "$title_prefix: backups recovered on $host_name" default "white_check_mark,backup" "$(cat <<MSG
+            notify_publish "$title_prefix: backups recovered on $host_name" default "white_check_mark,backup" "$(cat <<MSG
 The $monitored_unit run completed normally. The memory-pressure episode that started at ${episode_opened:-an earlier run} (${episode_cause:-server pressure}) is over.
 
 This run: $(( duration_seconds / 60 )) min, peak $(mib "$peak_memory") RAM ($(mib "$peak_anon") not reclaimable), peak swap $(mib "$peak_swap"), events: ${events_seen[*]:-none}.
@@ -917,7 +917,7 @@ MSG
         esac
     done
     if [ "$intervention_count" -gt 0 ] && [ -z "$final_action" ]; then
-        ntfy_publish "$title_prefix: backup finished after watchdog intervention on $host_name" default "white_check_mark,backup" "$(cat <<MSG
+        notify_publish "$title_prefix: backup finished after watchdog intervention on $host_name" default "white_check_mark,backup" "$(cat <<MSG
 The $monitored_unit run finished after the watchdog had to intervene (${events_seen[*]}).
 
 Run resources: $(( duration_seconds / 60 )) min, peak $(mib "$peak_memory") RAM ($(mib "$peak_anon") not reclaimable), peak swap $(mib "$peak_swap"), average CPU ${average_cpu}%, peak ${peak_cpu}%, peak $peak_tasks tasks.

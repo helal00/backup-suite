@@ -595,3 +595,18 @@ lists every `global.conf` key in groups; programs, paths and install options are
 read-only; schedule keys are applied through `bin/apply-schedule.sh` (also run by
 production-deploy.sh and setup.sh).
 
+## Revision 6 (2026-10-15): destinations, pickers, generic notifications
+
+- Verbs `remotes`, `remote.create`, `remote.continue` (rclone `config create
+  --non-interactive` / `config update --continue`, the pending step kept in
+  `<state>/gui/remote-wizard/`), `remote.test`, `remote.delete` (refused while used),
+  `remote.browse`, `fs.browse`. Allowed types only; options matching
+  `file|command|ssh|env_auth|key_use_agent|socket` refused; secrets never returned.
+- Job destination mode `remote` (`name:folder`); previous versions are kept and
+  cleaned under each remote used.
+- Notifications: `notify_publish` sends one message through every channel in
+  `NOTIFY_CHANNELS` (`channel_<name>_deliver`); events carry `delivery`
+  (`{"ntfy": "sent"}`), `held` and `delivery_note`.
+- The server's build (hash of `public/`) is in `/api/session`, `/api/health` and the
+  stream's `hello`; assets are served `no-cache` with an ETag and `?v=<build>`.
+

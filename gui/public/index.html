@@ -310,7 +310,7 @@
           <p class="settings-help">Letters, digits, dots, dashes and underscores. Its history and change lists are kept under this name.</p>
           <label class="inline-check"><input name="enabled" type="checkbox" checked><span>Enabled: scheduled runs back it up</span></label>
           <label>Source folder on this server
-            <input name="source" type="text" required autocomplete="off" spellcheck="false" placeholder="/var/www/clients/client0/web10/web">
+            <span class="copy-row"><input name="source" type="text" required autocomplete="off" spellcheck="false" placeholder="/var/www/clients/client0/web10/web"><button type="button" id="job-browse-source">Browse…</button></span>
           </label>
           <p class="settings-help" id="job-roots-note"></p>
           <fieldset class="radio-group">
@@ -321,15 +321,19 @@
         </fieldset>
         <fieldset class="settings-option-group">
           <legend>Where it goes</legend>
-          <label>Destination mode
+          <label>Destination
+            <select name="remote_choice" id="job-remote-choice"></select>
+          </label>
+          <p class="settings-help">Google Drive, Dropbox, OneDrive, S3 and others are set up in Admin → Destinations, or here: <button type="button" class="link-button" id="job-manage-destinations">set up a new destination…</button></p>
+          <label id="job-mode-label">Folder naming
             <select name="destination_mode">
-              <option value="fixed">fixed: a folder you name under the remote root</option>
+              <option value="fixed">fixed: a folder you name</option>
               <option value="same-name">same-name: the source folder's own name</option>
               <option value="default-root">default-root: under the default destination folder</option>
             </select>
           </label>
-          <label>Destination folder
-            <input name="destination_value" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. sites/web10">
+          <label>Folder on the destination
+            <span class="copy-row"><input name="destination_value" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. sites/web10"><button type="button" id="job-browse-destination">Browse…</button></span>
           </label>
           <label>Stop file
             <input name="stop_file" type="text" autocomplete="off" spellcheck="false" placeholder=".nosync (the global default)">
@@ -353,6 +357,37 @@
         <button id="job-save-button" value="save" type="submit" class="primary-button">Save job…</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="picker-dialog" class="dialog picker-dialog" aria-labelledby="picker-title">
+    <div class="dialog-header">
+      <div>
+        <p class="eyebrow" id="picker-eyebrow">Folder on this server</p>
+        <h2 id="picker-title">Choose a folder</h2>
+      </div>
+      <button class="icon-button small" type="button" id="picker-close" aria-label="Close">&#10005;</button>
+    </div>
+    <div class="picker-path"><button type="button" id="picker-up" title="Up one folder">&#8593; Up</button><code id="picker-current"></code></div>
+    <label class="inline-check"><input type="checkbox" id="picker-hidden"><span>Show hidden folders</span></label>
+    <ul id="picker-list" class="picker-list" aria-live="polite"></ul>
+    <div id="picker-new" class="copy-row" hidden>
+      <input type="text" id="picker-new-name" spellcheck="false" autocomplete="off" placeholder="new sub-folder (created by the first backup)" aria-label="New sub-folder name">
+    </div>
+    <div class="toolbar-row end">
+      <button type="button" id="picker-cancel">Cancel</button>
+      <button type="button" id="picker-select" class="primary-button">Use this folder</button>
+    </div>
+  </dialog>
+
+  <dialog id="remote-dialog" class="dialog remote-dialog" aria-labelledby="remote-title">
+    <div class="dialog-header">
+      <div>
+        <p class="eyebrow">Destination · an rclone remote in rclone.conf</p>
+        <h2 id="remote-title">New destination</h2>
+      </div>
+      <button class="icon-button small" type="button" id="remote-close" aria-label="Close">&#10005;</button>
+    </div>
+    <div id="remote-body"></div>
   </dialog>
 
   <div id="resource-warning" class="resource-warning" role="alert" hidden>

@@ -1,6 +1,11 @@
 #!/bin/bash
-# Shared ntfy publishing for Backup Suite. Source after common.sh and
-# load_global_config.
+# Notifications for Backup Suite. Source after common.sh and load_global_config.
+#
+# One generic message (title, priority, description, optional detail file) goes to
+# every enabled channel: notify_publish -> channel_<name>_deliver. ntfy is the first
+# channel; others (Telegram, WhatsApp, email, SMS) are added as channel_<name>_*
+# functions and listed in NOTIFY_CHANNELS. Every message is also recorded as an
+# event, with what each channel did with it.
 #
 # ntfy turns any body larger than 4096 bytes into a file attachment with no
 # readable message. Every notification therefore carries a bounded,
@@ -45,11 +50,14 @@ ntfy_priority_severity() {
     esac
 }
 
+NOTIFY_CHANNELS="ntfy"
+
 record_backup_event() {
-    # Usage: record_backup_event <info|warning|error> <category> <title> <message> [unit] [ntfy]
+    # Usage: record_backup_event <info|warning|error> <category> <title> <message> [unit] [delivery]
     # Appends one JSON line to STATE_DIR/events.jsonl for the GUI and Tunnel
-    # Manager. ntfy says what happened to the ntfy push: sent, failed, off (ntfy
-    # disabled), held (already reported in this episode), or empty (GUI only).
+    # Manager. delivery is what each channel did, "ntfy=sent,telegram=failed"
+    # (sent, failed, or off when the channel is disabled), "held" (already
+    # reported in this episode: sent nowhere), or empty (shown in the GUI only).
     # Never fails the caller.
     local severity="$1"
     local category="$2"
@@ -70,10 +78,22 @@ record_backup_event() {
         info|warning|error) ;;
         *) severity="warning" ;;
     esac
-    case "$ntfy" in
-        sent|failed|off|held|"") ;;
-        *) ntfy="" ;;
-    esac
+    local delivery_json="{}"
+    local held="false"
+    local pair channel result
+    if [ "$ntfy" = "held" ]; then
+        held="true"
+    elif [ -n "$ntfy" ]; then
+        delivery_json=""
+        for pair in ${ntfy//,/ }; do
+            channel="${pair%%=*}"
+            result="${pair#*=}"
+            [[ "$channel" =~ ^[a-z]+$ ]] || continue
+            case "$result" in sent|failed|off) ;; *) continue ;; esac
+            delivery_json="${delivery_json:+$delivery_json,}\"$channel\":\"$result\""
+        done
+        delivery_json="{${delivery_json}}"
+    fi
     message="${message:0:4000}"
     (
         flock -w 5 9 || exit 0
@@ -81,9 +101,10 @@ record_backup_event() {
         [[ "$sequence" =~ ^[0-9]+$ ]] || sequence=0
         sequence=$((sequence + 1))
         printf '%s\n' "$sequence" > "$sequence_file"
-        printf '{"seq":%s,"id":"evt-%s-%s","created_at":"%s","severity":"%s","category":"%s","title":"%s","message":"%s","unit":"%s","ntfy":"%s"}\n' \
+        printf '{"seq":%s,"id":"evt-%s-%s","created_at":"%s","severity":"%s","category":"%s","title":"%s","message":"%s","unit":"%s","delivery":%s,"held":%s,"delivery_note":"%s"}\n' \
             "$sequence" "$sequence" "$(date -u '+%s')" "$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')" "$severity" \
-            "$(json_escape "$category")" "$(json_escape "$title")" "$(json_escape "$message")" "$(json_escape "$unit")" "$ntfy" >> "$events_file"
+            "$(json_escape "$category")" "$(json_escape "$title")" "$(json_escape "$message")" "$(json_escape "$unit")" \
+            "$delivery_json" "$held" "$(json_escape "${NOTIFY_DELIVERY_NOTE:-}")" >> "$events_file"
         if [ "$(wc -l < "$events_file")" -gt $((BACKUP_EVENTS_KEEP_LINES + 100)) ]; then
             trimmed_file=$(mktemp)
             tail -n "$BACKUP_EVENTS_KEEP_LINES" "$events_file" > "$trimmed_file" && cat "$trimmed_file" > "$events_file"
@@ -93,26 +114,42 @@ record_backup_event() {
     return 0
 }
 
-ntfy_publish() {
-    # Usage: ntfy_publish <title> <priority> <tags> <message> [attachment-file] [attachment-name] [event-category]
-    # Every call is also recorded as a GUI event, whether or not ntfy is on, with
-    # what happened to the push.
-    local status=0
-    local delivery
+notify_publish() {
+    # Usage: notify_publish <title> <priority> <tags> <message> [attachment-file] [attachment-name] [event-category]
+    # Sends one message to every enabled channel and records it as an event with
+    # each channel's result. Returns non-zero when an enabled channel failed.
+    local channel
+    local status
+    local delivery=""
+    local failed=0
+    local notes=""
 
-    ntfy_deliver "$@" || status=$?
-    case "$status" in
-        0) delivery="sent" ;;
-        3) delivery="off" ;;
-        *) delivery="failed" ;;
-    esac
-    record_backup_event "$(ntfy_priority_severity "$2")" "${7:-alert}" "$1" "$4" "${BACKUP_EVENT_UNIT:-}" "$delivery"
-    [ "$status" -eq 3 ] && return 0
-    return "$status"
+    for channel in $NOTIFY_CHANNELS; do
+        NOTIFY_CHANNEL_NOTE=""
+        status=0
+        "channel_${channel}_deliver" "$@" || status=$?
+        case "$status" in
+            0) delivery="${delivery:+$delivery,}$channel=sent" ;;
+            3) delivery="${delivery:+$delivery,}$channel=off" ;;
+            *)
+                delivery="${delivery:+$delivery,}$channel=failed"
+                failed=1
+                ;;
+        esac
+        [ -n "$NOTIFY_CHANNEL_NOTE" ] && notes="${notes:+$notes; }$channel: $NOTIFY_CHANNEL_NOTE"
+    done
+    NOTIFY_DELIVERY_NOTE="$notes" record_backup_event "$(ntfy_priority_severity "$2")" "${7:-alert}" "$1" "$4" "${BACKUP_EVENT_UNIT:-}" "$delivery"
+    return "$failed"
 }
 
-ntfy_deliver() {
-    # The ntfy push itself: 0 sent, 1 not delivered, 3 ntfy is off.
+# Older name, kept for scripts that still call it.
+ntfy_publish() {
+    notify_publish "$@"
+}
+
+channel_ntfy_deliver() {
+    # The ntfy channel: 0 sent, 1 not delivered (NOTIFY_CHANNEL_NOTE says why),
+    # 3 the channel is off (NOTIFY_FAILURES_ENABLED is its switch).
     local title="$1"
     local priority="$2"
     local tags="$3"
@@ -134,10 +171,12 @@ ntfy_deliver() {
     topic_url=$(trim "${NOTIFY_NTFY_TOPIC_URL:-}")
     if [ -z "$topic_url" ]; then
         echo "NOTIFY_NTFY_TOPIC_URL is empty; cannot send: $title" >&2
+        NOTIFY_CHANNEL_NOTE="no topic URL is set"
         return 1
     fi
     if ! command -v curl >/dev/null 2>&1; then
         echo "curl is not installed; cannot send: $title" >&2
+        NOTIFY_CHANNEL_NOTE="curl is not installed"
         return 1
     fi
 
@@ -181,5 +220,6 @@ ntfy_deliver() {
     fi
 
     echo "ntfy notification could not be delivered: $title" >&2
+    NOTIFY_CHANNEL_NOTE="the ntfy server did not accept it (network, topic or token)"
     return 1
 }

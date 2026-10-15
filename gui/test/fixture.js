@@ -37,7 +37,8 @@ function makeFixture() {
     ""
   ].join("\n"));
   fs.writeFileSync(path.join(configDir, "file-sources.conf"), `1|workspace|${sourceDir}|fixed|projects/workspace|.nosync|children\n`);
-  fs.writeFileSync(path.join(configDir, "rclone.conf"), "token = rclone-fixture-secret\n");
+  fs.mkdirSync(path.join(root, "remote", "projects"), { recursive: true });
+  fs.writeFileSync(path.join(configDir, "rclone.conf"), `[fake]\ntype = alias\nremote = ${path.join(root, "remote")}\n\n[dropbox]\ntype = dropbox\ntoken = {"access_token":"rclone-fixture-secret"}\n`);
   for (const [name, target] of [["systemctl", "fake-systemctl.sh"], ["journalctl", "fake-journalctl.sh"], ["curl", "fake-curl.sh"]]) {
     fs.symlinkSync(path.join(REPO, "tests", "fixtures", target), path.join(binDir, name));
   }

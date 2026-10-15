@@ -19,9 +19,10 @@ const path = require("path");
 
 const READ_TIMEOUT_MS = 15000;
 const CHANGE_TIMEOUT_MS = 75000;
-// job.measure walks a whole source tree or asks rclone for a destination's size.
+// job.measure walks a whole source tree or asks rclone for a destination's size;
+// the remote verbs talk to the remote (OAuth, listing) through rclone.
 const SLOW_TIMEOUT_MS = 115000;
-const SLOW_VERBS = new Set(["job.measure"]);
+const SLOW_VERBS = new Set(["job.measure", "remote.test", "remote.browse", "remote.create", "remote.continue"]);
 const MAX_REPLY_BYTES = 16 * 1024 * 1024;
 
 const VERBS = {
@@ -30,7 +31,9 @@ const VERBS = {
   "profile.set": true, "profile.limits": true, "profile.override": true, "config.get": false, "config.set": true,
   "backup.start": true, "backup.stop": true, "timer.set": true, "notify.test": true, "events.since": false,
   "events.stat": false, audit: false, jobs: false, job: false, "job.changes": false, "job.log": false,
-  "job.measure": false, "job.check": false, "job.save": true, "job.enable": true, "job.remove": true, "job.run": true
+  "job.measure": false, "job.check": false, "job.save": true, "job.enable": true, "job.remove": true, "job.run": true,
+  remotes: false, "remote.create": true, "remote.continue": true, "remote.test": false, "remote.delete": true,
+  "remote.browse": false, "fs.browse": false
 };
 
 function homeDir(env) {
