@@ -1072,6 +1072,8 @@ test_watchdog_unit_and_deploy_guards() {
     assert_contains "$deploy" 'restore_previous_installation'
     assert_contains "$deploy" 'systemctl start "$TIMER_UNIT"'
     assert_contains "$deploy" '--stop-running'
+    assert_contains "$deploy" 'install_swap_cap_dropin database-backup.service'
+    assert_contains "$deploy" 'install_swap_cap_dropin database-size-check.service'
     assert_contains "$deploy" 'backup-watchdog.sh" "$SERVICE_UNIT" --self-test'
     assert_contains "$deploy" 'backup-profile.sh" set "$REQUESTED_PROFILE"'
     assert_contains "$deploy" 'backup-profile.sh" adaptive "$REQUESTED_PROFILE" "$REQUESTED_FLOOR"'

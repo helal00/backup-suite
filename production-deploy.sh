@@ -374,6 +374,28 @@ render_unit "$SOURCE_DIR/systemd/file-backup.service.template" "$UNIT_DIR/$SERVI
 render_unit "$SOURCE_DIR/systemd/backup-suite-watchdog@.service.template" "$UNIT_DIR/$WATCHDOG_TEMPLATE_UNIT"
 render_unit "$SOURCE_DIR/systemd/backup-suite-notify@.service.template" "$UNIT_DIR/backup-suite-notify@.service"
 systemd-analyze verify "$UNIT_DIR/$SERVICE_UNIT" "$UNIT_DIR/$WATCHDOG_INSTANCE_UNIT"
+
+# The database units belong to setup.sh and are not re-rendered here; only
+# their swap cap (taken from the template) is added as a drop-in, and it
+# applies from the unit's next start. MemorySwapMax needs MemoryAccounting.
+install_swap_cap_dropin() {
+    local unit_name="$1"
+    local template="$SOURCE_DIR/systemd/$unit_name.template"
+    local swap_max
+    local dropin_dir="$UNIT_DIR/$unit_name.d"
+
+    [ -f "$UNIT_DIR/$unit_name" ] || return 0
+    swap_max=$(sed -n 's/^MemorySwapMax=//p' "$template" | head -n 1)
+    [ -n "$swap_max" ] || die "$template has no MemorySwapMax."
+    install -d -m 755 -o 0 -g 0 "$dropin_dir"
+    printf '# Installed by production-deploy.sh from %s\n[Service]\nMemoryAccounting=yes\nMemorySwapMax=%s\n' \
+        "$unit_name.template" "$swap_max" > "$dropin_dir/40-swap-cap.conf.tmp"
+    chmod 644 "$dropin_dir/40-swap-cap.conf.tmp"
+    mv "$dropin_dir/40-swap-cap.conf.tmp" "$dropin_dir/40-swap-cap.conf"
+    log "Swap cap for $unit_name: $swap_max (from its next start)."
+}
+install_swap_cap_dropin database-backup.service
+install_swap_cap_dropin database-size-check.service
 systemctl daemon-reload
 
 if [ -n "$REQUESTED_LIMITS" ]; then
