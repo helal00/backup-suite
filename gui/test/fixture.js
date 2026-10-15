@@ -49,6 +49,9 @@ function makeFixture() {
   fs.writeFileSync(path.join(procDir, "pressure", "memory"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n");
   const env = {
     ...process.env,
+    // Pinned so the control script never falls back to /etc/backup-suite when
+    // the suite runs as root (production-deploy.sh runs it under sudo).
+    BACKUP_SUITE_CONFIG_DIR: configDir,
     BACKUP_SUITE_PROC_DIR: procDir,
     HOME: path.join(root, "home"),
     XDG_CONFIG_HOME: xdgConfig,
@@ -64,7 +67,6 @@ function makeFixture() {
     BACKUP_SUITE_GUI_STATE_DIR: path.join(root, "gui-state")
   };
   fs.mkdirSync(env.HOME, { recursive: true });
-  delete env.BACKUP_SUITE_CONFIG_DIR;
   delete env.INVOCATION_ID;
   return { root, env, configDir, stateDir, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
 }

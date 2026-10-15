@@ -1564,9 +1564,21 @@ test_gui_node_suite() {
         echo "Node.js 18 or newer not found; skipping the GUI tests."
         return 0
     fi
-    (cd "$ROOT_DIR/gui" && "$node_bin" --test test/*.test.js) > "$(mktemp -d)/gui-tests.log" 2>&1 || {
-        (cd "$ROOT_DIR/gui" && "$node_bin" --test test/*.test.js 2>&1 | grep -E '^not ok|error:' | head -20) >&2
+    local log_dir
+    log_dir=$(mktemp -d)
+    (cd "$ROOT_DIR/gui" && "$node_bin" --test test/*.test.js) > "$log_dir/gui-tests.log" 2>&1 || {
+        grep -E -A12 '^not ok' "$log_dir/gui-tests.log" | head -60 >&2
         fail_test 'GUI node tests failed'
+    }
+    # production-deploy.sh runs this suite under sudo, where the control script
+    # would read /etc/backup-suite unless the fixture pins its own config. Run
+    # once more as a fake root so that is caught without sudo.
+    [ "$(id -u)" -eq 0 ] && return 0
+    mkdir -p "$log_dir/fake-root-bin"
+    ln -s "$ROOT_DIR/tests/fixtures/fake-id.sh" "$log_dir/fake-root-bin/id"
+    (cd "$ROOT_DIR/gui" && PATH="$log_dir/fake-root-bin:$PATH" "$node_bin" --test test/*.test.js) > "$log_dir/gui-tests-root.log" 2>&1 || {
+        grep -E -A12 '^not ok' "$log_dir/gui-tests-root.log" | head -60 >&2
+        fail_test 'GUI node tests failed when run as root'
     }
 }
 
@@ -1576,7 +1588,7 @@ if [ "${1:-}" = "--single" ]; then
     exit $?
 fi
 
-chmod 755 "$ROOT_DIR/tests/fixtures/fake-rclone.sh" "$ROOT_DIR/tests/fixtures/fake-curl.sh" "$ROOT_DIR/tests/fixtures/fake-systemctl.sh"
+chmod 755 "$ROOT_DIR/tests/fixtures/fake-rclone.sh" "$ROOT_DIR/tests/fixtures/fake-curl.sh" "$ROOT_DIR/tests/fixtures/fake-systemctl.sh" "$ROOT_DIR/tests/fixtures/fake-id.sh"
 
 run_test 'symlink round-trip restore' test_symlink_round_trip
 run_test 'safe link migration gate and restore' test_link_migration_gate_and_restore
